@@ -2,7 +2,241 @@
 @import "tailwindcss/components";
 @import "tailwindcss/utilities";
 
+/*
+ * =========================================================================
+ * Holo Trail TCG global design tokens (Brand Guidelines v3)
+ * -------------------------------------------------------------------------
+ * These CSS custom properties are the single source of truth for the brand
+ * palette, shape and layout. Tailwind is mapped to these variables in
+ * tailwind.config.js (colours -> var(--ht-*), fonts, radius, content width).
+ * Do NOT hard-code the brand hex values in components; use the tokens or the
+ * Tailwind classes that read from them.
+ *
+ * --font-display / --font-body are injected by next/font (see lib/fonts.ts)
+ * on <html>; they already include their fallback stacks.
+ *
+ * No dark theme: there is one light brand surface for storefront and Admin.
+ * =========================================================================
+ */
+@layer base {
+  :root {
+    /* Backgrounds and surfaces */
+    --ht-background-page: #f8f7f5;
+    --ht-background-store: #f7f1e8;
+    --ht-surface: #fffdf8;
+    --ht-surface-alt: #f0e8dc;
+
+    /* Text */
+    --ht-text-primary: #162033;
+    --ht-text-muted: #5d6575;
+    --ht-text-on-dark: #f8f7f5;
+
+    /* Borders */
+    --ht-border: #d8d0c4;
+    --ht-border-strong: #c4bacb;
+
+    /* Primary action (blue). Hover/active are darker steps of #2563EB. */
+    --ht-action-primary: #2563eb;
+    --ht-action-primary-hover: #1d4ed8;
+    --ht-action-primary-active: #1e40af;
+    --ht-action-primary-text: #ffffff;
+
+    /* Secondary emphasis (purple) and navigation (navy) */
+    --ht-accent-secondary: #6d5bd0;
+    --ht-navigation: #121c30;
+
+    /* Signal cyan: the signal trail and small highlights only */
+    --ht-signal-cyan: #67e8f9;
+
+    /*
+     * Functional UI status colours. These are NOT brand accents; they exist
+     * only to communicate success/warning/error/info states accessibly on the
+     * cream surfaces. Foreground values meet AA contrast on --ht-surface;
+     * *-surface values are soft tints for alert backgrounds.
+     */
+    --ht-status-success: #15803d;
+    --ht-status-success-surface: #eaf5ec;
+    --ht-status-warning: #b45309;
+    --ht-status-warning-surface: #fbf0e2;
+    --ht-status-error: #b91c1c;
+    --ht-status-error-surface: #fbeaea;
+    --ht-status-info: #1d4ed8;
+    --ht-status-info-surface: #eaeffb;
+
+    /* Focus ring (accessible on cream surfaces) */
+    --ht-focus-ring: #2563eb;
+
+    /* Shape: square everywhere */
+    --ht-radius: 0px;
+
+    /* Layout */
+    --ht-content-width: 1440px;
+    --ht-content-gutter: 1.5rem;
+  }
+
+  /*
+   * Global base styles. Kept deliberately light so the Medusa DTC Starter's
+   * own layout and the @medusajs/ui-preset tokens keep working.
+   */
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    background-color: var(--ht-background-page);
+    color: var(--ht-text-primary);
+    font-family: var(--font-body), -apple-system, BlinkMacSystemFont, "Segoe UI",
+      Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: var(--font-display), "Arial Narrow", "Helvetica Neue",
+      Helvetica, Arial, sans-serif;
+  }
+
+  /* Accessible selection styling */
+  ::selection {
+    background-color: var(--ht-signal-cyan);
+    color: var(--ht-text-primary);
+  }
+
+  /*
+   * Visible keyboard focus everywhere using the focus token. Components may add
+   * their own ring on top; this is the safe global default.
+   */
+  :focus-visible {
+    outline: 2px solid var(--ht-focus-ring);
+    outline-offset: 2px;
+  }
+
+  /* Respect reduced-motion preferences globally. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/*
+ * Holo Trail typography utilities. One canonical scale for all storefront
+ * pages; do not invent one-off type styles. Sizes use clamp() and follow the
+ * brand ranges. Display styles use Barlow Condensed, text styles Source Sans 3.
+ */
+@layer components {
+  .ht-display-hero {
+    font-family: var(--font-display), "Arial Narrow", sans-serif;
+    font-weight: 700;
+    font-size: clamp(2.75rem, 6vw, 5.25rem); /* 44 -> 84px */
+    line-height: 1.02;
+    letter-spacing: -0.01em;
+  }
+
+  .ht-heading-page {
+    font-family: var(--font-display), "Arial Narrow", sans-serif;
+    font-weight: 600;
+    font-size: clamp(2rem, 4vw, 3rem); /* 32 -> 48px */
+    line-height: 1.05;
+    letter-spacing: -0.01em;
+  }
+
+  .ht-heading-section {
+    font-family: var(--font-display), "Arial Narrow", sans-serif;
+    font-weight: 600;
+    font-size: clamp(2.5rem, 4vw, 3.5rem); /* 40 -> 56px */
+    line-height: 1.1;
+    letter-spacing: -0.005em;
+  }
+
+  .ht-heading-card {
+    font-family: var(--font-display), "Arial Narrow", sans-serif;
+    font-weight: 600;
+    font-size: clamp(1.5rem, 2vw, 2rem); /* 24 -> 32px */
+    line-height: 1.15;
+  }
+
+  .ht-body-lg {
+    font-family: var(--font-body), sans-serif;
+    font-weight: 400;
+    font-size: clamp(1.0625rem, 1.2vw, 1.125rem); /* 17 -> 18px */
+    line-height: 1.55;
+  }
+
+  .ht-body {
+    font-family: var(--font-body), sans-serif;
+    font-weight: 400;
+    font-size: clamp(1rem, 1vw, 1.125rem); /* 16 -> 18px */
+    line-height: 1.6;
+  }
+
+  .ht-body-sm {
+    font-family: var(--font-body), sans-serif;
+    font-weight: 400;
+    font-size: 0.875rem; /* 14px */
+    line-height: 1.5;
+  }
+
+  .ht-label {
+    font-family: var(--font-body), sans-serif;
+    font-weight: 600;
+    font-size: 0.875rem; /* 14px, within the 13-15px UI range */
+    line-height: 1.3;
+    letter-spacing: 0.005em;
+  }
+
+  .ht-caption {
+    font-family: var(--font-body), sans-serif;
+    font-weight: 400;
+    font-size: 0.75rem; /* 12px */
+    line-height: 1.4;
+    color: var(--ht-text-muted);
+  }
+
+  .ht-button-text {
+    font-family: var(--font-body), sans-serif;
+    font-weight: 600;
+    font-size: 0.9375rem; /* 15px */
+    line-height: 1;
+    letter-spacing: 0.01em;
+  }
+}
+
 @layer utilities {
+  /*
+   * Skip-to-content link: visually hidden until focused, then pinned top-left
+   * so keyboard users can jump straight to <main id="main-content">.
+   */
+  .skip-to-content {
+    position: absolute;
+    left: 0.5rem;
+    top: 0.5rem;
+    z-index: 100;
+    transform: translateY(-150%);
+    background-color: var(--ht-navigation);
+    color: var(--ht-text-on-dark);
+    padding: 0.5rem 1rem;
+    font-family: var(--font-body), sans-serif;
+    font-weight: 600;
+    font-size: 0.875rem;
+    transition: transform 150ms ease;
+  }
+
+  .skip-to-content:focus {
+    transform: translateY(0);
+  }
+
   /* Chrome, Safari and Opera */
   .no-scrollbar::-webkit-scrollbar {
     display: none;
