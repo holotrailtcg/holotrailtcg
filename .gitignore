@@ -1,7 +1,70 @@
-# Environment files
+# Dependencies
+node_modules
+.pnp
+.pnp.js
+
+# Yarn 2+
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+.pnp.*
+
+# Testing
+coverage
+
+# Next.js
+**/.next/
+**/out/
+
+# Build output
+**/build
+**/dist
+
+# TypeScript incremental build info
+*.tsbuildinfo
+
+# Medusa build output
+**/.medusa/
+
+# Misc
+*.pem
+
+# Debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Turbo
+.turbo
+
+# Editor / IDE
+.vscode
+
+# Vercel
+.vercel
+
+# macOS system files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+**/.DS_Store
+
+# Environment files - never commit real secrets or local env files
 .env
 .env.*
+
+# ...but DO commit documented examples and templates (no secrets)
 !.env.example
+!**/.env.example
+!.env.template
+!**/.env.template
 
 # Local Claude settings
 .claude/settings.local.json
