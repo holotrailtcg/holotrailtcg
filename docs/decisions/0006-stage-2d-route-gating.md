@@ -20,7 +20,8 @@ launch.
 
 ### Environment variable: fail closed on anything but exact `"false"`
 
-`COMING_SOON_MODE` is read once, server-side, via a pure resolver
+`COMING_SOON_MODE` is evaluated server-side on every middleware invocation
+(not cached or read once at startup), via a pure resolver
 (`apps/storefront/src/lib/coming-soon/config.ts`):
 
 - Exact string `"true"` → gated.
@@ -105,3 +106,18 @@ in production — this is defence in depth for any other `_next/*` subpath.
 - If a future stage adds a sitemap/robots implementation, it should be
   reviewed against `COMING_SOON_MODE` at that time — flagged here, not
   solved now, since no such implementation exists yet.
+
+## Amendment (2026-07-13)
+
+The original implementation exempted any path containing a `.` from all
+middleware policy, intending to skip static assets. That check also matched
+legitimate application routes containing a dot (e.g.
+`/gb/products/card.v2`, `/gb/order/.../transfer/a.b.c`), letting them bypass
+the coming-soon gate entirely. It was replaced with an explicit,
+narrowly-matched static-asset allowlist
+(`apps/storefront/src/lib/static-assets.ts`) keyed on real file/directory
+names (`favicon.ico`, `opengraph-image.jpg`, `twitter-image.jpg`, and the
+public asset directories actually used by the storefront), not on file
+extension. See `apps/storefront/src/middleware.test.ts` for the regression
+coverage and `apps/storefront/scripts/verify-coming-soon-gate.mjs` for the
+real-HTTP verification.

@@ -222,6 +222,106 @@ describe("coming-soon route gating", () => {
     expect(isPassThrough(res)).toBe(true)
   })
 
+  it.each([
+    "/gb/products/card.v2",
+    "/gb/collections/set.v2",
+    "/gb/categories/cards.v2",
+    "/gb/order/order_123/transfer/a.b.c",
+    "/gb/order/order_123/transfer/a.b.c/accept",
+    "/gb/order/order_123/transfer/a.b.c/decline",
+  ])(
+    "gates the dotted application route %s when enabled (Codex bypass repro)",
+    async (path) => {
+      process.env.COMING_SOON_MODE = "true"
+      const res = await middleware(request(path))
+      expect(isRedirect(res)).toBe(true)
+      expect(res.headers.get("location")).toBe(`${ORIGIN}/gb/coming-soon`)
+    },
+  )
+
+  it.each([
+    "/gb/products/card.v2",
+    "/gb/collections/set.v2",
+    "/gb/categories/cards.v2",
+    "/gb/order/order_123/transfer/a.b.c",
+    "/gb/order/order_123/transfer/a.b.c/accept",
+    "/gb/order/order_123/transfer/a.b.c/decline",
+  ])(
+    "does not gate the dotted application route %s when disabled",
+    async (path) => {
+      process.env.COMING_SOON_MODE = "false"
+      const res = await middleware(request(path))
+      expect(isRedirect(res)).toBe(false)
+      expect(isPassThrough(res)).toBe(true)
+    },
+  )
+
+  it.each([
+    // NextRequest's WHATWG URL parser does not decode `%2E`/`%2F` in
+    // `pathname` — they remain literal percent-escapes, never becoming a
+    // literal "." or "/". These never hit the old dotted-path bug's literal
+    // `.includes(".")` check either way, but must still gate under the
+    // explicit static-asset allowlist, same as their decoded form.
+    "/gb/products/card%2Ev2",
+    "/gb/order/order_123/transfer/a%2Eb%2Ec",
+    "/gb/products/card%2Fv2",
+  ])("gates the encoded application route %s when enabled", async (path) => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(request(path))
+    expect(isRedirect(res)).toBe(true)
+    expect(res.headers.get("location")).toBe(`${ORIGIN}/gb/coming-soon`)
+  })
+
+  it.each([
+    "/favicon.ico",
+    "/opengraph-image.jpg",
+    "/twitter-image.jpg",
+    "/images/akin-cakiner-9cIkK-hLD9k-unsplash.jpg",
+    "/brand/holotrailtcg-full-logo.png",
+  ])("does not gate the genuine static asset path %s", async (path) => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(request(path))
+    expect(isRedirect(res)).toBe(false)
+    expect(isPassThrough(res)).toBe(true)
+  })
+
+  it("gates /gb/images/x.png because it is not a real asset route (it's an application path under the country prefix; real assets are never country-prefixed)", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(request("/gb/images/x.png"))
+    expect(isRedirect(res)).toBe(true)
+    expect(res.headers.get("location")).toBe(`${ORIGIN}/gb/coming-soon`)
+  })
+
+  it("gates an unsupported two-letter prefix path when enabled", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(request("/zz/store"))
+    expect(isRedirect(res)).toBe(true)
+    expect(res.headers.get("location")).toBe(`${ORIGIN}/gb/coming-soon`)
+  })
+
+  it("gates an uppercase country prefix path when enabled (case-sensitive prefix stripping does not exempt it)", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(request("/GB/store"))
+    expect(isRedirect(res)).toBe(true)
+    expect(res.headers.get("location")).toBe(`${ORIGIN}/gb/coming-soon`)
+  })
+
+  it("gates a path with duplicate separators when enabled", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(request("/gb//store"))
+    expect(isRedirect(res)).toBe(true)
+    expect(res.headers.get("location")).toBe(`${ORIGIN}/gb/coming-soon`)
+  })
+
+  it("leaves a newsletter confirm result page with a trailing slash accessible when enabled", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(
+      request("/gb/newsletter/confirm/?result=confirmed"),
+    )
+    expect(isRedirect(res)).toBe(false)
+    expect(isPassThrough(res)).toBe(true)
+  })
+
   it("leaves /gb/coming-soon accessible when enabled", async () => {
     process.env.COMING_SOON_MODE = "true"
     const res = await middleware(request("/gb/coming-soon"))
@@ -252,17 +352,19 @@ describe("coming-soon route gating", () => {
     expect(isPassThrough(res)).toBe(true)
   })
 
-  it("does not gate a static-asset-looking path", async () => {
-    process.env.COMING_SOON_MODE = "true"
-    const res = await middleware(request("/gb/images/x.png"))
-    expect(isRedirect(res)).toBe(false)
-    expect(isPassThrough(res)).toBe(true)
-  })
-
   it("does not gate a Next.js internal asset path", async () => {
     process.env.COMING_SOON_MODE = "true"
     const res = await middleware(
       request("/_next/image?url=%2Fgb%2Fimages%2Fx.png&w=640&q=75"),
+    )
+    expect(isRedirect(res)).toBe(false)
+    expect(isPassThrough(res)).toBe(true)
+  })
+
+  it("does not gate a Next.js internal static chunk path", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(
+      request("/_next/static/chunks/main.js"),
     )
     expect(isRedirect(res)).toBe(false)
     expect(isPassThrough(res)).toBe(true)

@@ -6,6 +6,7 @@ import {
 } from "@lib/newsletter/result-api"
 import { isAllowlistedDuringComingSoon } from "@lib/coming-soon/allowlist"
 import { resolveComingSoonMode } from "@lib/coming-soon/config"
+import { isStaticAssetPath } from "@lib/static-assets"
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_MEDUSA_BACKEND_URL
 const PUBLISHABLE_API_KEY = process.env.NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY
@@ -114,7 +115,7 @@ async function getCountryCode(
  * Middleware to handle region selection and onboarding status.
  */
 export async function middleware(request: NextRequest) {
-  if (request.nextUrl.pathname.includes(".")) {
+  if (isStaticAssetPath(request.nextUrl.pathname)) {
     return NextResponse.next()
   }
 
