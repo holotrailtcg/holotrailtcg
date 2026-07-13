@@ -197,17 +197,29 @@ function waitUntilReady(child, port, origin, getOutput) {
 }
 
 /**
- * Terminates the whole process tree Next started, awaiting real exit (or a
- * bounded timeout) so callers never hang indefinitely and never leave
- * orphaned processes behind. Windows has no process-group signalling, so it
- * shells out to `taskkill /T /F`; POSIX signals the negative pid (the process
- * group created via `detached: true` in `startStorefront`) and escalates from
- * SIGTERM to SIGKILL if the tree hasn't exited after a grace period.
+ * Terminates the whole process tree Next started, awaiting real teardown (or
+ * a bounded timeout) so callers never hang indefinitely and never leave
+ * orphaned processes behind. Resolves `null` on successful cleanup (including
+ * when the process had already exited before this ran), or a failure message
+ * describing what did not complete — the caller is responsible for treating
+ * that as a genuine failure rather than a silent best-effort.
+ *
+ * Windows has no process-group signalling, so it shells out to
+ * `taskkill /PID <pid> /T /F` and awaits that child's own `close` event,
+ * checking both its exit code and whether it failed to spawn at all. POSIX
+ * signals the negative pid (the process group created via `detached: true`
+ * in `startStorefront`) and escalates from SIGTERM to SIGKILL if the tree
+ * hasn't exited after a grace period; no further process enumeration is
+ * needed there.
+ *
+ * Completion is tracked via the Next child's `close` event (all stdio
+ * streams have ended), not `exit` alone, since `exit` can fire slightly
+ * before teardown is actually finished.
  */
 function killProcessTree(child) {
   return new Promise((resolve) => {
     if (!child || child.pid == null || child.exitCode !== null || child.signalCode !== null) {
-      resolve()
+      resolve(null)
       return
     }
 
@@ -215,29 +227,37 @@ function killProcessTree(child) {
     let graceTimer
     let overallTimer
 
-    const finish = () => {
+    const finish = (failure = null) => {
       if (settled) return
       settled = true
       clearTimeout(graceTimer)
       clearTimeout(overallTimer)
-      resolve()
+      resolve(failure)
     }
 
-    child.once("exit", finish)
+    child.once("close", () => finish(null))
 
     overallTimer = setTimeout(() => {
-      console.error(
-        `[verify-final-404] Timed out after ${TERMINATE_TIMEOUT_MS}ms waiting for pid ${child.pid} to exit; abandoning further cleanup of this process.`
+      finish(
+        `Timed out after ${TERMINATE_TIMEOUT_MS}ms waiting for the Next process (pid=${child.pid}) to exit.`
       )
-      finish()
     }, TERMINATE_TIMEOUT_MS)
 
     if (IS_WINDOWS) {
-      const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+      const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
         stdio: "ignore",
       })
-      killer.on("error", (err) => {
-        console.error(`[verify-final-404] taskkill failed to run: ${err.message}`)
+      killer.once("error", (err) => {
+        finish(`taskkill failed to run for pid ${child.pid}: ${err.message}`)
+      })
+      killer.once("close", (code) => {
+        // taskkill exits non-zero if it could not find or terminate the
+        // process. If the Next process has already exited by the time this
+        // fires (its own "close" already resolved us via `finish(null)`
+        // above, or is about to), that is successful cleanup, not a failure.
+        if (code !== 0 && child.exitCode === null && child.signalCode === null) {
+          finish(`taskkill exited with code ${code} for pid ${child.pid}`)
+        }
       })
       return
     }
@@ -267,36 +287,37 @@ function killProcessTree(child) {
   })
 }
 
-/** Closes the region stub, forcing idle/keep-alive sockets shut so `close()` cannot hang. */
+/**
+ * Closes the region stub, resolving `null` on success or a failure message
+ * describing what did not complete. Per Node's guidance, `close()` — which
+ * stops accepting new connections and fires once all existing ones end — is
+ * called first; `closeAllConnections()` follows immediately after to force
+ * any idle/keep-alive sockets shut so that `close()`'s callback cannot hang
+ * waiting on a connection that would otherwise never end on its own.
+ */
 function closeServer(server, timeoutMs = TERMINATE_TIMEOUT_MS) {
   return new Promise((resolve) => {
     if (!server.listening) {
-      resolve()
+      resolve(null)
       return
     }
 
     let settled = false
-    const finish = () => {
+    const finish = (failure = null) => {
       if (settled) return
       settled = true
-      resolve()
+      clearTimeout(timer)
+      resolve(failure)
     }
 
     const timer = setTimeout(() => {
-      console.error(
-        `[verify-final-404] Timed out after ${timeoutMs}ms closing the region stub.`
-      )
-      finish()
+      finish(`Timed out after ${timeoutMs}ms closing the region stub.`)
     }, timeoutMs)
 
-    server.closeAllConnections?.()
     server.close((err) => {
-      clearTimeout(timer)
-      if (err) {
-        console.error(`[verify-final-404] Error closing region stub: ${err.message}`)
-      }
-      finish()
+      finish(err ? `Error closing region stub: ${err.message}` : null)
     })
+    server.closeAllConnections?.()
   })
 }
 
@@ -344,7 +365,15 @@ async function main() {
   } catch (error) {
     failures.push(error instanceof Error ? error.message : String(error))
   } finally {
-    await Promise.all([killProcessTree(child), closeServer(stub)])
+    // Cleanup failures/timeouts are genuine failures, not best-effort noise:
+    // `PASSED` must never print over incomplete teardown of the Next process
+    // tree or the region stub.
+    const [killFailure, closeFailure] = await Promise.all([
+      killProcessTree(child),
+      closeServer(stub),
+    ])
+    if (killFailure) failures.push(killFailure)
+    if (closeFailure) failures.push(closeFailure)
   }
 
   if (failures.length > 0) {
