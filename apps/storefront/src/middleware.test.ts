@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 import type { NextRequest } from "next/server"
 
 /**
@@ -38,6 +38,7 @@ beforeAll(async () => {
   process.env.NEXT_PUBLIC_MEDUSA_BACKEND_URL = "http://localhost:9000"
   process.env.NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY = "pk_test"
   process.env.NEXT_PUBLIC_DEFAULT_REGION = "gb"
+  process.env.COMING_SOON_MODE = "false"
   mockRegionsFetch()
 
   const serverMod = await import("next/server")
@@ -156,5 +157,139 @@ describe("country-code middleware routing", () => {
     const res = await middleware(request("/gb/does-not-exist"))
     expect(isRedirect(res)).toBe(false)
     expect(isPassThrough(res)).toBe(true)
+  })
+})
+
+describe("coming-soon route gating", () => {
+  afterEach(() => {
+    process.env.COMING_SOON_MODE = "false"
+  })
+
+  it("gates a shop/store route when enabled", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(request("/gb/store"))
+    expect(isRedirect(res)).toBe(true)
+    expect(res.headers.get("location")).toBe(`${ORIGIN}/gb/coming-soon`)
+  })
+
+  it("gates a product route when enabled", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(request("/gb/products/some-card"))
+    expect(res.headers.get("location")).toBe(`${ORIGIN}/gb/coming-soon`)
+  })
+
+  it("gates cart when enabled", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(request("/gb/cart"))
+    expect(res.headers.get("location")).toBe(`${ORIGIN}/gb/coming-soon`)
+  })
+
+  it("gates checkout when enabled", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(request("/gb/checkout"))
+    expect(res.headers.get("location")).toBe(`${ORIGIN}/gb/coming-soon`)
+  })
+
+  it("gates account when enabled", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(request("/gb/account"))
+    expect(res.headers.get("location")).toBe(`${ORIGIN}/gb/coming-soon`)
+  })
+
+  it("gates order routes when enabled", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(request("/gb/order/order_123/confirmed"))
+    expect(res.headers.get("location")).toBe(`${ORIGIN}/gb/coming-soon`)
+  })
+
+  it("gates the home route when enabled", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(request("/gb"))
+    expect(res.headers.get("location")).toBe(`${ORIGIN}/gb/coming-soon`)
+  })
+
+  it("redirects an unprefixed hidden route directly to the country-aware coming-soon page in one hop", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(request("/store"))
+    expect(isRedirect(res)).toBe(true)
+    expect(res.headers.get("location")).toBe(`${ORIGIN}/gb/coming-soon`)
+  })
+
+  it("does not redirect a shop/store route when disabled", async () => {
+    process.env.COMING_SOON_MODE = "false"
+    const res = await middleware(request("/gb/store"))
+    expect(isRedirect(res)).toBe(false)
+    expect(isPassThrough(res)).toBe(true)
+  })
+
+  it("leaves /gb/coming-soon accessible when enabled", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(request("/gb/coming-soon"))
+    expect(isRedirect(res)).toBe(false)
+    expect(isPassThrough(res)).toBe(true)
+  })
+
+  it("leaves /gb/privacy accessible when enabled", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(request("/gb/privacy"))
+    expect(isRedirect(res)).toBe(false)
+    expect(isPassThrough(res)).toBe(true)
+  })
+
+  it("leaves a newsletter confirm result page accessible when enabled", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(request("/gb/newsletter/confirm?result=confirmed"))
+    expect(isRedirect(res)).toBe(false)
+    expect(isPassThrough(res)).toBe(true)
+  })
+
+  it("leaves a newsletter unsubscribe result page accessible when enabled", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(
+      request("/gb/newsletter/unsubscribe?result=unsubscribed"),
+    )
+    expect(isRedirect(res)).toBe(false)
+    expect(isPassThrough(res)).toBe(true)
+  })
+
+  it("does not gate a static-asset-looking path", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(request("/gb/images/x.png"))
+    expect(isRedirect(res)).toBe(false)
+    expect(isPassThrough(res)).toBe(true)
+  })
+
+  it("does not gate a Next.js internal asset path", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const res = await middleware(
+      request("/_next/image?url=%2Fgb%2Fimages%2Fx.png&w=640&q=75"),
+    )
+    expect(isRedirect(res)).toBe(false)
+    expect(isPassThrough(res)).toBe(true)
+  })
+
+  it("does not create a redirect loop when repeatedly requesting the coming-soon page", async () => {
+    process.env.COMING_SOON_MODE = "true"
+    const first = await middleware(request("/gb/coming-soon"))
+    expect(isRedirect(first)).toBe(false)
+    const second = await middleware(request("/gb/coming-soon"))
+    expect(isRedirect(second)).toBe(false)
+  })
+
+  it.each(["TRUE", "1", "", "yes"])(
+    "gates the store for the malformed COMING_SOON_MODE value %j (fail closed)",
+    async (value) => {
+      process.env.COMING_SOON_MODE = value
+      const res = await middleware(request("/gb/store"))
+      expect(isRedirect(res)).toBe(true)
+      expect(res.headers.get("location")).toBe(`${ORIGIN}/gb/coming-soon`)
+    },
+  )
+
+  it("gates the store when COMING_SOON_MODE is unset (fail closed)", async () => {
+    delete process.env.COMING_SOON_MODE
+    const res = await middleware(request("/gb/store"))
+    expect(isRedirect(res)).toBe(true)
+    expect(res.headers.get("location")).toBe(`${ORIGIN}/gb/coming-soon`)
   })
 })

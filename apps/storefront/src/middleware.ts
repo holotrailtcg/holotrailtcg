@@ -4,6 +4,8 @@ import {
   getConfirmationResult,
   getUnsubscribeResult,
 } from "@lib/newsletter/result-api"
+import { isAllowlistedDuringComingSoon } from "@lib/coming-soon/allowlist"
+import { resolveComingSoonMode } from "@lib/coming-soon/config"
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_MEDUSA_BACKEND_URL
 const PUBLISHABLE_API_KEY = process.env.NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY
@@ -116,6 +118,13 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next()
   }
 
+  // Defence in depth alongside the matcher config below, which already
+  // excludes `_next/static` and `_next/image` but not every `_next/*`
+  // subpath.
+  if (request.nextUrl.pathname.startsWith("/_next/")) {
+    return NextResponse.next()
+  }
+
   const cacheIdCookie = request.cookies.get("_medusa_cache_id")
   const cacheId = cacheIdCookie?.value || crypto.randomUUID()
 
@@ -147,6 +156,20 @@ export async function middleware(request: NextRequest) {
     response.headers.set("Referrer-Policy", "no-referrer")
     response.headers.set("X-Robots-Tag", "noindex, nofollow")
     return response
+  }
+
+  if (resolveComingSoonMode()) {
+    const logicalPath = urlHasCountry
+      ? request.nextUrl.pathname.replace(new RegExp(`^/${country}(?=/|$)`), "") || "/"
+      : request.nextUrl.pathname
+
+    if (!isAllowlistedDuringComingSoon(logicalPath)) {
+      const comingSoonUrl = new URL(
+        `/${country}/coming-soon`,
+        request.nextUrl.origin,
+      )
+      return redirectWithoutBody(comingSoonUrl)
+    }
   }
 
   if (urlHasCountry) {

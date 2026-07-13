@@ -109,6 +109,24 @@ Admin is disabled only when the value is the exact case-sensitive string
   `NEXT_PUBLIC_DEFAULT_REGION=gb`. `NEXT_PUBLIC_STRIPE_KEY` remains unused.
 - Next.js supplies `NODE_ENV`; do not set it in `.env.local`.
 
+## Stage 2D launch gate
+
+`COMING_SOON_MODE` (Storefront `.env.local`; storefront template) is a
+server-only route-gating switch read in `apps/storefront/src/middleware.ts`
+via `resolveComingSoonMode` (`src/lib/coming-soon/config.ts`). It is
+deliberately not `NEXT_PUBLIC_` — it is only ever read server-side and never
+reaches the browser bundle.
+
+| Value | Behaviour |
+| --- | --- |
+| Exact string `"true"` | Coming-soon mode is enabled: only `/coming-soon`, `/privacy`, `/newsletter/confirm` and `/newsletter/unsubscribe` (each country-prefixed) are reachable; every other storefront route redirects (307) to the country-aware coming-soon page. |
+| Exact string `"false"` | Coming-soon mode is disabled: the full Medusa DTC storefront routes normally. |
+| Missing, empty, or any other value (e.g. `"TRUE"`, `"1"`) | Fails closed — treated the same as `"true"`. The unfinished store must never be exposed by an unset or mistyped variable. |
+
+No new dependency, secret, or backend change is introduced by this
+variable — see `docs/decisions/0006-stage-2d-route-gating.md` for the full
+design rationale (allowlist policy, fail-closed default).
+
 ## Test database safety
 
 Before any automated database-backed test or reviewed migration command, load

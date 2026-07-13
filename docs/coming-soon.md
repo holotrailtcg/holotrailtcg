@@ -113,13 +113,30 @@ here, so the country-code middleware localises the link to
 copied classes. It does **not** implement coming-soon route protection — Stage 2D
 controls which routes return which experience.
 
-## Routing note (for Stage 2D)
+## Routing note (Stage 2D route gating)
 
-The coming-soon and privacy pages have country-aware entry points under
-`[countryCode]`, so the country-code middleware's redirect (`/coming-soon` →
-`/{country}/coming-soon`) resolves to a working page. This stage does not change
-the middleware itself and does **not** implement Stage 2D route protection —
-Stage 2D still owns deciding how the coming-soon experience is served/gated.
+Stage 2D implements the route gate this section previously deferred. The
+coming-soon and privacy pages keep their country-aware entry points under
+`[countryCode]`, and `COMING_SOON_MODE` (see
+`docs/operations/environment-variables.md`) now controls whether the rest of
+the storefront is reachable:
+
+- `apps/storefront/src/lib/coming-soon/config.ts` — `resolveComingSoonMode`
+  reads `COMING_SOON_MODE` server-side; only the exact string `"true"`/
+  `"false"` change the outcome, anything else fails closed (gates).
+- `apps/storefront/src/lib/coming-soon/allowlist.ts` —
+  `isAllowlistedDuringComingSoon` lists the only routes that remain reachable
+  while gated: `/coming-soon`, `/privacy`, `/newsletter/confirm`,
+  `/newsletter/unsubscribe`. This is an allowlist, not a blocklist of store
+  routes, so new commerce routes added later are gated automatically.
+- `apps/storefront/src/middleware.ts` redirects any non-allowlisted path to
+  `/{country}/coming-soon` (one hop, no query string carried over) before any
+  protected page renders, whether or not the request already had a country
+  prefix.
+
+See `docs/decisions/0006-stage-2d-route-gating.md` for the full design
+rationale, and `apps/storefront/src/middleware.test.ts`'s "coming-soon route
+gating" suite for the covered test matrix.
 
 ## Assets Scott must supply
 
