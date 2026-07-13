@@ -95,3 +95,35 @@ populated with placeholder-only values matching the blocks above. The
 `.claude/settings.json` deny rule permits editing these committed templates while
 still blocking all real secret files (`.env`, `.env.local`, `.env.development`,
 `.env.production`, `.env.test`, `*.env.*.local`).
+
+## Backend — Stage 2C.4 newsletter abuse-protection variables
+
+All backend-only (`apps/backend/.env` locally, `apps/backend/.env.template`
+committed). None of these is exposed to the storefront and none uses
+`NEXT_PUBLIC_`. No public route calls the rate limiter or reCAPTCHA
+verifier yet (Stage 2C.5+), so none of these is required to boot the
+backend today — they become required only once a route resolves them.
+Every reader (`resolveRateLimitConfig`, `resolveRecaptchaConfig` in
+`apps/backend/src/modules/newsletter/{rate-limit,recaptcha}/config.ts`)
+throws on missing or invalid input in every environment; there is no
+environment-specific default, which is what makes "production fails
+closed on missing configuration" true without an explicit `NODE_ENV`
+branch.
+
+| Variable | Owner | Secret or config | Local file | Committed template | Local requirement | Test requirement | Vercel | Future Medusa-host requirement | Validation | Fail-closed behaviour |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `NEWSLETTER_RATE_LIMIT_WINDOW_SECONDS` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Not required until a route uses the rate limiter | Unit tests pass explicit fake env objects, not real env | None | None | Integer, 1–86,400 | Missing/invalid throws (never resolves to `allowed: true`) |
+| `NEWSLETTER_RATE_LIMIT_MAX_REQUESTS` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Not required until a route uses the rate limiter | Unit tests pass explicit fake env objects | None | None | Integer, 1–1,000 | Same as above |
+| `NEWSLETTER_RATE_LIMIT_HASH_SECRET` | Backend | Secret | `apps/backend/.env` | `apps/backend/.env.template` | Not required until a route uses the rate limiter | Unit tests pass explicit fake env objects; never a real secret | None | None | Non-empty string, ≥32 characters | Same as above |
+| `NEWSLETTER_TRUST_PROXY` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Leave `false`/unset until the Medusa host and its trusted proxy header are confirmed | Not required by current tests | None | Must be set together with `NEWSLETTER_TRUSTED_IP_HEADER` once the host is chosen | `true`/anything else | `true` without a header name throws |
+| `NEWSLETTER_TRUSTED_IP_HEADER` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Leave unset until the Medusa host is confirmed | Not required by current tests | None | Header name the confirmed host actually sets on trusted requests | Non-empty string | Only trusted when `NEWSLETTER_TRUST_PROXY=true` |
+| `RECAPTCHA_SECRET_KEY` | Backend | Secret | `apps/backend/.env` | `apps/backend/.env.template` | Not required until a route uses the verifier | Unit tests inject a resolved config object, not real env; never a real Google secret | None | None | Non-empty string | Missing/invalid throws |
+| `NEWSLETTER_RECAPTCHA_MIN_SCORE` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Not required until a route uses the verifier | Same as above | None | None | Number, 0.0–1.0 | Same as above |
+| `NEWSLETTER_RECAPTCHA_ALLOWED_HOSTNAMES` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Optional; unset disables hostname validation | Same as above | None | Storefront's confirmed production/preview hostnames | Comma-separated hostnames | Unset → hostname check skipped; malformed entry throws |
+| `NEWSLETTER_RECAPTCHA_MAX_TOKEN_AGE_SECONDS` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Optional; defaults to 120 seconds | Same as above | None | None | Integer, 1–300 | Malformed value throws |
+
+`apps/backend/.env.test.template` documents the same variables with
+clearly fake placeholder values, for a developer who wants to exercise the
+config readers against a real `.env.test` — the automated test suite
+itself never depends on real `.env.test` values for these, since the unit
+tests construct fake env objects directly.

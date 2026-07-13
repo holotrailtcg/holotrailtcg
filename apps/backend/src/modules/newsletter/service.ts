@@ -36,7 +36,7 @@ interface NewsletterTransactionManager {
     params?: unknown[]
   ): Promise<T[]>
 }
-interface NewsletterEntityManager {
+interface NewsletterEntityManager extends NewsletterTransactionManager {
   transactional<T>(
     cb: (manager: NewsletterTransactionManager) => Promise<T>
   ): Promise<T>
@@ -333,6 +333,54 @@ class NewsletterModuleService extends MedusaService({
 
       return { outcome: "UNSUBSCRIBED" as const }
     })
+  }
+
+  /**
+   * Atomically increments the rate-limit bucket for `(requestKey,
+   * windowStart)`, creating it with `count = 1` if it does not yet exist,
+   * and returns the resulting count. Single `INSERT ... ON CONFLICT ...
+   * DO UPDATE ... RETURNING` statement — Postgres guarantees this cannot
+   * lose a concurrent increment (no separate select-then-write step, per
+   * docs/decisions/0005). The `ON CONFLICT` target matches the partial
+   * unique index Medusa generated for this soft-deletable model exactly
+   * (`WHERE deleted_at IS NULL`), which Postgres requires for conflict
+   * inference against a partial index.
+   */
+  async incrementRateLimitBucket(requestKey: string, windowStart: Date): Promise<number> {
+    const newId = generateEntityId(undefined, "nlrl")
+    const [row] = await this.manager_.execute<{ count: number }>(
+      `insert into newsletter_rate_limit_bucket (id, request_key, window_start, count)
+       values (?, ?, ?, 1)
+       on conflict (request_key, window_start) where deleted_at is null
+       do update set count = newsletter_rate_limit_bucket.count + 1
+       returning count`,
+      [newId, requestKey, windowStart]
+    )
+    return row.count
+  }
+
+  /**
+   * Deletes rate-limit buckets whose `window_start` is older than `cutoff`
+   * and returns the number of rows removed. Uses the indexed
+   * `window_start` predicate. Bounded per call via `batchSize` (a plain
+   * unbounded `DELETE` across a potentially large table is avoided);
+   * callers (the scheduled job) may invoke this repeatedly — it is
+   * idempotent and safe to run again immediately (a second run with the
+   * same cutoff simply deletes zero rows).
+   */
+  async cleanupExpiredRateLimitBuckets(cutoff: Date, batchSize = 10_000): Promise<number> {
+    const rows = await this.manager_.execute<{ id: string }>(
+      `delete from newsletter_rate_limit_bucket
+       where id in (
+         select id from newsletter_rate_limit_bucket
+         where window_start < ? and deleted_at is null
+         order by window_start
+         limit ?
+       )
+       returning id`,
+      [cutoff, batchSize]
+    )
+    return rows.length
   }
 }
 

@@ -716,6 +716,169 @@ diverges from the 2C.1 design.
   design assumed, because the unsubscribe token cannot exist before
   confirmation and is always invalidated on resubscription.
 
+## Stage 2C.4 implementation notes
+
+Stage 2C.4 implemented the internal rate-limiting and reCAPTCHA
+verification boundaries described in the "Rate limiting" and "reCAPTCHA"
+sections above, as standalone, narrowly-scoped units with no public route
+consuming them yet. Recorded here are the concrete outcomes and the places
+implementation diverged from the 2C.1 design.
+
+- **Module layout:** `apps/backend/src/modules/newsletter/rate-limit/`
+  (`config.ts`, `request-key.ts`, `client-address.ts`, `window.ts`,
+  `types.ts`, `rate-limiter.ts`, `cleanup.ts`) and
+  `apps/backend/src/modules/newsletter/recaptcha/` (`config.ts`,
+  `verify.ts`), plus a small shared `apps/backend/src/modules/newsletter/shared/env-parsing.ts`
+  (zod building blocks reused by both config readers, so the "required,
+  bounded, numeric-string" parsing pattern is written once). Each concern
+  (config parsing, key derivation, address extraction, window math,
+  database increment, cleanup, provider verification) is its own file,
+  independently unit-testable, per the brief's "keep these separated
+  enough to test directly."
+- **Configuration:** `resolveRateLimitConfig` and `resolveRecaptchaConfig`
+  both take an optional `env` parameter (defaulting to `process.env`) and
+  always throw a `MedusaError` on missing or invalid required input, in
+  every environment — there is no `NODE_ENV`-specific branch or default.
+  This is what makes "production fails closed on missing configuration"
+  true by construction: nothing downstream can be reached without a
+  successful call to one of these functions. Documented bounds: rate-limit
+  window 1–86,400 seconds; max requests 1–1,000; hash secret ≥32
+  characters; reCAPTCHA min score 0.0–1.0; max token age 1–300 seconds
+  (default 120, matching Google's documented ~2-minute token lifetime).
+- **Request-key derivation:** `deriveRateLimitRequestKey` —
+  `HMAC-SHA256(hashSecret, clientAddress)`, hex-encoded, 64 characters
+  (full digest, never truncated), exactly as designed in 2C.1.
+- **Client-address extraction:** `client-address.ts` implements the
+  narrow, non-generic trust model the 2C.1 "Risks" section flagged as
+  unresolved. Because the Medusa production host is still undecided, the
+  implementation does **not** assume the storefront-forwards-a-custom-header
+  design sketched in 2C.1; instead it exposes two independently testable
+  primitives — `resolveTrustedProxyConfig` (reads
+  `NEWSLETTER_TRUST_PROXY`/`NEWSLETTER_TRUSTED_IP_HEADER`) and
+  `extractClientAddress` (given a `{ socketRemoteAddress, headers }`
+  context and that config, returns a validated address or a typed failure)
+  — so whichever forwarding contract the eventual host requires can be
+  wired in later without changing the trust logic itself. By default *no*
+  header is trusted; enabling header trust requires both env vars set
+  together (a half-configured trust mode throws rather than silently
+  falling back). A configured header must carry exactly one value — an
+  array (repeated header) or a comma-separated chain (the classic
+  `X-Forwarded-For` shape) is rejected outright, since no multi-hop trust
+  boundary is defined. Addresses are validated with Node's built-in
+  `net.isIP` (no new dependency); IPv4-mapped IPv6, bracket/port and
+  zone-id forms are normalised before validation. **Deferred to whoever
+  finalises the Medusa host:** confirm the actual header name Medusa will
+  see behind that host's proxy (or confirm no proxy sits in front of
+  Medusa at all, in which case `NEWSLETTER_TRUST_PROXY` stays `false` and
+  the direct socket address is used) and set
+  `NEWSLETTER_TRUST_PROXY`/`NEWSLETTER_TRUSTED_IP_HEADER` accordingly.
+- **Fixed window:** `resolveRateLimitWindow` floors epoch seconds (not
+  local calendar time) to a multiple of the configured window length,
+  exactly as designed — no timezone or DST dependence, deterministic given
+  an injected `now`.
+- **Atomic increment:** added directly to `NewsletterModuleService`
+  (`incrementRateLimitBucket`), using the same raw-SQL
+  `container.manager`/`manager.execute` pattern Stage 2C.3 established for
+  the subscriber lifecycle (not a separate service) — single statement:
+  `INSERT ... ON CONFLICT (request_key, window_start) WHERE deleted_at IS
+  NULL DO UPDATE SET count = count + 1 RETURNING count`. The `WHERE
+  deleted_at IS NULL` conflict-target clause is required because Medusa
+  generated the underlying unique index as a **partial** index scoped that
+  way (confirmed against `Migration20260713170838.ts`); Postgres requires
+  the `ON CONFLICT` target to match a partial index's predicate exactly
+  for conflict inference. No schema change was needed — the Stage 2C.2/2C.3
+  `RateLimitBucket` model already had everything this statement requires.
+- **Threshold semantics:** a resulting count `<= maxRequests` is allowed; a
+  count strictly greater than `maxRequests` is denied. The bucket is never
+  deleted on denial — it simply resets naturally in the next window.
+- **Orchestration:** `rate-limit/rate-limiter.ts` exports a standalone
+  `checkRateLimit({ store, clientAddress, config, now? })` function rather
+  than adding this to `NewsletterModuleService` directly — `store` is a
+  one-method interface (`incrementRateLimitBucket`) satisfied by the
+  module service in production and by an in-memory fake in unit tests.
+  This keeps the full allow/deny decision testable without a database.
+  Every internal failure path (HMAC derivation error, database error) is
+  caught and converted into `{ allowed: false, reason: ... }` — this
+  function can never resolve with `allowed: true` on a failure.
+- **Internal result type:** `RateLimitOutcome` carries only `allowed`,
+  `limit`, `remaining` (clamped to zero), `retryAfterSeconds`, `windowEndsAt`,
+  and (only on denial) an internal `reason` — never the raw address, the
+  HMAC secret, or the request key.
+- **Cleanup:** `NewsletterModuleService.cleanupExpiredRateLimitBuckets(cutoff,
+  batchSize = 10_000)` — a bounded `DELETE ... WHERE id IN (SELECT id ...
+  WHERE window_start < cutoff ... LIMIT batchSize)` against the indexed
+  `window_start` column, idempotent (a repeated call with the same cutoff
+  deletes zero further rows). `src/jobs/newsletter-rate-limit-cleanup.ts`
+  is a Medusa scheduled job (`schedule: "0 * * * *"`, hourly) that computes
+  the cutoff via the pure, independently-tested
+  `computeRateLimitCleanupCutoff(now, windowSeconds, retentionWindows)`
+  (retention = 3 completed windows, so the cutoff is always strictly
+  before the active window's `windowStart` and the active bucket is never
+  touched) and logs only the aggregate deleted-row count — never a request
+  key or bucket id.
+- **reCAPTCHA verification endpoint:** `GoogleRecaptchaVerifier` (implements
+  a small `RecaptchaVerifier` interface) POSTs `secret` and `response`
+  (the token) to `https://www.google.com/recaptcha/api/siteverify` as
+  `application/x-www-form-urlencoded`, via the runtime's global `fetch`
+  (injectable for tests, no new HTTP dependency). `remoteip` is
+  deliberately never sent — per the brief, the project's "avoid raw-IP
+  handling where practical" rule outweighs the marginal signal it would
+  add. Bounded 5-second timeout via `AbortController`; a timeout, network
+  failure, non-2xx response, or malformed JSON all resolve to
+  `{ verified: false, reason: "PROVIDER_ERROR" | "INVALID_RESPONSE" }`
+  (fail closed), never a thrown exception.
+- **Checks, in the order specified by the brief:** empty/missing token
+  (short-circuits before any network call) → provider JSON parses →
+  `success === true` (provider `error-codes` mapped to
+  `MISCONFIGURED`/`EXPIRED_TOKEN`/`MISSING_TOKEN`/`INVALID_RESPONSE`, else
+  `PROVIDER_ERROR`) → `action === "newsletter_subscribe"` (hard-coded
+  constant, not a caller-supplied parameter — a compromised caller must
+  not be able to widen what counts as a valid action) → `score` is a
+  finite number in `[0, 1]` and `>= minScore` (equal to the threshold
+  passes) → hostname, only when `allowedHostnames` is configured →
+  `challenge_ts` present, parseable, and within
+  `[-5s tolerance, +maxTokenAgeSeconds]` of now (a missing or malformed
+  timestamp is treated as `EXPIRED_TOKEN`, never as valid, since it would
+  otherwise skip age verification entirely).
+- **Result type:** `RecaptchaVerificationResult` is `{ verified: true }` or
+  `{ verified: false; reason: RecaptchaVerificationReason }` — the eight
+  reasons listed in the brief, nothing else. The token, the secret, and
+  the full provider response body are never included in the result, never
+  thrown in an exception, and never logged (`verify.ts` contains no
+  logging calls at all).
+- **Test-only bypass:** no bypass code exists inside `GoogleRecaptchaVerifier` —
+  it does not read `process.env`, does not branch on `NODE_ENV`, and does
+  not special-case any token string. `RecaptchaVerifier` is an interface;
+  automated tests requiring a fake verifier define one locally inside the
+  test file itself
+  (`recaptcha/__tests__/bypass.unit.spec.ts`'s `FakeRecaptchaVerifier`),
+  never exported from `src/`, so there is no bypass symbol a production
+  route could accidentally import. `bypass.unit.spec.ts` additionally
+  proves, behaviourally, that setting `NODE_ENV=production` together with
+  env vars that *look* like bypass flags (`RECAPTCHA_BYPASS`,
+  `NEWSLETTER_RECAPTCHA_TEST_BYPASS`) does not change `GoogleRecaptchaVerifier`'s
+  behaviour, and that no "magic" token string short-circuits verification.
+- **Schema:** no migration was required — the Stage 2C.2 `RateLimitBucket`
+  model (`request_key`, `window_start`, `count`, plus the composite unique
+  index) already supports every operation this stage adds.
+- **Deviation summary:** (1) the 2C.1 design's specific
+  "storefront-computes-a-trusted-header, Medusa-trusts-it-unconditionally"
+  contract was generalised into a configurable, off-by-default
+  `NEWSLETTER_TRUST_PROXY`/`NEWSLETTER_TRUSTED_IP_HEADER` pair, because the
+  Medusa host (and therefore the real proxy topology) is still undecided —
+  flagged in 2C.1's own "Risks" section as needing confirmation before
+  coding, so this is the conservative abstraction that section asked for,
+  not a rejection of the original idea; (2) the atomic increment and
+  cleanup methods were added directly to `NewsletterModuleService`
+  (mirroring the 2C.3 precedent of raw-SQL methods on the module service)
+  rather than a separate internal service, since no second bounded context
+  emerged that would justify one; (3) the rate-limit allow/deny decision
+  itself (`checkRateLimit`) was kept as a standalone function taking an
+  injected store interface, rather than a service method, specifically so
+  it stays testable without a database — this is a narrower version of the
+  same "keep the pure decision logic separate from the persistence call"
+  pattern used throughout this stage.
+
 ## Consequences
 
 - Stage 2C.2+ implements this design: models, migrations, module service,

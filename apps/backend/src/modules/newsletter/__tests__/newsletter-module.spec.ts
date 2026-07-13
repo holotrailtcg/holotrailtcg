@@ -679,3 +679,154 @@ describe("newsletter lifecycle concurrency", () => {
     }
   })
 })
+
+describe("incrementRateLimitBucket — atomic increment (Stage 2C.4)", () => {
+  it("returns a count of one for the first request in a window", async () => {
+    const requestKey = `rk-${uniqueSuffix()}`
+    const windowStart = new Date("2026-07-13T14:00:00.000Z")
+    const count = await service.incrementRateLimitBucket(requestKey, windowStart)
+    expect(count).toBe(1)
+  })
+
+  it("increments sequentially for repeated requests in the same window", async () => {
+    const requestKey = `rk-${uniqueSuffix()}`
+    const windowStart = new Date("2026-07-13T14:01:00.000Z")
+    const first = await service.incrementRateLimitBucket(requestKey, windowStart)
+    const second = await service.incrementRateLimitBucket(requestKey, windowStart)
+    const third = await service.incrementRateLimitBucket(requestKey, windowStart)
+    expect([first, second, third]).toEqual([1, 2, 3])
+  })
+
+  it("stores exactly one row per (request_key, window_start) pair", async () => {
+    const requestKey = `rk-${uniqueSuffix()}`
+    const windowStart = new Date("2026-07-13T14:02:00.000Z")
+    await service.incrementRateLimitBucket(requestKey, windowStart)
+    await service.incrementRateLimitBucket(requestKey, windowStart)
+    await service.incrementRateLimitBucket(requestKey, windowStart)
+
+    const rows = await service.listRateLimitBuckets({
+      request_key: requestKey,
+      window_start: windowStart,
+    })
+    expect(rows).toHaveLength(1)
+    expect(rows[0].count).toBe(3)
+  })
+
+  it("does not affect a different request key in the same window", async () => {
+    const suffix = uniqueSuffix()
+    const windowStart = new Date("2026-07-13T14:03:00.000Z")
+    await service.incrementRateLimitBucket(`rk-a-${suffix}`, windowStart)
+    const otherCount = await service.incrementRateLimitBucket(`rk-b-${suffix}`, windowStart)
+    expect(otherCount).toBe(1)
+  })
+
+  it("resets to one in the next window for the same key", async () => {
+    const requestKey = `rk-${uniqueSuffix()}`
+    const firstWindow = new Date("2026-07-13T14:04:00.000Z")
+    const secondWindow = new Date("2026-07-13T14:05:00.000Z")
+    await service.incrementRateLimitBucket(requestKey, firstWindow)
+    await service.incrementRateLimitBucket(requestKey, firstWindow)
+    const nextWindowCount = await service.incrementRateLimitBucket(requestKey, secondWindow)
+    expect(nextWindowCount).toBe(1)
+  })
+
+  it("never stores a raw-IP-shaped column on the bucket row", async () => {
+    const requestKey = `rk-${uniqueSuffix()}`
+    const windowStart = new Date("2026-07-13T14:06:00.000Z")
+    await service.incrementRateLimitBucket(requestKey, windowStart)
+    const [row] = await service.listRateLimitBuckets({
+      request_key: requestKey,
+      window_start: windowStart,
+    })
+    const keys = Object.keys(row)
+    expect(keys).not.toContain("ip")
+    expect(keys).not.toContain("ip_address")
+    expect(keys).not.toContain("raw_ip")
+  })
+
+  it("produces an exact final count under real concurrency, with no lost updates", async () => {
+    const requestKey = `rk-${uniqueSuffix()}`
+    const windowStart = new Date("2026-07-13T14:07:00.000Z")
+    const concurrentRequests = 25
+
+    const results = await Promise.all(
+      Array.from({ length: concurrentRequests }, () =>
+        service.incrementRateLimitBucket(requestKey, windowStart)
+      )
+    )
+
+    // Every concurrent increment must have observed a distinct count —
+    // duplicates would mean a lost update.
+    const uniqueCounts = new Set(results)
+    expect(uniqueCounts.size).toBe(concurrentRequests)
+    expect(Math.max(...results)).toBe(concurrentRequests)
+
+    const rows = await service.listRateLimitBuckets({
+      request_key: requestKey,
+      window_start: windowStart,
+    })
+    expect(rows).toHaveLength(1)
+    expect(rows[0].count).toBe(concurrentRequests)
+  })
+})
+
+describe("cleanupExpiredRateLimitBuckets (Stage 2C.4)", () => {
+  it("removes buckets older than the cutoff", async () => {
+    const requestKey = `rk-${uniqueSuffix()}`
+    const oldWindow = new Date("2020-01-01T00:00:00.000Z")
+    await service.incrementRateLimitBucket(requestKey, oldWindow)
+
+    const cutoff = new Date("2025-01-01T00:00:00.000Z")
+    const deletedCount = await service.cleanupExpiredRateLimitBuckets(cutoff)
+    expect(deletedCount).toBeGreaterThanOrEqual(1)
+
+    const rows = await service.listRateLimitBuckets({
+      request_key: requestKey,
+      window_start: oldWindow,
+    })
+    expect(rows).toHaveLength(0)
+  })
+
+  it("retains a bucket at or after the cutoff (the active window)", async () => {
+    const requestKey = `rk-${uniqueSuffix()}`
+    const recentWindow = new Date(Date.now() - 5_000)
+    await service.incrementRateLimitBucket(requestKey, recentWindow)
+
+    const cutoff = new Date("2020-01-01T00:00:00.000Z")
+    await service.cleanupExpiredRateLimitBuckets(cutoff)
+
+    const rows = await service.listRateLimitBuckets({
+      request_key: requestKey,
+      window_start: recentWindow,
+    })
+    expect(rows).toHaveLength(1)
+  })
+
+  it("retains a future bucket", async () => {
+    const requestKey = `rk-${uniqueSuffix()}`
+    const futureWindow = new Date(Date.now() + 60 * 60 * 1000)
+    await service.incrementRateLimitBucket(requestKey, futureWindow)
+
+    const cutoff = new Date("2020-01-01T00:00:00.000Z")
+    await service.cleanupExpiredRateLimitBuckets(cutoff)
+
+    const rows = await service.listRateLimitBuckets({
+      request_key: requestKey,
+      window_start: futureWindow,
+    })
+    expect(rows).toHaveLength(1)
+  })
+
+  it("is idempotent: a repeated cleanup with the same cutoff deletes nothing further", async () => {
+    const requestKey = `rk-${uniqueSuffix()}`
+    const oldWindow = new Date("2020-06-01T00:00:00.000Z")
+    await service.incrementRateLimitBucket(requestKey, oldWindow)
+
+    const cutoff = new Date("2025-01-01T00:00:00.000Z")
+    const first = await service.cleanupExpiredRateLimitBuckets(cutoff)
+    expect(first).toBeGreaterThanOrEqual(1)
+
+    const second = await service.cleanupExpiredRateLimitBuckets(cutoff)
+    expect(second).toBe(0)
+  })
+})
