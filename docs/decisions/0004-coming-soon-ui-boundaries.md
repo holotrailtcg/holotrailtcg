@@ -38,6 +38,17 @@ modify middleware in this stage — Stage 2D owns which routes return the
 coming-soon experience. The pages were verified to render by temporarily
 bypassing middleware locally (not committed).
 
+> **Amended in Stage 2B review (2026-07-13).** Bypassing the middleware to verify
+> the pages hid a real defect: with the real middleware enabled, `/coming-soon`
+> and `/privacy` redirected to `/gb/coming-soon` and `/gb/privacy`, which had no
+> matching routes and returned 404. The fix adds country-aware entry points
+> under `[countryCode]/coming-soon` and `[countryCode]/privacy` that render
+> shared views (`components/coming-soon/coming-soon-view.tsx`,
+> `components/privacy/privacy-view.tsx`), and makes internal links locale-aware.
+> The middleware itself is unchanged and **no Stage 2D route protection** was
+> added. Route-aware tests now run against the real middleware
+> (`middleware.test.ts`).
+
 ### Vitest for storefront unit tests
 
 The storefront had no test runner. We added Vitest (node environment) for the

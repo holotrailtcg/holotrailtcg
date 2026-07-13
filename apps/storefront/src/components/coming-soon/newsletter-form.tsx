@@ -7,6 +7,8 @@ import {
   newsletterAdapter,
   validateSubmission,
   hasErrors,
+  EMAIL_MAX,
+  FIRST_NAME_MAX,
   type NewsletterFieldErrors,
 } from "@lib/newsletter"
 import { Alert } from "@components/ui/alert"
@@ -123,6 +125,7 @@ export function NewsletterForm({
             name="firstName"
             type="text"
             autoComplete="given-name"
+            maxLength={FIRST_NAME_MAX}
             value={firstName}
             onChange={(e) => setFirstName(e.target.value)}
             aria-describedby={describedBy}
@@ -147,6 +150,7 @@ export function NewsletterForm({
             type="email"
             inputMode="email"
             autoComplete="email"
+            maxLength={EMAIL_MAX}
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             aria-describedby={describedBy}

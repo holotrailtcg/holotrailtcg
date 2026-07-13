@@ -31,6 +31,119 @@ describe("parseConsent", () => {
     expect(state.decided).toBe(false)
     expect(state.categories.analytics).toBe(false)
   })
+
+  it("never treats a string boolean as an analytics approval", () => {
+    const state = parseConsent(
+      JSON.stringify({
+        categories: { essential: true, analytics: "true" },
+        decided: "true",
+        version: CONSENT_VERSION,
+      })
+    )
+    expect(state.categories.analytics).toBe(false)
+    expect(state.decided).toBe(false)
+  })
+
+  it("defaults when a category is missing", () => {
+    const state = parseConsent(
+      JSON.stringify({
+        categories: { essential: true },
+        decided: true,
+        version: CONSENT_VERSION,
+      })
+    )
+    expect(state.categories.analytics).toBe(false)
+    expect(state.decided).toBe(false)
+  })
+
+  it("defaults when essential is not exactly true", () => {
+    const state = parseConsent(
+      JSON.stringify({
+        categories: { essential: false, analytics: true },
+        decided: true,
+        version: CONSENT_VERSION,
+      })
+    )
+    expect(state.categories.analytics).toBe(false)
+  })
+
+  it("defaults when decided is the wrong type", () => {
+    const state = parseConsent(
+      JSON.stringify({
+        categories: { essential: true, analytics: true },
+        decided: 1,
+        version: CONSENT_VERSION,
+      })
+    )
+    expect(state.categories.analytics).toBe(false)
+    expect(state.decided).toBe(false)
+  })
+
+  it("defaults when categories is not an object", () => {
+    const state = parseConsent(
+      JSON.stringify({
+        categories: "yes",
+        decided: true,
+        version: CONSENT_VERSION,
+      })
+    )
+    expect(state.categories.analytics).toBe(false)
+  })
+
+  it("defaults for a wrong version type (string instead of number)", () => {
+    const state = parseConsent(
+      JSON.stringify({
+        categories: { essential: true, analytics: true },
+        decided: true,
+        version: String(CONSENT_VERSION),
+      })
+    )
+    expect(state.categories.analytics).toBe(false)
+  })
+
+  it("defaults when decidedAt is a malformed timestamp", () => {
+    const state = parseConsent(
+      JSON.stringify({
+        categories: { essential: true, analytics: true },
+        decided: true,
+        decidedAt: "not-a-date",
+        version: CONSENT_VERSION,
+      })
+    )
+    expect(state.categories.analytics).toBe(false)
+    expect(state.decided).toBe(false)
+  })
+
+  it("defaults when decidedAt is a loosely-parseable non-ISO string", () => {
+    const state = parseConsent(
+      JSON.stringify({
+        categories: { essential: true, analytics: true },
+        decided: true,
+        decidedAt: "2020",
+        version: CONSENT_VERSION,
+      })
+    )
+    expect(state.categories.analytics).toBe(false)
+  })
+
+  it("defaults for a JSON array", () => {
+    expect(parseConsent("[]").categories.analytics).toBe(false)
+  })
+
+  it("accepts a valid stored decision with a valid ISO timestamp", () => {
+    const decidedAt = new Date().toISOString()
+    const state = parseConsent(
+      JSON.stringify({
+        categories: { essential: true, analytics: true },
+        decided: true,
+        decidedAt,
+        version: CONSENT_VERSION,
+      })
+    )
+    expect(state.categories.analytics).toBe(true)
+    expect(state.decided).toBe(true)
+    expect(state.decidedAt).toBe(decidedAt)
+  })
 })
 
 describe("decideConsent + round trip", () => {

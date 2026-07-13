@@ -1,5 +1,3 @@
-import type { Metadata } from "next"
-
 import { comingSoonContent } from "@content/coming-soon"
 import { PageShell } from "@components/layout/page-shell"
 import { ContentContainer } from "@components/layout/content-container"
@@ -10,15 +8,17 @@ import { CookieConsent } from "@components/privacy/cookie-consent"
 import { NewsletterForm } from "@components/coming-soon/newsletter-form"
 import { HeroVisual } from "@components/coming-soon/hero-visual"
 
-export const metadata: Metadata = {
-  title: "Holo Trail TCG — Coming soon",
-  description:
-    "Holo Trail TCG is a specialist home for collectable trading cards. Join the list for launch and stock updates.",
-}
-
 const content = comingSoonContent
 
-export default function ComingSoonPage() {
+/**
+ * Shared presentation for the coming-soon page. Rendered by the country-aware
+ * route entry point (`app/[countryCode]/coming-soon`). Internal links are
+ * locale-aware: the route passes the resolved `countryCode` so navigation stays
+ * within the same region the middleware selected.
+ */
+export function ComingSoonView({ countryCode }: { countryCode: string }) {
+  const privacyHref = `/${countryCode}/privacy`
+
   return (
     <PageShell surface="page">
       {/* Top bar: brand mark + status. Inside <main>, so this is a section
@@ -74,7 +74,7 @@ export default function ComingSoonPage() {
                   {content.form.heading}
                 </h2>
                 <div className="max-w-md">
-                  <NewsletterForm privacyHref="/privacy" />
+                  <NewsletterForm privacyHref={privacyHref} />
                 </div>
               </div>
             </div>

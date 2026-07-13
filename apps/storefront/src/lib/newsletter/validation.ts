@@ -9,8 +9,15 @@ import type {
  * Keep these dependency-free so they are cheap to unit test.
  */
 
-export const FIRST_NAME_MIN = 2
 export const FIRST_NAME_MAX = 50
+
+/**
+ * Practical maximum email length. RFC 5321 caps the whole address (the SMTP
+ * forward/reverse path) at 254 characters, so we reject anything longer both
+ * here and via the input's `maxLength`. This is a length guard only; shape is
+ * checked separately and the Stage 2C backend remains the source of truth.
+ */
+export const EMAIL_MAX = 254
 
 // Pragmatic email shape check. Full RFC validation is neither necessary nor
 // desirable client-side; the Stage 2C backend remains the source of truth.
@@ -20,9 +27,6 @@ export function validateFirstName(value: string): string | undefined {
   const trimmed = value.trim()
   if (trimmed.length === 0) {
     return "Enter your first name."
-  }
-  if (trimmed.length < FIRST_NAME_MIN) {
-    return `First name must be at least ${FIRST_NAME_MIN} characters.`
   }
   if (trimmed.length > FIRST_NAME_MAX) {
     return `First name must be ${FIRST_NAME_MAX} characters or fewer.`
@@ -34,6 +38,9 @@ export function validateEmail(value: string): string | undefined {
   const trimmed = value.trim()
   if (trimmed.length === 0) {
     return "Enter your email address."
+  }
+  if (trimmed.length > EMAIL_MAX) {
+    return `Email address must be ${EMAIL_MAX} characters or fewer.`
   }
   if (!EMAIL_PATTERN.test(trimmed)) {
     return "Enter a valid email address."

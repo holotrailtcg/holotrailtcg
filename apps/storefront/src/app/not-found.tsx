@@ -4,12 +4,19 @@ import Link from "next/link"
 import { PageShell } from "@components/layout/page-shell"
 import { ContentContainer } from "@components/layout/content-container"
 import { BrandLogo } from "@components/brand/brand-logo"
+import { buttonVariants } from "@components/ui/button"
 
 export const metadata: Metadata = {
   title: "Page not found — Holo Trail TCG",
   description: "The page you were looking for could not be found.",
 }
 
+/**
+ * Global 404. This renders for genuinely unmatched routes and returns a real
+ * 404 response. It is outside the `[countryCode]` segment, so no locale is
+ * available here; the return link points at the unprefixed `/coming-soon` and
+ * the country-code middleware redirects it to the correct `/{country}/coming-soon`.
+ */
 export default function NotFound() {
   return (
     <PageShell surface="page">
@@ -23,10 +30,7 @@ export default function NotFound() {
             moved, or the address may be slightly off.
           </p>
         </div>
-        <Link
-          href="/coming-soon"
-          className="ht-button-text inline-flex h-11 items-center justify-center bg-action px-5 text-action-text transition-colors hover:bg-action-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-page"
-        >
+        <Link href="/coming-soon" className={buttonVariants({ variant: "primary" })}>
           Back to Holo Trail TCG
         </Link>
       </ContentContainer>

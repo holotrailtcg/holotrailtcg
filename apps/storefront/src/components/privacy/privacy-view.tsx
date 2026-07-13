@@ -1,4 +1,3 @@
-import type { Metadata } from "next"
 import Link from "next/link"
 
 import { PageShell } from "@components/layout/page-shell"
@@ -7,16 +6,18 @@ import { Section } from "@components/layout/section"
 import { BrandLogo } from "@components/brand/brand-logo"
 import { Alert } from "@components/ui/alert"
 
-export const metadata: Metadata = {
-  title: "Privacy — Holo Trail TCG",
-  description: "Our full privacy notice is being prepared.",
-}
+/**
+ * Shared presentation for the privacy placeholder page. Rendered by the
+ * country-aware route entry point (`app/[countryCode]/privacy`). The home link
+ * is locale-aware so it stays within the region the middleware selected.
+ */
+export function PrivacyView({ countryCode }: { countryCode: string }) {
+  const homeHref = `/${countryCode}/coming-soon`
 
-export default function PrivacyPage() {
   return (
     <PageShell surface="page">
       <ContentContainer as="header" className="py-6">
-        <Link href="/coming-soon" className="inline-flex" aria-label="Holo Trail TCG home">
+        <Link href={homeHref} className="inline-flex" aria-label="Holo Trail TCG home">
           <BrandLogo variant="primary" height={36} />
         </Link>
       </ContentContainer>
@@ -39,7 +40,7 @@ export default function PrivacyPage() {
 
             <div>
               <Link
-                href="/coming-soon"
+                href={homeHref}
                 className="text-action underline underline-offset-2 hover:text-action-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-page"
               >
                 Back to Holo Trail TCG

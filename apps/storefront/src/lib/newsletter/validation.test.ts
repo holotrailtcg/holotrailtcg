@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  EMAIL_MAX,
   FIRST_NAME_MAX,
   hasErrors,
   validateConsent,
@@ -15,12 +16,17 @@ describe("validateFirstName", () => {
     expect(validateFirstName("   ")).toBeDefined()
   })
 
-  it("rejects too short", () => {
-    expect(validateFirstName("a")).toBeDefined()
+  it("accepts a trimmed one-character name", () => {
+    expect(validateFirstName("a")).toBeUndefined()
+    expect(validateFirstName("  J  ")).toBeUndefined()
   })
 
   it("rejects too long", () => {
     expect(validateFirstName("x".repeat(FIRST_NAME_MAX + 1))).toBeDefined()
+  })
+
+  it("accepts a name exactly at the maximum", () => {
+    expect(validateFirstName("x".repeat(FIRST_NAME_MAX))).toBeUndefined()
   })
 
   it("accepts a normal name (trimmed)", () => {
@@ -37,6 +43,23 @@ describe("validateEmail", () => {
 
   it("accepts a valid address", () => {
     expect(validateEmail("collector@holotrail.co.uk")).toBeUndefined()
+  })
+
+  it("accepts an address exactly at the maximum length", () => {
+    // local-part padded so the whole address is exactly EMAIL_MAX characters.
+    const domain = "@example.com"
+    const local = "a".repeat(EMAIL_MAX - domain.length)
+    const address = `${local}${domain}`
+    expect(address).toHaveLength(EMAIL_MAX)
+    expect(validateEmail(address)).toBeUndefined()
+  })
+
+  it("rejects an address one character over the maximum length", () => {
+    const domain = "@example.com"
+    const local = "a".repeat(EMAIL_MAX - domain.length + 1)
+    const address = `${local}${domain}`
+    expect(address).toHaveLength(EMAIL_MAX + 1)
+    expect(validateEmail(address)).toBeDefined()
   })
 })
 

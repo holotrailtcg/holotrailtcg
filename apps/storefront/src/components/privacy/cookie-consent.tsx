@@ -26,6 +26,12 @@ export function CookieConsent() {
   const [decided, setDecided] = React.useState(false)
 
   const dialogRef = React.useRef<HTMLDivElement>(null)
+  const triggerRef = React.useRef<HTMLButtonElement>(null)
+  // True while the currently-open dialog was opened from the preferences
+  // trigger (rather than the initial mandatory prompt).
+  const openedFromTriggerRef = React.useRef(false)
+  // Set when a close should return focus to the trigger.
+  const restoreFocusRef = React.useRef(false)
 
   React.useEffect(() => {
     setMounted(true)
@@ -39,17 +45,37 @@ export function CookieConsent() {
     if (open) dialogRef.current?.focus()
   }, [open])
 
-  const persist = React.useCallback((analytics: boolean) => {
-    writeConsent(decideConsent(analytics))
-    setDecided(true)
+  // After a dialog the user reopened from the trigger is closed, return focus
+  // to that trigger. We never force focus after the initial mandatory decision
+  // (openedFromTrigger is false then), which leaves focus handling to the
+  // browser as expected.
+  React.useEffect(() => {
+    if (!open && restoreFocusRef.current) {
+      restoreFocusRef.current = false
+      triggerRef.current?.focus()
+    }
+  }, [open])
+
+  const closeDialog = React.useCallback(() => {
+    if (openedFromTriggerRef.current) restoreFocusRef.current = true
+    openedFromTriggerRef.current = false
     setOpen(false)
   }, [])
+
+  const persist = React.useCallback(
+    (analytics: boolean) => {
+      writeConsent(decideConsent(analytics))
+      setDecided(true)
+      closeDialog()
+    },
+    [closeDialog]
+  )
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
     // Escape may dismiss the banner only once a decision already exists;
     // it must never be a way to silently skip an initial choice.
     if (event.key === "Escape" && decided) {
-      setOpen(false)
+      closeDialog()
     }
   }
 
@@ -64,11 +90,15 @@ export function CookieConsent() {
       {!open && (
         <div className="fixed bottom-4 left-4 z-40 print:hidden">
           <Button
+            ref={triggerRef}
             type="button"
             variant="outline"
             size="sm"
             className="bg-surface shadow-sm"
-            onClick={() => setOpen(true)}
+            onClick={() => {
+              openedFromTriggerRef.current = true
+              setOpen(true)
+            }}
           >
             Cookie preferences
           </Button>
