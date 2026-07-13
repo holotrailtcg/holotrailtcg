@@ -7,6 +7,11 @@ const requiredEnvs = [
     description:
       "Learn how to create a publishable key: https://docs.medusajs.com/v2/resources/storefront-development/publishable-api-keys",
   },
+  {
+    key: "NEXT_PUBLIC_RECAPTCHA_SITE_KEY",
+    description:
+      "Add the public reCAPTCHA v3 site key for the storefront hostname.",
+  },
 ];
 
 function checkEnvVariables() {

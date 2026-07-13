@@ -1,7 +1,4 @@
-import type {
-  NewsletterFieldErrors,
-  NewsletterSubmission,
-} from "./types"
+import type { NewsletterFieldErrors, NewsletterFormFields } from "./types"
 
 /**
  * Pure, framework-free validation helpers for the newsletter form. Shared by
@@ -49,7 +46,7 @@ export function validateEmail(value: string): string | undefined {
 }
 
 export function validateConsent(value: boolean): string | undefined {
-  if (!value) {
+  if (value !== true) {
     return "Please tick the box to agree to receive emails."
   }
   return undefined
@@ -57,7 +54,7 @@ export function validateConsent(value: boolean): string | undefined {
 
 /** Validate the whole submission; returns only the fields that have errors. */
 export function validateSubmission(
-  submission: NewsletterSubmission
+  submission: NewsletterFormFields,
 ): NewsletterFieldErrors {
   const errors: NewsletterFieldErrors = {}
 

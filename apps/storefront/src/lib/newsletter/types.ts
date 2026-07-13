@@ -2,24 +2,33 @@
  * Newsletter form-adapter boundary.
  *
  * The coming-soon form talks to a `NewsletterAdapter`, never directly to any
- * backend, database or email provider. Stage 2C provides a real adapter that
- * calls the storefront API route; until then a development-safe placeholder is
- * used (see dev-adapter.ts). The UI depends only on these types, so Stage 2C
- * can swap the adapter without changing the form.
+ * backend, database or email provider. The active adapter calls the public
+ * Medusa newsletter endpoint and returns only conservative UI-safe outcomes.
  */
 
-export type NewsletterSubmission = {
+export type NewsletterFormFields = {
   firstName: string
   email: string
   consent: boolean
 }
 
+export type NewsletterSubmission = NewsletterFormFields & {
+  honeypot: string
+  recaptchaToken: string
+  countryCode: string
+}
+
 /** Per-field validation errors. Absent keys mean the field is valid. */
 export type NewsletterFieldErrors = Partial<
-  Record<keyof NewsletterSubmission, string>
+  Record<keyof NewsletterFormFields, string>
 >
 
-export type NewsletterResultStatus = "success" | "error"
+export type NewsletterResultStatus =
+  | "success"
+  | "validation_failure"
+  | "verification_failure"
+  | "rate_limited"
+  | "temporarily_unavailable"
 
 export type NewsletterResult = {
   status: NewsletterResultStatus
@@ -33,7 +42,7 @@ export interface NewsletterAdapter {
   /**
    * Submit a validated subscription. Implementations must be duplicate-safe and
    * must not leak whether the address already existed. Throw or return
-   * `{ status: "error" }` for recoverable failures.
+   * a conservative result for recoverable failures.
    */
   submit(submission: NewsletterSubmission): Promise<NewsletterResult>
 }

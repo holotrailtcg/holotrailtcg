@@ -1,12 +1,12 @@
-import { devNewsletterAdapter } from "./dev-adapter"
+import { apiNewsletterAdapter } from "./api-adapter"
 import type { NewsletterAdapter } from "./types"
 
 export * from "./types"
 export * from "./validation"
+export * from "./submission"
 
 /**
- * The active newsletter adapter. This is the single swap point for Stage 2C:
- * replace `devNewsletterAdapter` with the real API adapter here (or select by
- * environment) and the form UI is unaffected.
+ * The active newsletter adapter. Keeping this single seam makes the form easy
+ * to test without allowing provider or backend details into the UI.
  */
-export const newsletterAdapter: NewsletterAdapter = devNewsletterAdapter
+export const newsletterAdapter: NewsletterAdapter = apiNewsletterAdapter

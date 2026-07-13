@@ -76,6 +76,27 @@ describe("country-code middleware routing", () => {
     expect(isPassThrough(res)).toBe(true)
   })
 
+  it.each(["confirm", "unsubscribe"])(
+    "redirects /newsletter/%s to the country-aware route and preserves its query",
+    async (action) => {
+      const res = await middleware(
+        request(`/newsletter/${action}?token=opaque-test-token`),
+      )
+      expect(res.headers.get("location")).toBe(
+        `${ORIGIN}/gb/newsletter/${action}?token=opaque-test-token`,
+      )
+    },
+  )
+
+  it.each(["confirm", "unsubscribe"])(
+    "serves /gb/newsletter/%s without redirecting",
+    async (action) => {
+      const res = await middleware(request(`/gb/newsletter/${action}`))
+      expect(isRedirect(res)).toBe(false)
+      expect(isPassThrough(res)).toBe(true)
+    },
+  )
+
   it("resolves coming-soon -> privacy navigation to a real country route", async () => {
     // The coming-soon form links to `/{country}/privacy`; that target must pass
     // through the middleware (i.e. it is already a valid country route).

@@ -15,7 +15,8 @@ const nextConfig = {
   reactStrictMode: true,
   logging: {
     fetches: {
-      fullUrl: true,
+      // Query strings may contain one-time newsletter tokens. Never print them.
+      fullUrl: false,
     },
   },
   eslint: {
@@ -49,6 +50,24 @@ const nextConfig = {
           ]
         : []),
     ],
+  },
+  async headers() {
+    const tokenResultHeaders = [
+      { key: "Cache-Control", value: "no-store" },
+      { key: "Referrer-Policy", value: "no-referrer" },
+      { key: "X-Robots-Tag", value: "noindex, nofollow" },
+    ]
+
+    return [
+      {
+        source: "/:countryCode/newsletter/confirm",
+        headers: tokenResultHeaders,
+      },
+      {
+        source: "/:countryCode/newsletter/unsubscribe",
+        headers: tokenResultHeaders,
+      },
+    ]
   },
 }
 

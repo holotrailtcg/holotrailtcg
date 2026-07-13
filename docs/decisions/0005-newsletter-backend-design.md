@@ -1540,3 +1540,77 @@ own around them.
   `apps/storefront/src/lib/newsletter/validation.ts` rules on the backend
   without introducing a new workspace package prematurely.
 - No other material conflicts with existing architecture were found.
+
+## Stage 2C.7 implementation record - storefront integration
+
+Stage 2C.7 implements the storefront portion of this accepted design. Stage 2C
+as a whole is not marked complete by this record.
+
+### Adapter, reCAPTCHA and form
+
+- `apps/storefront/src/lib/newsletter/api-adapter.ts` posts JSON to
+  `{NEXT_PUBLIC_MEDUSA_BACKEND_URL}/store/newsletter/subscribe`, using the
+  existing public Medusa publishable-key header. Its exact body fields are
+  `firstName`, `email`, literal `consent: true`, `honeypot`, `recaptchaToken`,
+  and `countryCode`. It never retries or exposes parsed backend messages.
+- `apps/storefront/src/lib/newsletter/submission.ts` enforces the tested order:
+  first-name and email validation, exact-true consent, one fresh token, then
+  one adapter request. A synchronous form lock prevents double submission.
+- The honeypot is a bounded, labelled off-screen input outside the tab order.
+  It is submitted, starts empty, and resets on success. Existing consent copy
+  and shared form controls remain unchanged.
+- UI outcomes are limited to generic accepted, validation, rate-limit,
+  verification, and temporary-failure messages. Subscriber, provider,
+  delivery, token and promotion state is not displayed.
+- `components/coming-soon/recaptcha-script.tsx` uses Next.js `Script` with
+  `afterInteractive`, a stable ID and ready/error callbacks. The client waits
+  for `grecaptcha.ready`, then runs `grecaptcha.execute` with action
+  `newsletter_subscribe` only after valid submission. Tokens are local to one
+  request and are not reused, persisted, logged, retried, or placed in URLs.
+  Missing configuration and script/API failure fail closed. Tests inject fakes
+  and never contact Google. This follows Google's current
+  [v3 execution](https://developers.google.com/recaptcha/docs/v3) and
+  [single-use token](https://developers.google.com/recaptcha/docs/verify)
+  guidance; no wrapper dependency was added.
+
+### Country-aware result pages
+
+- Server pages at `app/[countryCode]/newsletter/{confirm,unsubscribe}` read the
+  token and call the corresponding Medusa endpoint once with `cache:
+  "no-store"`. `lib/newsletter/result-api.ts` accepts only stable public result
+  codes. Token-derived processing stays server-side.
+- `components/newsletter/result-view.tsx` reuses `PageShell`,
+  `ContentContainer`, `Section`, `BrandLogo`, `Alert`, and the shared button
+  variants for processing, completed/idempotent, invalid, and temporary-error
+  states. Return links preserve the country code.
+- The only client island, `url-cleanup.tsx`, receives the clean pathname only
+  and calls `history.replaceState`, removing the query without another history
+  entry. The opaque token is never a client prop or rendered value.
+- Both routes are force-dynamic with `revalidate = 0`, noindex/nofollow and
+  `referrer: "no-referrer"` metadata. Route-specific Next response headers add
+  `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, and
+  `X-Robots-Tag: noindex, nofollow`; the sitemap excludes both paths.
+- Next fetch full-URL logging is disabled so the necessary backend GET query
+  cannot appear in framework logs. Existing middleware needed no behaviour
+  change; tests only add unprefixed and `/gb` result-route coverage. No Stage 2D
+  gate was introduced.
+
+This follows Next.js 15 documentation for
+[server/client boundaries](https://nextjs.org/docs/app/getting-started/server-and-client-components),
+[script loading](https://nextjs.org/docs/pages/api-reference/components/script),
+[metadata](https://nextjs.org/docs/15/app/api-reference/functions/generate-metadata),
+and [no-store rendering](https://nextjs.org/docs/15/app/guides/caching), plus
+the History API's [`replaceState`](https://developer.mozilla.org/en-US/docs/Web/API/History/replaceState)
+behaviour.
+
+### Test approach and deviation
+
+Vitest injects fetch and reCAPTCHA boundaries and covers the exact adapter
+contract, processing order, strict consent, one-use/fresh tokens, duplicate
+locking, honeypot, safe copy, result mapping and rendering, token omission, URL
+replacement, cache/metadata declarations, and middleware routing. No real
+Google, Resend, or production backend request is made.
+
+The only refinement from the earlier design sketch is adding route-specific
+HTTP security headers alongside metadata and disabling full-URL fetch logging.
+The proposed server-page/minimal-cleanup-client split is otherwise unchanged.

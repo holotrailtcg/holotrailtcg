@@ -48,11 +48,18 @@ export const comingSoonContent = {
     /** Generic, duplicate-safe success wording (never confirms an email was sent). */
     successTitle: "Thank you",
     successBody:
-      "If your details are valid, you are on the list. We will email you when there is news — you can unsubscribe at any time.",
+      "If the details are valid, check your inbox for a confirmation email.",
+    successSupporting:
+      "You will not receive updates until you confirm your email address.",
     /** Safe, generic, recoverable error wording. */
     errorTitle: "Something went wrong",
-    errorBody:
-      "We could not save your details just now. Please check your connection and try again.",
+    errors: {
+      rate_limited: "Too many attempts. Please wait before trying again.",
+      verification_failure:
+        "We could not verify the request. Please try again.",
+      temporarily_unavailable:
+        "We could not process your request right now. Please try again later.",
+    },
   },
 
   /** Privacy note shown under the form. */

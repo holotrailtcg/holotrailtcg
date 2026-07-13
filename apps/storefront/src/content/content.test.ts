@@ -19,7 +19,12 @@ describe("comingSoonContent", () => {
   it("provides generic, duplicate-safe success wording", () => {
     expect(comingSoonContent.form.successBody.length).toBeGreaterThan(0)
     // Must not claim an email was definitely sent.
-    expect(comingSoonContent.form.successBody.toLowerCase()).toContain("if your")
+    expect(comingSoonContent.form.successBody.toLowerCase()).toContain(
+      "if the details are valid"
+    )
+    expect(comingSoonContent.form.successBody.toLowerCase()).not.toContain(
+      "email was sent"
+    )
   })
 })
 

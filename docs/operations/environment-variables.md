@@ -50,6 +50,7 @@ Unit tests (`pnpm --filter @dtc/backend test:unit`) do **not** need a database.
 | --- | --- | --- | --- |
 | `NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY` | Medusa Admin | yes | The **Medusa publishable API key**, created/copied from Medusa Admin → **Settings → Publishable API Keys** after the backend runs and is seeded. This is a **Medusa** key and is **not** a Stripe key. Do not assume a fixed prefix — copy the exact value the installed Medusa version shows. The storefront refuses to start without it. |
 | `NEXT_PUBLIC_MEDUSA_BACKEND_URL` | you | yes | `http://localhost:9000` |
+| `NEXT_PUBLIC_RECAPTCHA_SITE_KEY` | Google reCAPTCHA Admin | yes | Public reCAPTCHA v3 site key for the storefront hostname. Safe to expose; never use the secret key here. |
 | `NEXT_PUBLIC_DEFAULT_REGION` | you | yes | **`gb`** — Holo Trail is a UK/GBP store. (The upstream template default is `dk`; use `gb` here.) |
 | `NEXT_PUBLIC_BASE_URL` | you | yes | `http://localhost:8000` |
 | `NEXT_PUBLIC_STRIPE_KEY` | — | **no (leave empty)** | Stripe is out of scope for Stage 1. This is a **Stripe** publishable key, unrelated to the Medusa publishable key above. |
@@ -82,6 +83,7 @@ AUTH_CORS=http://localhost:5173,http://localhost:9000
 # Medusa publishable API key from Admin → Settings → Publishable API Keys.
 # This is a MEDUSA key, not a Stripe key.
 NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY=
+NEXT_PUBLIC_RECAPTCHA_SITE_KEY=replace-with-public-recaptcha-v3-site-key
 NEXT_PUBLIC_MEDUSA_BACKEND_URL=http://localhost:9000
 NEXT_PUBLIC_DEFAULT_REGION=gb
 NEXT_PUBLIC_BASE_URL=http://localhost:8000
@@ -156,3 +158,13 @@ storefront URL) for a developer who wants to exercise the config reader
 against a real `.env.test` — the automated test suite never depends on
 real `.env.test` values for these, since the unit tests construct fake env
 objects directly and mock the `resend` package at the module boundary.
+
+## Storefront - Stage 2C.7 newsletter reCAPTCHA variable
+
+| Variable | Owner | Public or secret | Local file | Committed template | Local requirement | Vercel Preview | Vercel Production | Future Medusa host | Validation | Fail-closed behaviour |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `NEXT_PUBLIC_RECAPTCHA_SITE_KEY` | Storefront | Public | `apps/storefront/.env.local` | `apps/storefront/.env.template` | Required to exercise newsletter submission locally; the developer supplies a site key configured for the local hostname | Required for preview verification, with preview hostnames configured in Google | Required | No | Non-empty string checked by storefront startup and reCAPTCHA client construction; committed values are fake/public placeholders only | Missing configuration prevents startup; client construction also rejects, and the form never falls back to simulated success |
+
+The browser sends the resulting short-lived token to the Medusa backend for
+verification. `RECAPTCHA_SECRET_KEY` remains backend-only and must never be
+added to a storefront or `NEXT_PUBLIC_` variable.
