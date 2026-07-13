@@ -75,10 +75,18 @@ query string is forwarded to the coming-soon page (no genuine need to
 preserve one, and it avoids carrying arbitrary commerce query strings
 forward).
 
-A defensive `/_next/` prefix early-return was added alongside the existing
-dotted-path early-return, even though the current `config.matcher` already
-excludes `_next/static` and `_next/image` from ever invoking the middleware
-in production — this is defence in depth for any other `_next/*` subpath.
+A defensive `/_next/` prefix early-return in `middleware.ts` is a separate
+defence-in-depth framework exclusion, alongside the existing
+`config.matcher` exclusion of `_next/static` and `_next/image` from ever
+invoking the middleware in production — this covers any other `_next/*`
+subpath that does reach the middleware. Genuine static assets (favicon,
+opengraph/twitter images, and the public asset directories the storefront
+actually serves) are handled separately by the explicit, narrowly-matched
+`isStaticAssetPath()` policy described in the Amendment below — not by a
+generic dotted-path exemption, which no longer exists. Application routes
+that happen to contain a dot (e.g. `/gb/products/card.v2`,
+`/gb/order/.../transfer/a.b.c`) remain subject to the coming-soon gate like
+any other route.
 
 ### Out of scope
 

@@ -22,19 +22,24 @@
  *      same run without restarting a server mid-script.
  *
  * Then it asserts, over real HTTP, for the gated instance:
- *   - Allowlisted routes (/gb/coming-soon, /gb/privacy, a newsletter result
- *     page) return 200.
+ *   - Allowlisted routes (/gb/coming-soon, /gb/privacy, the newsletter result
+ *     pages, genuine static/framework assets) are directly reachable: exact
+ *     expected status via `redirect: "manual"` and no `Location` header, so
+ *     a route that redirects through `/gb/coming-soon` before landing on 200
+ *     fails the assertion instead of being silently followed.
+ *   - The newsletter confirm/unsubscribe token flow redirects (307) to the
+ *     clean `?result=...` page with no forwarded token and the expected
+ *     privacy/cache headers, and that clean page is itself directly
+ *     reachable with no further redirect.
  *   - Commerce routes and the Codex-reported dotted/encoded application
- *     routes (/gb/products/card.v2, /gb/order/.../transfer/a.b.c, ...) all
- *     redirect (307) to exactly `/gb/coming-soon` with no forwarded query
- *     string, and that target itself resolves in one further hop (200, no
- *     second redirect).
- *   - Genuine static/framework assets (favicon, opengraph image, a real
- *     public/images file, a real Next static chunk) return 200, not a
- *     coming-soon redirect.
- * ...and for the disabled instance, that the same commerce/dotted routes are
- * NOT redirected to /gb/coming-soon (full page render success isn't
- * required, since the region stub has no product catalog data).
+ *     routes (/gb/products/card.v2, /gb/order/.../transfer/a.b.c, an encoded
+ *     dotted transfer token, an encoded slash product path, a
+ *     country-prefixed /gb/images/... path, ...) all redirect (307) to
+ *     exactly `/gb/coming-soon` with no forwarded query string, and that
+ *     target itself resolves in one further hop (200, no second redirect).
+ * ...and for the disabled instance, that the same commerce/dotted/encoded
+ * routes are NOT redirected to /gb/coming-soon (full page render success
+ * isn't required, since the region stub has no product catalog data).
  *
  * Usage: `pnpm run verify:coming-soon` from `apps/storefront`.
  */
@@ -66,16 +71,34 @@ function getFreePort() {
   })
 }
 
+/**
+ * Deterministic newsletter-result stub, mirroring `mockRegionsFetch()` in
+ * `src/middleware.test.ts`: any token is accepted and yields a fixed result,
+ * since `result-api.ts` only cares that the backend returns 200 with a
+ * recognised `result` field. No real secrets or subscriber tokens involved.
+ */
 function startRegionStub() {
   return new Promise((resolve) => {
     const server = createServer((req, res) => {
-      if (req.url?.startsWith("/store/regions")) {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1")
+
+      if (url.pathname === "/store/regions") {
         res.writeHead(200, { "content-type": "application/json" })
         res.end(
           JSON.stringify({
             regions: [{ id: "reg_gb", countries: [{ iso_2: "gb" }] }],
           })
         )
+        return
+      }
+      if (url.pathname === "/store/newsletter/confirm") {
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ result: "confirmed" }))
+        return
+      }
+      if (url.pathname === "/store/newsletter/unsubscribe") {
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ result: "unsubscribed" }))
         return
       }
       res.writeHead(404)
@@ -299,36 +322,131 @@ const DOTTED_APPLICATION_ROUTES = [
   "/gb/products/card%2Ev2",
 ]
 
+// Encoded application routes that must still be gated like any other route:
+// an encoded dotted transfer token, an encoded slash in a product path, and
+// a country-prefixed path under /images/ (the static-asset allowlist only
+// exempts the top-level, non-country-prefixed /images/* directory).
+const ENCODED_APPLICATION_ROUTES = [
+  "/gb/order/order_123/transfer/a%2Eb%2Ec",
+  "/gb/products/set%2Fcard",
+  "/gb/images/x.png",
+]
+
 const COMMERCE_ROUTES = ["/gb/store", "/gb/cart", "/gb/checkout", "/gb/account"]
 
 const STATIC_ASSET_ROUTES = [
   "/favicon.ico",
   "/opengraph-image.jpg",
   "/images/akin-cakiner-9cIkK-hLD9k-unsplash.jpg",
+  "/brand/holotrailtcg-full-logo.png",
 ]
+
+/**
+ * Strict direct-access assertion: uses `redirect: "manual"` so a 3xx
+ * response is inspected instead of silently followed, asserts the exact
+ * expected status, and asserts there is no `Location` header. A route that
+ * is supposed to be directly reachable while gated must never redirect
+ * through `/gb/coming-soon` (or anywhere else) before landing on the
+ * expected status.
+ */
+async function assertDirectAccess(origin, path, expectedStatus, failures, label) {
+  const res = await fetch(`${origin}${path}`, { redirect: "manual" })
+  if (res.status !== expectedStatus) {
+    failures.push(label(`GET ${path} expected ${expectedStatus}, got ${res.status}`))
+    return res
+  }
+  const location = res.headers.get("location")
+  if (location) {
+    failures.push(
+      label(`GET ${path} expected no Location header, got "${location}"`)
+    )
+  }
+  return res
+}
+
+async function verifyNewsletterLifecycle(origin, failures, label) {
+  const cases = [
+    {
+      kind: "confirm",
+      token: "stub-confirm-token",
+      result: "confirmed",
+    },
+    {
+      kind: "unsubscribe",
+      token: "stub-unsub-token",
+      result: "unsubscribed",
+    },
+  ]
+
+  for (const { kind, token, result } of cases) {
+    const tokenPath = `/gb/newsletter/${kind}?token=${token}`
+    const cleanPath = `/gb/newsletter/${kind}?result=${result}`
+    const expectedLocation = `${origin}${cleanPath}`
+
+    const res = await fetch(`${origin}${tokenPath}`, { redirect: "manual" })
+    if (res.status !== 307) {
+      failures.push(label(`GET ${tokenPath} expected 307, got ${res.status}`))
+      continue
+    }
+
+    const rawLocation = res.headers.get("location") ?? ""
+    const resolvedLocation = rawLocation ? new URL(rawLocation, origin).href : ""
+    if (resolvedLocation !== expectedLocation) {
+      failures.push(
+        label(
+          `GET ${tokenPath} expected Location "${expectedLocation}", got "${rawLocation}"`
+        )
+      )
+    }
+    if (rawLocation.includes("token=")) {
+      failures.push(
+        label(`GET ${tokenPath} redirect target retained the token: "${rawLocation}"`)
+      )
+    }
+
+    const cacheControl = res.headers.get("cache-control")
+    if (cacheControl !== "no-store") {
+      failures.push(
+        label(`GET ${tokenPath} expected Cache-Control: no-store, got "${cacheControl}"`)
+      )
+    }
+    const referrerPolicy = res.headers.get("referrer-policy")
+    if (referrerPolicy !== "no-referrer") {
+      failures.push(
+        label(
+          `GET ${tokenPath} expected Referrer-Policy: no-referrer, got "${referrerPolicy}"`
+        )
+      )
+    }
+    const robotsTag = res.headers.get("x-robots-tag")
+    if (robotsTag !== "noindex, nofollow") {
+      failures.push(
+        label(
+          `GET ${tokenPath} expected X-Robots-Tag: noindex, nofollow, got "${robotsTag}"`
+        )
+      )
+    }
+
+    if (resolvedLocation === expectedLocation) {
+      await assertDirectAccess(origin, cleanPath, 200, failures, label)
+    }
+  }
+}
 
 async function verifyGatedInstance(origin, failures) {
   const label = (msg) => `[gated] ${msg}`
 
   for (const path of ["/gb/coming-soon", "/gb/privacy"]) {
-    const res = await fetch(`${origin}${path}`)
-    if (res.status !== 200) {
-      failures.push(label(`GET ${path} expected 200, got ${res.status}`))
-    }
+    await assertDirectAccess(origin, path, 200, failures, label)
   }
 
-  const newsletterRes = await fetch(
-    `${origin}/gb/newsletter/confirm?result=confirmed`
-  )
-  if (newsletterRes.status !== 200) {
-    failures.push(
-      label(
-        `GET /gb/newsletter/confirm?result=confirmed expected 200, got ${newsletterRes.status}`
-      )
-    )
-  }
+  await verifyNewsletterLifecycle(origin, failures, label)
 
-  for (const path of [...COMMERCE_ROUTES, ...DOTTED_APPLICATION_ROUTES]) {
+  for (const path of [
+    ...COMMERCE_ROUTES,
+    ...DOTTED_APPLICATION_ROUTES,
+    ...ENCODED_APPLICATION_ROUTES,
+  ]) {
     const res = await fetch(`${origin}${path}`, { redirect: "manual" })
     if (res.status !== 307) {
       failures.push(label(`GET ${path} expected 307, got ${res.status}`))
@@ -370,33 +488,29 @@ async function verifyGatedInstance(origin, failures) {
   }
 
   for (const path of STATIC_ASSET_ROUTES) {
-    const res = await fetch(`${origin}${path}`, { redirect: "manual" })
-    if (res.status === 307 && res.headers.get("location")?.includes("coming-soon")) {
-      failures.push(
-        label(`GET ${path} was redirected to coming-soon; expected a real asset response`)
-      )
-    } else if (res.status >= 400) {
-      failures.push(label(`GET ${path} expected a real asset response, got ${res.status}`))
-    }
+    await assertDirectAccess(origin, path, 200, failures, label)
   }
 
   // A real Next.js static chunk path, discovered from the dev server's own
   // asset manifest rather than guessed, to avoid a brittle hard-coded chunk
   // name.
-  const buildManifest = await fetch(`${origin}/_next/static/development/_buildManifest.js`)
-  if (buildManifest.status !== 200) {
-    failures.push(
-      label(
-        `GET /_next/static/development/_buildManifest.js expected 200, got ${buildManifest.status}`
-      )
-    )
-  }
+  await assertDirectAccess(
+    origin,
+    "/_next/static/development/_buildManifest.js",
+    200,
+    failures,
+    label
+  )
 }
 
 async function verifyDisabledInstance(origin, failures) {
   const label = (msg) => `[disabled] ${msg}`
 
-  for (const path of [...COMMERCE_ROUTES, ...DOTTED_APPLICATION_ROUTES]) {
+  for (const path of [
+    ...COMMERCE_ROUTES,
+    ...DOTTED_APPLICATION_ROUTES,
+    ...ENCODED_APPLICATION_ROUTES,
+  ]) {
     const res = await fetch(`${origin}${path}`, { redirect: "manual" })
     const location = res.headers.get("location") ?? ""
     if (res.status === 307 && location.includes("coming-soon")) {
