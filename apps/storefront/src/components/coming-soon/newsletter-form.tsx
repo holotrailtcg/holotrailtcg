@@ -5,12 +5,15 @@ import * as React from "react"
 import { comingSoonContent } from "@content/coming-soon"
 import {
   newsletterAdapter,
+  processNewsletterSubmission,
+  acquireSubmissionLock,
   validateSubmission,
   hasErrors,
   EMAIL_MAX,
   FIRST_NAME_MAX,
   type NewsletterFieldErrors,
 } from "@lib/newsletter"
+import { createRecaptchaClient } from "@lib/newsletter/recaptcha-client"
 import { Alert } from "@components/ui/alert"
 import { Button } from "@components/ui/button"
 import { Checkbox } from "@components/ui/checkbox"
@@ -19,34 +22,50 @@ import { Input } from "@components/ui/input"
 import { Label } from "@components/ui/label"
 
 type Status = "idle" | "submitting" | "success" | "error"
+type ErrorKind =
+  | "verification_failure"
+  | "rate_limited"
+  | "temporarily_unavailable"
 
 const { form: copy, privacyNote } = comingSoonContent
 
 /**
  * Coming-soon newsletter form. This is the page's single client island.
- * UI only: it talks to `newsletterAdapter` (a development-safe placeholder
- * until Stage 2C), never to a backend directly.
+ * UI only: it talks to `newsletterAdapter`, never to a backend or provider
+ * directly.
  */
 export function NewsletterForm({
+  countryCode,
+  recaptchaSiteKey,
   privacyHref = "/privacy",
 }: {
+  countryCode: string
+  recaptchaSiteKey: string
   privacyHref?: string
 }) {
   const [firstName, setFirstName] = React.useState("")
   const [email, setEmail] = React.useState("")
   const [consent, setConsent] = React.useState(false)
+  const [honeypot, setHoneypot] = React.useState("")
   const [errors, setErrors] = React.useState<NewsletterFieldErrors>({})
   const [status, setStatus] = React.useState<Status>("idle")
+  const [errorKind, setErrorKind] = React.useState<ErrorKind>(
+    "temporarily_unavailable",
+  )
 
   const firstNameRef = React.useRef<HTMLInputElement>(null)
   const emailRef = React.useRef<HTMLInputElement>(null)
   const consentRef = React.useRef<HTMLInputElement>(null)
   const successRef = React.useRef<HTMLDivElement>(null)
+  const errorRef = React.useRef<HTMLDivElement>(null)
+  const submittingRef = React.useRef(false)
 
   // Move focus to the confirmation once submission succeeds.
   React.useEffect(() => {
     if (status === "success") {
       successRef.current?.focus()
+    } else if (status === "error") {
+      errorRef.current?.focus()
     }
   }, [status])
 
@@ -58,7 +77,7 @@ export function NewsletterForm({
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (status === "submitting") return
+    if (submittingRef.current) return
 
     const submission = { firstName, email, consent }
     const fieldErrors = validateSubmission(submission)
@@ -70,26 +89,50 @@ export function NewsletterForm({
       return
     }
 
+    if (!acquireSubmissionLock(submittingRef)) return
+
     setErrors({})
     setStatus("submitting")
 
     try {
-      const result = await newsletterAdapter.submit({
-        firstName: firstName.trim(),
-        email: email.trim(),
-        consent,
+      const outcome = await processNewsletterSubmission({
+        values: { firstName, email, consent, honeypot },
+        countryCode,
+        getRecaptchaToken: () =>
+          createRecaptchaClient({
+            siteKey: recaptchaSiteKey,
+          }).executeNewsletterToken(),
+        adapter: newsletterAdapter,
       })
 
-      if (result.status === "success") {
+      if (outcome.kind === "validation_failure") {
+        setErrors(outcome.errors)
+        setStatus("idle")
+        focusFirstError(outcome.errors)
+      } else if (outcome.kind === "verification_failure") {
+        setErrorKind("verification_failure")
+        setStatus("error")
+      } else if (outcome.result.status === "success") {
         setStatus("success")
         setFirstName("")
         setEmail("")
         setConsent(false)
+        setHoneypot("")
       } else {
+        setErrorKind(
+          outcome.result.status === "rate_limited"
+            ? "rate_limited"
+            : outcome.result.status === "verification_failure"
+              ? "verification_failure"
+              : "temporarily_unavailable",
+        )
         setStatus("error")
       }
     } catch {
+      setErrorKind("temporarily_unavailable")
       setStatus("error")
+    } finally {
+      submittingRef.current = false
     }
   }
 
@@ -101,7 +144,8 @@ export function NewsletterForm({
         className="focus-visible:outline-none"
       >
         <Alert variant="success" title={copy.successTitle}>
-          {copy.successBody}
+          <p>{copy.successBody}</p>
+          <p className="mt-2">{copy.successSupporting}</p>
         </Alert>
       </div>
     )
@@ -111,6 +155,23 @@ export function NewsletterForm({
 
   return (
     <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-5">
+      <div className="absolute left-[-10000px] top-auto h-px w-px overflow-hidden">
+        <Label htmlFor="newsletter-contact-note">
+          Leave this field empty. It is for automated abuse detection.
+        </Label>
+        <Input
+          id="newsletter-contact-note"
+          name="honeypot"
+          type="text"
+          autoComplete="off"
+          tabIndex={-1}
+          maxLength={200}
+          value={honeypot}
+          onChange={(event) => setHoneypot(event.target.value)}
+          disabled={status === "submitting"}
+        />
+      </div>
+
       <FormField
         id="first-name"
         label={copy.firstNameLabel}
@@ -185,9 +246,15 @@ export function NewsletterForm({
       </div>
 
       {status === "error" && (
-        <Alert variant="error" title={copy.errorTitle}>
-          {copy.errorBody}
-        </Alert>
+        <div
+          ref={errorRef}
+          tabIndex={-1}
+          className="focus-visible:outline-none"
+        >
+          <Alert variant="error" title={copy.errorTitle}>
+            {copy.errors[errorKind]}
+          </Alert>
+        </div>
       )}
 
       <Button type="submit" isLoading={status === "submitting"}>

@@ -14,13 +14,21 @@ const ORIGIN = "http://localhost:8000"
 
 // A minimal region map containing only Great Britain.
 function mockRegionsFetch() {
-  global.fetch = vi.fn(async () => ({
-    ok: true,
-    status: 200,
-    json: async () => ({
-      regions: [{ id: "reg_gb", countries: [{ iso_2: "gb" }] }],
-    }),
-  })) as unknown as typeof fetch
+  global.fetch = vi.fn(async (input) => {
+    const url = String(input)
+    if (url.includes("/store/regions")) {
+      return Response.json({
+        regions: [{ id: "reg_gb", countries: [{ iso_2: "gb" }] }],
+      })
+    }
+    if (url.includes("/store/newsletter/confirm")) {
+      return Response.json({ result: "confirmed" })
+    }
+    if (url.includes("/store/newsletter/unsubscribe")) {
+      return Response.json({ result: "unsubscribed" })
+    }
+    return new Response(null, { status: 404 })
+  }) as typeof fetch
 }
 
 let middleware: (request: NextRequest) => Promise<Response>
@@ -75,6 +83,54 @@ describe("country-code middleware routing", () => {
     expect(isRedirect(res)).toBe(false)
     expect(isPassThrough(res)).toBe(true)
   })
+
+  it.each(["confirm", "unsubscribe"])(
+    "processes /newsletter/%s while localising without emitting its token",
+    async (action) => {
+      const token = "opaque-test-token"
+      const res = await middleware(
+        request(`/newsletter/${action}?token=${token}`),
+      )
+      const location = res.headers.get("location") ?? ""
+      expect(location).toContain(
+        `/gb/newsletter/${action}?result=${
+          action === "confirm" ? "confirmed" : "unsubscribed"
+        }`,
+      )
+      expect(location).not.toContain(token)
+    },
+  )
+
+  it.each(["confirm", "unsubscribe"])(
+    "processes /gb/newsletter/%s tokens before rendering and redirects without the token",
+    async (action) => {
+      const token = "opaque-test-token"
+      const res = await middleware(
+        request(`/gb/newsletter/${action}?token=${token}`),
+      )
+      expect(isRedirect(res)).toBe(true)
+      const location = res.headers.get("location") ?? ""
+      expect(location).toContain(
+        `/gb/newsletter/${action}?result=${
+          action === "confirm" ? "confirmed" : "unsubscribed"
+        }`,
+      )
+      expect(location).not.toContain(token)
+      expect(res.headers.get("cache-control")).toBe("no-store")
+      expect(res.headers.get("referrer-policy")).toBe("no-referrer")
+    },
+  )
+
+  it.each(["confirm", "unsubscribe"])(
+    "serves a clean /gb/newsletter/%s result without another redirect",
+    async (action) => {
+      const res = await middleware(
+        request(`/gb/newsletter/${action}?result=invalid`),
+      )
+      expect(isRedirect(res)).toBe(false)
+      expect(isPassThrough(res)).toBe(true)
+    },
+  )
 
   it("resolves coming-soon -> privacy navigation to a real country route", async () => {
     // The coming-soon form links to `/{country}/privacy`; that target must pass

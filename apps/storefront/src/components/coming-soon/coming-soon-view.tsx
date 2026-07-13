@@ -7,6 +7,7 @@ import { SocialLinks } from "@components/brand/social-links"
 import { CookieConsent } from "@components/privacy/cookie-consent"
 import { NewsletterForm } from "@components/coming-soon/newsletter-form"
 import { HeroVisual } from "@components/coming-soon/hero-visual"
+import { RecaptchaScript } from "@components/coming-soon/recaptcha-script"
 
 const content = comingSoonContent
 
@@ -18,6 +19,7 @@ const content = comingSoonContent
  */
 export function ComingSoonView({ countryCode }: { countryCode: string }) {
   const privacyHref = `/${countryCode}/privacy`
+  const recaptchaSiteKey = process.env.NEXT_PUBLIC_RECAPTCHA_SITE_KEY ?? ""
 
   return (
     <PageShell surface="page">
@@ -29,10 +31,7 @@ export function ComingSoonView({ countryCode }: { countryCode: string }) {
       >
         <BrandLogo variant="primary" height={40} />
         <span className="ht-label inline-flex items-center gap-2 border border-line-strong px-3 py-1 text-ink">
-          <span
-            aria-hidden="true"
-            className="inline-block h-2 w-2 bg-signal"
-          />
+          <span aria-hidden="true" className="inline-block h-2 w-2 bg-signal" />
           {content.status}
         </span>
       </ContentContainer>
@@ -74,7 +73,11 @@ export function ComingSoonView({ countryCode }: { countryCode: string }) {
                   {content.form.heading}
                 </h2>
                 <div className="max-w-md">
-                  <NewsletterForm privacyHref={privacyHref} />
+                  <NewsletterForm
+                    countryCode={countryCode}
+                    recaptchaSiteKey={recaptchaSiteKey}
+                    privacyHref={privacyHref}
+                  />
                 </div>
               </div>
             </div>
@@ -100,6 +103,7 @@ export function ComingSoonView({ countryCode }: { countryCode: string }) {
       </ContentContainer>
 
       <CookieConsent />
+      <RecaptchaScript siteKey={recaptchaSiteKey} />
     </PageShell>
   )
 }

@@ -14,8 +14,14 @@ const S3_PATHNAME = process.env.MEDUSA_CLOUD_S3_PATHNAME
 const nextConfig = {
   reactStrictMode: true,
   logging: {
-    fetches: {
-      fullUrl: true,
+    // Next 15 logs incoming request URLs verbatim in development. Ignore only
+    // the two token-bearing routes; unrelated operational request logging stays
+    // enabled. Fetch logging remains at Next's default-off setting because its
+    // `fullUrl: false` option truncates query values rather than redacting them.
+    incomingRequests: {
+      ignore: [
+        /^\/(?:[a-z]{2}\/)?newsletter\/(?:confirm|unsubscribe)(?:\?|$)/,
+      ],
     },
   },
   eslint: {
@@ -49,6 +55,24 @@ const nextConfig = {
           ]
         : []),
     ],
+  },
+  async headers() {
+    const tokenResultHeaders = [
+      { key: "Cache-Control", value: "no-store" },
+      { key: "Referrer-Policy", value: "no-referrer" },
+      { key: "X-Robots-Tag", value: "noindex, nofollow" },
+    ]
+
+    return [
+      {
+        source: "/:countryCode/newsletter/confirm",
+        headers: tokenResultHeaders,
+      },
+      {
+        source: "/:countryCode/newsletter/unsubscribe",
+        headers: tokenResultHeaders,
+      },
+    ]
   },
 }
 
