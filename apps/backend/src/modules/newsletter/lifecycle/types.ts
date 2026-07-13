@@ -29,3 +29,19 @@ export type UnsubscribeResult =
   | { outcome: "UNSUBSCRIBED" }
   | { outcome: "ALREADY_UNSUBSCRIBED" }
   | { outcome: "INVALID" }
+
+/**
+ * Outcome of attempting to reserve the next confirmation-email send
+ * (Stage 2C.5). A reservation only succeeds when the subscriber is still
+ * `PENDING`, the given confirmation-token hash is still the active one (a
+ * later rotation supersedes it), the resend cooldown has elapsed, and no
+ * other reservation is currently in flight (or the previous reservation is
+ * stale). See `NewsletterModuleService.reserveConfirmationEmailSend` and
+ * `docs/decisions/0005-newsletter-backend-design.md`.
+ */
+export type ConfirmationEmailReservationOutcome =
+  | { reserved: true }
+  | {
+      reserved: false
+      reason: "NOT_PENDING" | "STALE_TOKEN" | "SUPPRESSED_COOLDOWN" | "ALREADY_IN_FLIGHT"
+    }

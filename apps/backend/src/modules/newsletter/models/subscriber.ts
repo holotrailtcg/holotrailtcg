@@ -18,15 +18,26 @@ export type SubscriberStatus =
 /**
  * Confirmation-email delivery bookkeeping. This is deliberately separate
  * from `SUBSCRIBER_STATUS`: a subscriber can be `PENDING` while its most
- * recent confirmation email is `SENT`, `FAILED`, or has never been
- * attempted (`NOT_SENT`). Do not treat this as consent or confirmation
- * state — those live in `consented_at`/`consent_text_version` and
- * `status`/`confirmed_at` respectively.
+ * recent confirmation email is `SENT`, `FAILED`, `SENDING`, `UNKNOWN`, or
+ * has never been attempted (`NOT_SENT`). Do not treat this as consent or
+ * confirmation state — those live in `consented_at`/`consent_text_version`
+ * and `status`/`confirmed_at` respectively.
+ *
+ * `SENDING` and `UNKNOWN` were added in Stage 2C.5
+ * (docs/decisions/0005-newsletter-backend-design.md) to support a
+ * concurrency-safe delivery reservation and to distinguish a definitive
+ * provider failure (`FAILED`) from an ambiguous outcome — timeout, network
+ * disconnect after transmission, malformed response — where the provider
+ * may have already accepted the email (`UNKNOWN`). An ambiguous outcome
+ * must never be treated as a confirmed failure, and must never advance the
+ * subscriber to `CONFIRMED`.
  */
 export const CONFIRMATION_SEND_STATE = {
   NOT_SENT: "NOT_SENT",
+  SENDING: "SENDING",
   SENT: "SENT",
   FAILED: "FAILED",
+  UNKNOWN: "UNKNOWN",
 } as const
 
 export type ConfirmationSendState =
@@ -56,6 +67,13 @@ export type ConfirmationSendState =
  * anywhere to compare against. This lets confirmation stay idempotent
  * without retaining an active, still-usable confirmation token
  * indefinitely. See docs/decisions/0005-newsletter-backend-design.md.
+ *
+ * `confirmation_send_reserved_at` (Stage 2C.5) records when a confirmation
+ * email send was last reserved (moved to `SENDING`). It exists so a
+ * reservation that never reached a terminal state — the process crashed or
+ * was killed mid-send — can be recognised as stale after a bounded interval
+ * and safely retried, without a second concurrent request being able to
+ * send the same logical email while a recent reservation is still active.
  */
 const Subscriber = model
   .define(
@@ -94,6 +112,7 @@ const Subscriber = model
       confirmation_send_state: model
         .enum(Object.values(CONFIRMATION_SEND_STATE))
         .default(CONFIRMATION_SEND_STATE.NOT_SENT),
+      confirmation_send_reserved_at: model.dateTime().nullable(),
     }
   )
   .checks([

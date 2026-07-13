@@ -879,6 +879,225 @@ implementation diverged from the 2C.1 design.
   same "keep the pure decision logic separate from the persistence call"
   pattern used throughout this stage.
 
+## Stage 2C.5 implementation notes
+
+Stage 2C.5 implemented the internal Resend confirmation-email delivery
+boundary described in the "Resend" section above: rendering, URL
+construction, idempotency-key derivation, the provider adapter, and a
+concurrency-safe delivery reservation. No public route calls any of this
+yet — the module remains standalone, as with the 2C.4 rate-limit/reCAPTCHA
+boundaries.
+
+- **Official-documentation review:** the `resend` Node SDK's send API,
+  idempotency-key placement, error taxonomy and API-key permission levels
+  were reviewed directly against resend.com/docs (send-with-nodejs, the
+  send-email API reference, the errors reference, API-key permissions) and
+  the SDK's own GitHub source before writing `sender.ts`. Two findings
+  shaped the implementation: (1) `idempotencyKey` is a **second**
+  `CreateEmailRequestOptions` argument to `resend.emails.send(payload,
+  options)`, not a field on the email payload itself — confirmed against
+  the SDK source and asserted directly in
+  `resend/__tests__/sender.unit.spec.ts`; (2) the SDK documents no
+  client-level timeout, abort-signal, or custom-`fetch` option, so the
+  10-second bound in `sender.ts` is enforced externally via `Promise.race`
+  against a timer — this does not cancel the underlying HTTP request, only
+  the wait for it, which is exactly why a timeout is classified as
+  ambiguous rather than a definitive failure.
+- **Package:** `resend` `^6.17.2` (the latest published version at the
+  time of installation) added to `apps/backend/package.dependencies` only,
+  via `pnpm --filter @dtc/backend add resend`; not installed in the
+  storefront. No email-rendering framework (e.g. React Email) was added —
+  Stage 2C.5's HTML/text requirements are met by the same "one shared
+  template/data function" approach already used for the rest of this
+  module, per the brief's "avoid React Email unless clearly required."
+- **Module layout:** `apps/backend/src/modules/newsletter/resend/`
+  (`config.ts`, `confirmation-url.ts`, `render.ts`, `idempotency-key.ts`,
+  `sender.ts`, `delivery.ts`, plus `__tests__/`). `sender.ts` is the
+  **only** file in the repository that imports the `resend` package —
+  `delivery.ts` (the orchestrator) and any future route depend only on the
+  `ConfirmationEmailSender` interface it exports, mirroring the same
+  "narrow injected interface, no direct SDK/DB dependency" pattern
+  `rate-limit/rate-limiter.ts`'s `RateLimitBucketStore` already
+  established in Stage 2C.4.
+- **Configuration (`resend/config.ts`):** `resolveResendConfig(env =
+  process.env)` validates `RESEND_API_KEY`, `RESEND_FROM_EMAIL`,
+  `RESEND_REPLY_TO_EMAIL`, `PUBLIC_STOREFRONT_URL`, and two optional,
+  bounded values — `NEWSLETTER_CONFIRMATION_EMAIL_COOLDOWN_SECONDS`
+  (0–86,400s, default 300) and
+  `NEWSLETTER_CONFIRMATION_EMAIL_STALE_RESERVATION_SECONDS` (1–3,600s,
+  default 120). Every required field fails closed with no
+  environment-specific default, following the 2C.4 precedent, with one
+  deliberate, documented exception: `PUBLIC_STOREFRONT_URL`'s scheme is
+  environment-dependent by requirement (`https:` mandatory in production;
+  `http:` accepted outside production only for a local hostname —
+  `localhost`/`127.0.0.1`/`::1` — never an arbitrary domain, so a
+  misconfigured non-production environment cannot send confirmation links
+  over plaintext HTTP to a real host). The storefront URL is validated as
+  a bare origin (no path/query/fragment) and normalised to strip a
+  trailing slash, so `confirmation-url.ts` never has to reason about it.
+- **Confirmation URL (`resend/confirmation-url.ts`):** builds
+  `{storefrontBaseUrl}/{countryCode}/newsletter/confirm?token={token}`
+  using `new URL(path, base)`, exactly the shape the 2C.1 design record
+  proposed — no correction was needed. Country-code validation is a
+  conservative shape check (`/^[a-z]{2}$/`, matching the storefront's own
+  lower-case ISO 3166-1 `[countryCode]` route-segment convention) rather
+  than an imported region list, per the brief's "do not add unrelated
+  internationalisation architecture"; `gb` satisfies it today, and any
+  future supported code will as long as it follows the same two-letter
+  convention. Only the opaque plaintext confirmation token is ever placed
+  in the URL — no subscriber id, email, first name, or token hash.
+- **Rendering (`resend/render.ts`):** `renderConfirmationEmail({firstName,
+  confirmationUrl})` returns `{subject, html, text}` from one function, so
+  the wording rules are enforced once. Subject is the static
+  `"Confirm your Holo Trail TCG updates"` — no token, email, name, or
+  discount amount. The HTML escapes both the first name and the
+  confirmation URL (a shared `escapeHtml` covers text content and the
+  `href` attribute value identically, since both are double-quoted/plain
+  contexts here); an empty/whitespace-only first name falls back to "Hi
+  there,". The function takes only `firstName` and `confirmationUrl` as
+  parameters — no email address, subscriber id or token hash is ever in
+  scope to leak.
+- **Idempotency key (`resend/idempotency-key.ts`):**
+  `deriveConfirmationEmailIdempotencyKey(subscriberId,
+  confirmationTokenHash)` — SHA-256 hex digest of a namespaced string
+  (`"newsletter-confirmation-email:v1:{subscriberId}:{confirmationTokenHash}"`).
+  Deterministic and stable for one logical attempt (same subscriber, same
+  active token hash); changes automatically whenever the lifecycle rotates
+  the confirmation token, since the hash changes. Never derived from the
+  plaintext token or the email address. 64 hex characters, comfortably
+  under Resend's documented 256-character limit.
+- **Provider adapter (`resend/sender.ts`):**
+  `ResendConfirmationEmailSender` calls `resend.emails.send(payload, {
+  idempotencyKey })`. Successful responses without the documented `id`
+  field are treated as ambiguous (malformed acceptance). Errors are
+  classified via a fixed set of Resend-documented error names that
+  represent a definitive, pre-acceptance rejection — `invalid_api_key`,
+  `restricted_api_key`, `invalid_from_address`, `invalid_to_address`,
+  `invalid_idempotency_key`, `invalid_attachment`,
+  `missing_required_field`, `validation_error`, plus the quota/rate-limit
+  names (`rate_limit_exceeded`, `monthly_quota_exceeded`,
+  `daily_quota_exceeded`, since these are also definitively
+  "not sent," just for a different reason) — anything else (a thrown
+  network error, a 5xx `application_error`/`internal_server_error`, an
+  unrecognised future error name) is ambiguous, never assumed to be a
+  clean failure. Never logs the API key, recipient, rendered content,
+  idempotency key, or raw provider response.
+- **Delivery-state schema addition:** `CONFIRMATION_SEND_STATE` gained two
+  values, `SENDING` and `UNKNOWN` (now `NOT_SENT | SENDING | SENT | FAILED
+  | UNKNOWN`), and the model gained one new nullable column,
+  `confirmation_send_reserved_at`, recording when a send was last
+  reserved. This is the smallest additive change that lets a reservation
+  bind to "this row, this exact confirmation-token generation, not
+  currently/recently in flight" without a second lookup table. No column
+  storing the plaintext token, the idempotency key, or any provider
+  response body was added.
+  - **Migration authoring and application:** unlike Stage 2C.2–2C.4's
+    `medusa db:generate`, `Migration20260713190000.ts` was **hand-authored**
+    (matching the exact SQL shape Medusa's generator produces for this
+    kind of change — an inline enum `check` on an existing column has no
+    dedicated `db:generate` diff path for "add a value to the check list")
+    rather than produced by the CLI. It drops and recreates the anonymous
+    `newsletter_subscriber_confirmation_send_state_check` constraint
+    (Postgres's default name for the inline `check (...)` this column was
+    originally created with in `Migration20260713170838.ts`) and adds
+    `confirmation_send_reserved_at timestamptz null`.
+    `.snapshot-newsletter.json` was updated by hand to match. It **was**
+    applied to the confirmed test database (`holotrail_medusa_test`) via a
+    guarded, uncommitted one-off script following the same pattern as
+    2C.2/2C.3 (loads the `test` environment, inlines the same
+    name-must-contain-"test" guard as `assert-test-database.ts`, prints a
+    redacted target, then runs `medusa db:migrate`), and the resulting
+    column and check constraint were verified directly against
+    `information_schema.columns` and `pg_constraint` — both match the
+    migration exactly.
+  - **Bug found and fixed via the database-backed tests:** the first
+    version of `reserveConfirmationEmailSend`'s conditional `UPDATE` only
+    allowed reservation from `confirmation_send_state IN ('NOT_SENT',
+    'FAILED', 'UNKNOWN')`. Because `prepareSubscription` never resets
+    `confirmation_send_state` on token rotation (it only rewrites the
+    token/consent columns), a subscriber whose *previous* token generation
+    was successfully `SENT` would have its state permanently stuck at
+    `SENT` — a rotated token's reservation would then always fail with
+    `NOT_PENDING`-adjacent `ALREADY_IN_FLIGHT`-shaped denials, since `SENT`
+    wasn't a reservable starting state. The
+    `"old send state does not suppress a new token indefinitely once the
+    cooldown elapses"` test in `newsletter-module.spec.ts` caught this
+    immediately (it failed against the real test database, not merely a
+    mock). The fix adds `SENT` to the reservable-state set — the resend
+    cooldown (`confirmation_email_last_sent_at`), not this state check, is
+    what actually throttles repeat sends, so allowing re-reservation from
+    a terminal `SENT` is correct: `SENDING` is now the only state that
+    ever blocks a new reservation, and only while recent.
+- **Delivery reservation (`NewsletterModuleService`):**
+  `reserveConfirmationEmailSend` is a single conditional `UPDATE`
+  (`SENDING`/`confirmation_send_reserved_at`), gated by all of: subscriber
+  still `PENDING`; the given confirmation-token hash still equals the
+  row's active `confirmation_token_hash` (a later rotation makes this
+  reservation attempt `STALE_TOKEN`); the resend cooldown has elapsed
+  since `confirmation_email_last_sent_at` (or it is null); and either the
+  current send state is not `SENDING`, or it is `SENDING` but its
+  `confirmation_send_reserved_at` is older than the stale-reservation
+  cutoff. On failure to reserve, a non-locking follow-up `SELECT`
+  classifies the reason (`NOT_PENDING` / `STALE_TOKEN` /
+  `SUPPRESSED_COOLDOWN` / `ALREADY_IN_FLIGHT`) for internal diagnostics
+  only — the atomic `UPDATE` above is what actually enforces "only one
+  reservation succeeds," not the classification read. `markConfirmationEmailSent`
+  / `markConfirmationEmailFailed` / `markConfirmationEmailAmbiguous` are
+  separate single-statement finalisation calls, still scoped by
+  `confirmation_token_hash`; none of them ever changes subscriber `status`
+  or `first_purchase_discount_eligible` — provider success/failure/ambiguity
+  is bookkeeping only, never confirmation.
+- **Orchestration (`resend/delivery.ts`):**
+  `sendConfirmationEmailWithProtections` — reserve (one statement, no open
+  transaction) → build URL/render/derive idempotency key only if reserved
+  → call the injected `ConfirmationEmailSender` (no open transaction
+  during the network call) → finalise (one statement). Takes a narrow
+  `ConfirmationEmailDeliveryStore` interface (satisfied by
+  `NewsletterModuleService` in production, a plain fake in unit tests),
+  the same "injected store, no DB in unit tests" pattern as
+  `checkRateLimit`. Not called from any route in this stage.
+- **Duplicate-send policy realised exactly as scoped:** a repeated pending
+  signup still rotates the token (2C.3, unchanged) and gets its own fresh
+  reservation slot; the cooldown is enforced independently of rotation via
+  `confirmation_email_last_sent_at`, so rapid repeated signups are
+  throttled without permanently blocking a legitimate later resend once
+  the cooldown elapses (covered by
+  `"old send state does not suppress a new token indefinitely once the
+  cooldown elapses"` in `newsletter-module.spec.ts`). Concurrent duplicate
+  requests for the same token generation: exactly one reservation
+  succeeds, the other receives `ALREADY_IN_FLIGHT` and never calls the
+  sender. Confirmed duplicate signup: `prepareSubscription` already
+  returns `ALREADY_CONFIRMED` with no `confirmationToken`, so this
+  boundary is never invoked. Unsubscribed resubscription: `PENDING_CREATED`
+  with a fresh token, same reservation path as a new signup.
+- **Tests added:** `resend/__tests__/config.unit.spec.ts`,
+  `confirmation-url.unit.spec.ts`, `render.unit.spec.ts`,
+  `idempotency-key.unit.spec.ts` (all pure unit, `TEST_TYPE=unit`);
+  `sender.unit.spec.ts` (unit, mocks the `resend` package at the module
+  boundary via `jest.mock("resend", ...)` — no network access, no real API
+  key); `delivery.unit.spec.ts` (unit, fake store + fake sender, asserts
+  the orchestration logic — reserve-then-send-then-finalise, suppressed
+  paths never call the sender, idempotency-key stability/rotation). New
+  `describe` blocks were **appended** to the existing
+  `newsletter-module.spec.ts` rather than added as a new file, per the
+  2C.3 precedent recorded above (two files bootstrapping the module in the
+  same Jest worker corrupts `MedusaModule`'s static registry) — covering
+  reservation concurrency, stale-reservation recovery, cooldown/rotation
+  interaction, and all three finalisation methods.
+- **Deviation summary:** (1) the migration was hand-authored rather than
+  produced by `medusa db:generate` (no dedicated generator path exists for
+  widening an inline enum `check`), but was applied and schema-verified
+  against the confirmed test database via the same guarded one-off-script
+  pattern prior stages used; (2) `PUBLIC_STOREFRONT_URL`'s http/https
+  requirement is the first genuinely environment-dependent branch in any
+  newsletter config reader (every other required field in 2C.4/2C.5 fails
+  closed identically in every environment) — documented as a narrow,
+  explicit exception rather than a new general pattern; (3) the
+  reservation's reservable-state set includes `SENT` (not just
+  `NOT_SENT`/`FAILED`/`UNKNOWN`), a correction found by the database-backed
+  tests during this stage, not anticipated by the initial design — see
+  "Bug found and fixed" above.
+
 ## Consequences
 
 - Stage 2C.2+ implements this design: models, migrations, module service,

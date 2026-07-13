@@ -10,6 +10,7 @@ import { normaliseEmail } from "./lifecycle/email"
 import { generateOpaqueToken, hashToken } from "./lifecycle/token"
 import { resolveConfirmationTokenTtlMinutes } from "./lifecycle/config"
 import type {
+  ConfirmationEmailReservationOutcome,
   ConfirmationResult,
   PrepareSubscriptionInput,
   SignupResult,
@@ -381,6 +382,143 @@ class NewsletterModuleService extends MedusaService({
       [cutoff, batchSize]
     )
     return rows.length
+  }
+
+  /**
+   * Reserves the next confirmation-email send attempt for `subscriberId`,
+   * bound to `confirmationTokenHash` — the hash of whichever token is
+   * currently active on the row (Stage 2C.5). A single conditional
+   * `UPDATE` is the entire concurrency control: it only succeeds when the
+   * subscriber is still `PENDING`, the given hash still matches the row's
+   * active `confirmation_token_hash` (a later rotation supersedes this
+   * attempt), the resend cooldown has elapsed since the last accepted
+   * send, and the current state is not an active/recent `SENDING`
+   * reservation. `SENT`/`FAILED`/`NOT_SENT`/`UNKNOWN` are all valid
+   * starting states for a fresh reservation — `confirmation_send_state`
+   * is never reset on token rotation (`prepareSubscription` only rewrites
+   * the token/consent columns), so a `SENT` left over from a previous
+   * token generation must not permanently block the new generation from
+   * ever being reserved again; the resend cooldown (not this state check)
+   * is what actually throttles repeat sends, for the current token or
+   * across a rotation alike. `SENDING` is the only state that blocks a
+   * new reservation, and only while it is recent — a stale one (older
+   * than `staleReservationCutoff`) is still reservable. No transaction is
+   * held open across this call and the later network send — this is a
+   * single, already-committed statement, exactly the "no open
+   * transaction during the external call" requirement.
+   *
+   * On failure to reserve, a best-effort (non-locking) follow-up read
+   * classifies *why*, for internal diagnostics only — the reservation
+   * decision itself was already made correctly by the `UPDATE` above.
+   */
+  async reserveConfirmationEmailSend(input: {
+    subscriberId: string
+    confirmationTokenHash: string
+    now: Date
+    cooldownCutoff: Date
+    staleReservationCutoff: Date
+  }): Promise<ConfirmationEmailReservationOutcome> {
+    const [reserved] = await this.manager_.execute<{ id: string }>(
+      `update newsletter_subscriber
+       set confirmation_send_state = 'SENDING', confirmation_send_reserved_at = ?
+       where id = ?
+         and confirmation_token_hash = ?
+         and status = 'PENDING'
+         and (confirmation_email_last_sent_at is null or confirmation_email_last_sent_at < ?)
+         and (
+           confirmation_send_state in ('NOT_SENT', 'SENT', 'FAILED', 'UNKNOWN')
+           or (confirmation_send_state = 'SENDING' and confirmation_send_reserved_at < ?)
+         )
+       returning id`,
+      [
+        input.now,
+        input.subscriberId,
+        input.confirmationTokenHash,
+        input.cooldownCutoff,
+        input.staleReservationCutoff,
+      ]
+    )
+
+    if (reserved) {
+      return { reserved: true }
+    }
+
+    const [current] = await this.manager_.execute<{
+      status: string
+      confirmation_token_hash: string | null
+      confirmation_email_last_sent_at: Date | null
+    }>(
+      `select status, confirmation_token_hash, confirmation_email_last_sent_at
+       from newsletter_subscriber
+       where id = ?`,
+      [input.subscriberId]
+    )
+
+    if (!current || current.status !== SUBSCRIBER_STATUS.PENDING) {
+      return { reserved: false, reason: "NOT_PENDING" }
+    }
+    if (current.confirmation_token_hash !== input.confirmationTokenHash) {
+      return { reserved: false, reason: "STALE_TOKEN" }
+    }
+    if (
+      current.confirmation_email_last_sent_at &&
+      current.confirmation_email_last_sent_at >= input.cooldownCutoff
+    ) {
+      return { reserved: false, reason: "SUPPRESSED_COOLDOWN" }
+    }
+    return { reserved: false, reason: "ALREADY_IN_FLIGHT" }
+  }
+
+  /**
+   * Finalises a reserved send as accepted by the provider. Still scoped by
+   * `confirmationTokenHash` so a very late-arriving finalisation for an
+   * already-rotated token cannot mark the wrong generation as sent.
+   * Subscriber `status` is never touched here — provider success must
+   * never confirm the subscriber or grant first-purchase eligibility.
+   */
+  async markConfirmationEmailSent(
+    subscriberId: string,
+    confirmationTokenHash: string,
+    sentAt: Date
+  ): Promise<void> {
+    await this.manager_.execute(
+      `update newsletter_subscriber
+       set confirmation_send_state = 'SENT', confirmation_email_last_sent_at = ?
+       where id = ? and confirmation_token_hash = ?`,
+      [sentAt, subscriberId, confirmationTokenHash]
+    )
+  }
+
+  /** Finalises a reserved send as a definitive provider failure. */
+  async markConfirmationEmailFailed(
+    subscriberId: string,
+    confirmationTokenHash: string
+  ): Promise<void> {
+    await this.manager_.execute(
+      `update newsletter_subscriber
+       set confirmation_send_state = 'FAILED'
+       where id = ? and confirmation_token_hash = ?`,
+      [subscriberId, confirmationTokenHash]
+    )
+  }
+
+  /**
+   * Finalises a reserved send as an ambiguous outcome (timeout, network
+   * disconnect after transmission, malformed response). Deliberately does
+   * not touch `confirmation_email_last_sent_at` — the provider may or may
+   * not have accepted the email, so this must not be recorded as a
+   * confirmed send.
+   */
+  async markConfirmationEmailAmbiguous(
+    subscriberId: string,
+    confirmationTokenHash: string
+  ): Promise<void> {
+    await this.manager_.execute(
+      `update newsletter_subscriber
+       set confirmation_send_state = 'UNKNOWN'
+       where id = ? and confirmation_token_hash = ?`,
+      [subscriberId, confirmationTokenHash]
+    )
   }
 }
 

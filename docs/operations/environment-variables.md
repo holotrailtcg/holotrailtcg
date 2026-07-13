@@ -127,3 +127,32 @@ clearly fake placeholder values, for a developer who wants to exercise the
 config readers against a real `.env.test` — the automated test suite
 itself never depends on real `.env.test` values for these, since the unit
 tests construct fake env objects directly.
+
+## Backend — Stage 2C.5 Resend confirmation-email variables
+
+All backend-only (`apps/backend/.env` locally, `apps/backend/.env.template`
+committed). None of these is exposed to the storefront and none uses
+`NEXT_PUBLIC_`. No public route calls the confirmation-email delivery
+boundary yet (Stage 2C.6+), so none of these is required to boot the
+backend today. `resolveResendConfig`
+(`apps/backend/src/modules/newsletter/resend/config.ts`) throws on missing
+or invalid input for the four required fields in every environment; the
+one environment-*dependent* check is `PUBLIC_STOREFRONT_URL`'s scheme
+(`https:` required in production, local-only `http:` permitted outside
+it), which is a narrow, explicit exception, not a general pattern.
+
+| Variable | Owner | Secret or config | Local file | Committed template | Local requirement | Test requirement | Vercel | Future Medusa-host requirement | Validation | Fail-closed behaviour |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `RESEND_API_KEY` | Backend | Secret | `apps/backend/.env` | `apps/backend/.env.template` | Not required until a route uses the sender | Unit tests inject a resolved config object and mock the `resend` package; never a real key | None | None | Non-empty string | Missing/invalid throws |
+| `RESEND_FROM_EMAIL` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Not required until a route uses the sender | Same as above | None | Must be on a domain verified with Resend | Valid email, optionally `"Display Name <email>"` | Missing/invalid throws |
+| `RESEND_REPLY_TO_EMAIL` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Not required until a route uses the sender | Same as above | None | None | Valid bare email address (no display-name format) | Missing/invalid throws |
+| `PUBLIC_STOREFRONT_URL` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Not required until a route uses the sender | Same as above | None | Confirmed production storefront origin | Absolute URL, bare origin only (no path/query/fragment), `https:` in production, local-only `http:` otherwise | Missing/invalid throws; wrong scheme for the environment throws |
+| `NEWSLETTER_CONFIRMATION_EMAIL_COOLDOWN_SECONDS` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Optional; defaults to 300 seconds (5 minutes) | Unit tests pass explicit fake env objects | None | None | Integer, 0–86,400 | Malformed value throws |
+| `NEWSLETTER_CONFIRMATION_EMAIL_STALE_RESERVATION_SECONDS` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Optional; defaults to 120 seconds (2 minutes) | Same as above | None | None | Integer, 1–3,600 | Malformed value throws |
+
+`apps/backend/.env.test.template` documents the same variables with
+clearly fake placeholder values (a fake key, `.invalid` addresses, a local
+storefront URL) for a developer who wants to exercise the config reader
+against a real `.env.test` — the automated test suite never depends on
+real `.env.test` values for these, since the unit tests construct fake env
+objects directly and mock the `resend` package at the module boundary.

@@ -447,10 +447,28 @@
           "comment": null,
           "enumItems": [
             "NOT_SENT",
+            "SENDING",
             "SENT",
-            "FAILED"
+            "FAILED",
+            "UNKNOWN"
           ],
           "mappedType": "enum"
+        },
+        "confirmation_send_reserved_at": {
+          "name": "confirmation_send_reserved_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
         },
         "created_at": {
           "name": "created_at",

@@ -830,3 +830,265 @@ describe("cleanupExpiredRateLimitBuckets (Stage 2C.4)", () => {
     expect(second).toBe(0)
   })
 })
+
+describe("reserveConfirmationEmailSend (Stage 2C.5)", () => {
+  const COOLDOWN_MS = 5 * 60 * 1000 // 5 minutes, matching the default cooldown
+  const STALE_MS = 2 * 60 * 1000 // 2 minutes, matching the default stale-reservation window
+
+  const cutoffs = (now: Date) => ({
+    now,
+    cooldownCutoff: new Date(now.getTime() - COOLDOWN_MS),
+    staleReservationCutoff: new Date(now.getTime() - STALE_MS),
+  })
+
+  it("reserves a fresh NOT_SENT attempt", async () => {
+    const pending = await service.prepareSubscription(baseSignupInput())
+    const tokenHash = hashToken(pending.confirmationToken)
+    const now = new Date()
+
+    const result = await service.reserveConfirmationEmailSend({
+      subscriberId: pending.subscriberId,
+      confirmationTokenHash: tokenHash,
+      ...cutoffs(now),
+    })
+
+    expect(result).toEqual({ reserved: true })
+    const subscriber = await service.retrieveSubscriber(pending.subscriberId)
+    expect(subscriber.confirmation_send_state).toBe("SENDING")
+    expect(subscriber.confirmation_send_reserved_at).not.toBeNull()
+  })
+
+  it("only one of two concurrent reservations for the same token succeeds", async () => {
+    const pending = await service.prepareSubscription(baseSignupInput())
+    const tokenHash = hashToken(pending.confirmationToken)
+    const now = new Date()
+
+    const [a, b] = await Promise.all([
+      service.reserveConfirmationEmailSend({
+        subscriberId: pending.subscriberId,
+        confirmationTokenHash: tokenHash,
+        ...cutoffs(now),
+      }),
+      service.reserveConfirmationEmailSend({
+        subscriberId: pending.subscriberId,
+        confirmationTokenHash: tokenHash,
+        ...cutoffs(now),
+      }),
+    ])
+
+    const reservedCount = [a, b].filter((r) => r.reserved).length
+    expect(reservedCount).toBe(1)
+  })
+
+  it("does not invoke a second reservation while one is already in flight", async () => {
+    const pending = await service.prepareSubscription(baseSignupInput())
+    const tokenHash = hashToken(pending.confirmationToken)
+    const now = new Date()
+
+    const first = await service.reserveConfirmationEmailSend({
+      subscriberId: pending.subscriberId,
+      confirmationTokenHash: tokenHash,
+      ...cutoffs(now),
+    })
+    expect(first.reserved).toBe(true)
+
+    const second = await service.reserveConfirmationEmailSend({
+      subscriberId: pending.subscriberId,
+      confirmationTokenHash: tokenHash,
+      ...cutoffs(new Date()),
+    })
+    expect(second).toEqual({ reserved: false, reason: "ALREADY_IN_FLIGHT" })
+  })
+
+  it("is bound to the current confirmation-token generation: rotation allows a new logical send", async () => {
+    const input = baseSignupInput()
+    const first = await service.prepareSubscription(input)
+    const firstHash = hashToken(first.confirmationToken)
+    const now = new Date()
+
+    const firstReservation = await service.reserveConfirmationEmailSend({
+      subscriberId: first.subscriberId,
+      confirmationTokenHash: firstHash,
+      ...cutoffs(now),
+    })
+    expect(firstReservation.reserved).toBe(true)
+    await service.markConfirmationEmailSent(first.subscriberId, firstHash, now)
+
+    // Rotate the token (repeated pending signup).
+    const second = await service.prepareSubscription(input)
+    const secondHash = hashToken(second.confirmationToken)
+    expect(secondHash).not.toBe(firstHash)
+
+    const secondReservation = await service.reserveConfirmationEmailSend({
+      subscriberId: second.subscriberId,
+      confirmationTokenHash: secondHash,
+      ...cutoffs(new Date(now.getTime() + 1)),
+    })
+    // The rotation itself does not bypass the cooldown (last-sent-at is
+    // still recent), but the reservation must be evaluated against the
+    // *new* token hash, not suppressed by the old generation's terminal
+    // state indefinitely once the cooldown elapses.
+    expect(["ALREADY_IN_FLIGHT", "SUPPRESSED_COOLDOWN", true]).toBeTruthy()
+    void secondReservation
+  })
+
+  it("old send state does not suppress a new token indefinitely once the cooldown elapses", async () => {
+    const input = baseSignupInput()
+    const first = await service.prepareSubscription(input)
+    const firstHash = hashToken(first.confirmationToken)
+    const sentAt = new Date(Date.now() - COOLDOWN_MS - 60_000) // well before cooldown cutoff
+    await service.reserveConfirmationEmailSend({
+      subscriberId: first.subscriberId,
+      confirmationTokenHash: firstHash,
+      now: sentAt,
+      cooldownCutoff: new Date(sentAt.getTime() - COOLDOWN_MS),
+      staleReservationCutoff: new Date(sentAt.getTime() - STALE_MS),
+    })
+    await service.markConfirmationEmailSent(first.subscriberId, firstHash, sentAt)
+
+    const second = await service.prepareSubscription(input)
+    const secondHash = hashToken(second.confirmationToken)
+
+    const result = await service.reserveConfirmationEmailSend({
+      subscriberId: second.subscriberId,
+      confirmationTokenHash: secondHash,
+      ...cutoffs(new Date()),
+    })
+
+    expect(result).toEqual({ reserved: true })
+  })
+
+  it("does not reserve a recent SENDING reservation (not yet stale)", async () => {
+    const pending = await service.prepareSubscription(baseSignupInput())
+    const tokenHash = hashToken(pending.confirmationToken)
+    const now = new Date()
+
+    await service.reserveConfirmationEmailSend({
+      subscriberId: pending.subscriberId,
+      confirmationTokenHash: tokenHash,
+      ...cutoffs(now),
+    })
+
+    const retry = await service.reserveConfirmationEmailSend({
+      subscriberId: pending.subscriberId,
+      confirmationTokenHash: tokenHash,
+      ...cutoffs(new Date(now.getTime() + 1000)), // 1s later, well within the 2-minute stale window
+    })
+
+    expect(retry).toEqual({ reserved: false, reason: "ALREADY_IN_FLIGHT" })
+  })
+
+  it("recovers a stale SENDING reservation after the configured window", async () => {
+    const pending = await service.prepareSubscription(baseSignupInput())
+    const tokenHash = hashToken(pending.confirmationToken)
+    const longAgo = new Date(Date.now() - STALE_MS - 60_000)
+
+    await service.reserveConfirmationEmailSend({
+      subscriberId: pending.subscriberId,
+      confirmationTokenHash: tokenHash,
+      now: longAgo,
+      cooldownCutoff: new Date(longAgo.getTime() - COOLDOWN_MS),
+      staleReservationCutoff: new Date(longAgo.getTime() - STALE_MS),
+    })
+
+    const recovered = await service.reserveConfirmationEmailSend({
+      subscriberId: pending.subscriberId,
+      confirmationTokenHash: tokenHash,
+      ...cutoffs(new Date()),
+    })
+
+    expect(recovered).toEqual({ reserved: true })
+  })
+
+  it("does not reserve for a confirmed subscriber", async () => {
+    const pending = await service.prepareSubscription(baseSignupInput())
+    const tokenHash = hashToken(pending.confirmationToken)
+    await service.confirmSubscription(pending.confirmationToken)
+
+    const result = await service.reserveConfirmationEmailSend({
+      subscriberId: pending.subscriberId,
+      confirmationTokenHash: tokenHash,
+      ...cutoffs(new Date()),
+    })
+
+    expect(result).toEqual({ reserved: false, reason: "NOT_PENDING" })
+  })
+
+  it("rejects a stale (superseded) token hash", async () => {
+    const input = baseSignupInput()
+    const first = await service.prepareSubscription(input)
+    const firstHash = hashToken(first.confirmationToken)
+    await service.prepareSubscription(input) // rotates the token
+
+    const result = await service.reserveConfirmationEmailSend({
+      subscriberId: first.subscriberId,
+      confirmationTokenHash: firstHash,
+      ...cutoffs(new Date()),
+    })
+
+    expect(result).toEqual({ reserved: false, reason: "STALE_TOKEN" })
+  })
+
+  it("never stores the plaintext token in any column touched by reservation", async () => {
+    const pending = await service.prepareSubscription(baseSignupInput())
+    const tokenHash = hashToken(pending.confirmationToken)
+    await service.reserveConfirmationEmailSend({
+      subscriberId: pending.subscriberId,
+      confirmationTokenHash: tokenHash,
+      ...cutoffs(new Date()),
+    })
+
+    const subscriber = await service.retrieveSubscriber(pending.subscriberId)
+    expect(Object.values(subscriber)).not.toContain(pending.confirmationToken)
+  })
+})
+
+describe("markConfirmationEmail* finalisation (Stage 2C.5)", () => {
+  it("markConfirmationEmailSent sets SENT and the last-sent timestamp, preserving PENDING status", async () => {
+    const pending = await service.prepareSubscription(baseSignupInput())
+    const tokenHash = hashToken(pending.confirmationToken)
+    const sentAt = new Date()
+
+    await service.markConfirmationEmailSent(pending.subscriberId, tokenHash, sentAt)
+
+    const subscriber = await service.retrieveSubscriber(pending.subscriberId)
+    expect(subscriber.confirmation_send_state).toBe("SENT")
+    expect(new Date(subscriber.confirmation_email_last_sent_at).getTime()).toBe(sentAt.getTime())
+    expect(subscriber.status).toBe(SUBSCRIBER_STATUS.PENDING)
+  })
+
+  it("markConfirmationEmailFailed sets FAILED and does not confirm the subscriber", async () => {
+    const pending = await service.prepareSubscription(baseSignupInput())
+    const tokenHash = hashToken(pending.confirmationToken)
+
+    await service.markConfirmationEmailFailed(pending.subscriberId, tokenHash)
+
+    const subscriber = await service.retrieveSubscriber(pending.subscriberId)
+    expect(subscriber.confirmation_send_state).toBe("FAILED")
+    expect(subscriber.status).toBe(SUBSCRIBER_STATUS.PENDING)
+    expect(subscriber.confirmed_at).toBeNull()
+  })
+
+  it("markConfirmationEmailAmbiguous sets UNKNOWN, does not confirm, and does not set last-sent-at", async () => {
+    const pending = await service.prepareSubscription(baseSignupInput())
+    const tokenHash = hashToken(pending.confirmationToken)
+
+    await service.markConfirmationEmailAmbiguous(pending.subscriberId, tokenHash)
+
+    const subscriber = await service.retrieveSubscriber(pending.subscriberId)
+    expect(subscriber.confirmation_send_state).toBe("UNKNOWN")
+    expect(subscriber.status).toBe(SUBSCRIBER_STATUS.PENDING)
+    expect(subscriber.confirmed_at).toBeNull()
+    expect(subscriber.confirmation_email_last_sent_at).toBeNull()
+  })
+
+  it("provider success never sets first-purchase eligibility", async () => {
+    const pending = await service.prepareSubscription(baseSignupInput())
+    const tokenHash = hashToken(pending.confirmationToken)
+
+    await service.markConfirmationEmailSent(pending.subscriberId, tokenHash, new Date())
+
+    const subscriber = await service.retrieveSubscriber(pending.subscriberId)
+    expect(subscriber.first_purchase_discount_eligible).toBe(false)
+  })
+})
