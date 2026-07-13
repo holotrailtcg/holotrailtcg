@@ -26,8 +26,13 @@ coverage
 # TypeScript incremental build info
 *.tsbuildinfo
 
-# Medusa build output
+# Medusa build output and local database dumps
 **/.medusa/
+medusa-db.sql
+
+# SWC / build caches
+.swc/
+**/.cache/
 
 # Misc
 *.pem
@@ -42,6 +47,7 @@ yarn-error.log*
 
 # Editor / IDE
 .vscode
+.idea
 
 # Vercel
 .vercel
@@ -57,14 +63,22 @@ Thumbs.db
 **/.DS_Store
 
 # Environment files - never commit real secrets or local env files
+# Covers .env, .env.local, .env.development, .env.production, .env.test,
+# per-app copies, and *.local variants.
 .env
 .env.*
 
-# ...but DO commit documented examples and templates (no secrets)
+# ...but DO commit documented, placeholder-only example and template files
+# (no secrets). Covers .env.example / .env.template and their qualified
+# variants (e.g. .env.test.template) at the root and in any app.
 !.env.example
-!**/.env.example
 !.env.template
+!.env.*.example
+!.env.*.template
+!**/.env.example
 !**/.env.template
+!**/.env.*.example
+!**/.env.*.template
 
 # Local Claude settings
 .claude/settings.local.json
