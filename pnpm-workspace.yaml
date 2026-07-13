@@ -1,0 +1,15 @@
+packages:
+  - "apps/**"
+  - "!apps/backend/.medusa/**"
+
+# pnpm 10 blocks dependency build scripts by default. Approve the native
+# packages this stack needs to compile/prebuild (Medusa admin/build tooling,
+# SWC transforms, Next.js/image tooling, ESLint resolver). Telemetry is left
+# unapproved intentionally.
+onlyBuiltDependencies:
+  - "@swc/core"
+  - esbuild
+  - msgpackr-extract
+  - protobufjs
+  - sharp
+  - unrs-resolver
