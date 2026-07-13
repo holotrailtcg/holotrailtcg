@@ -1,170 +1,118 @@
-# Environment variables (Stage 1)
+# Environment variables
 
-This is the authoritative catalogue of every environment variable used in Stage
-1, where each value comes from, which application and environment needs it, and
-the exact file it belongs in.
+This is the authoritative environment catalogue through Stage 2C. Real values
+belong only in git-ignored app-local files or the owning deployment platform.
+Committed examples contain blank values or clearly fake test values only.
 
-> **You enter every real value yourself.** Claude does not create your `.env`
-> files or read your secrets. Never paste real secrets into the assistant chat.
-> All real env files (`.env`, `.env.local`, `.env.test`) are git-ignored; only
-> `.env.example` and `*.env.template` are committed, and they must contain
-> placeholders only.
+## Files and ownership
 
-## Files at a glance
-
-| File | Committed? | Purpose |
+| File or platform | Committed | Owner and purpose |
 | --- | --- | --- |
-| `apps/backend/.env.template` | yes (placeholders) | Reference for the backend dev env |
-| `apps/backend/.env` | **no** (git-ignored) | Your local backend **development** values (Neon dev DB) |
-| `apps/backend/.env.test` | **no** (git-ignored) | Your backend **test** values (Neon **test** DB) |
-| `apps/storefront/.env.template` | yes (placeholders) | Reference for the storefront env |
-| `apps/storefront/.env.local` | **no** (git-ignored) | Your local storefront values |
+| `.env.example` | Yes | Combined placeholder-only reference; it is not loaded by either app |
+| `apps/backend/.env.template` | Yes | Backend development reference |
+| `apps/backend/.env` | No | Local backend development configuration and secrets |
+| `apps/backend/.env.test.template` | Yes | Backend test reference with fake provider examples only |
+| `apps/backend/.env.test` | No | Dedicated test database and local test configuration |
+| `apps/storefront/.env.template` | Yes | Browser-safe storefront reference |
+| `apps/storefront/.env.local` | No | Local storefront public configuration |
+| Vercel Preview / Production | No | Storefront variables only; no backend secret belongs in Vercel |
+| Future Medusa host | No | Backend configuration and secrets |
 
-## Backend — `apps/backend/.env` (development)
+Never put `DATABASE_URL`, `JWT_SECRET`, `COOKIE_SECRET`, `RESEND_API_KEY`,
+`RECAPTCHA_SECRET_KEY`, or `NEWSLETTER_RATE_LIMIT_HASH_SECRET` in a storefront
+file or any `NEXT_PUBLIC_` variable.
 
-| Variable | Source | Required | Notes |
-| --- | --- | --- | --- |
-| `DATABASE_URL` | Neon (dev DB) | yes | Neon **direct** connection string for `holotrail_medusa_dev`, including `?sslmode=require`. See [local-development.md](local-development.md) for pooled-vs-direct guidance. |
-| `DB_NAME` | you | yes | `holotrail_medusa_dev` |
-| `JWT_SECRET` | you | yes | Local dev random string. Not a shared/production secret. |
-| `COOKIE_SECRET` | you | yes | Local dev random string. |
-| `STORE_CORS` | starter default | yes | `http://localhost:8000` |
-| `ADMIN_CORS` | starter default | yes | `http://localhost:5173,http://localhost:9000` |
-| `AUTH_CORS` | starter default | yes | `http://localhost:5173,http://localhost:9000` |
-| `REDIS_URL` | — | **no (unused in Stage 1)** | The starter does **not** wire Redis modules; `medusa-config.ts` ignores this. Leave it unset/commented. See the decision record. |
+## Stage 2C deployment matrix
 
-## Backend — `apps/backend/.env.test` (automated tests)
+`Build` means a production storefront build. Backend newsletter values are not
+read by `next build`; they are required on the future Medusa runtime instead.
 
-Loaded automatically by Jest (`jest.config.js` calls `loadEnv("test", …)`).
+| Variable | Owner / class | Local file and committed template | Local requirement | Automated tests | Build | Vercel Preview / Production | Future Medusa host |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `RESEND_API_KEY` | Backend / secret | Backend `.env`; backend template | Required to submit | Fake/injected; never real | No | Never | Required |
+| `RESEND_FROM_EMAIL` | Backend / config | Backend `.env`; backend template | Required to submit | Fake/injected | No | Never | Required; verified Resend domain |
+| `RESEND_REPLY_TO_EMAIL` | Backend / config | Backend `.env`; backend template | Required to submit | Fake/injected | No | Never | Required |
+| `RECAPTCHA_SECRET_KEY` | Backend / secret | Backend `.env`; backend template | Required to submit | Fake verifier; never real | No | Never | Required |
+| `NEWSLETTER_RECAPTCHA_MIN_SCORE` | Backend / config | Backend `.env`; backend template | Required to submit | Explicit fake config | No | Never | Required |
+| `NEWSLETTER_RECAPTCHA_ALLOWED_HOSTNAMES` | Backend / config | Backend `.env`; backend template | Optional, recommended locally as `localhost` | Explicit fake config | No | Never | Recommended; include approved storefront hosts |
+| `NEWSLETTER_RECAPTCHA_MAX_TOKEN_AGE_SECONDS` | Backend / config | Backend `.env`; backend template | Optional; default `120` | Explicit fake config | No | Never | Optional |
+| `NEWSLETTER_CONFIRMATION_TOKEN_TTL_MINUTES` | Backend / config | Backend `.env`; backend template | Optional; default `60` | Override/config tests | No | Never | Optional |
+| `NEWSLETTER_CONFIRMATION_EMAIL_COOLDOWN_SECONDS` | Backend / config | Backend `.env`; backend template | Optional; default `300` | Explicit fake config | No | Never | Optional |
+| `NEWSLETTER_CONFIRMATION_EMAIL_STALE_RESERVATION_SECONDS` | Backend / config | Backend `.env`; backend template | Optional; default `120` | Explicit fake config | No | Never | Optional |
+| `PUBLIC_STOREFRONT_URL` | Backend / config | Backend `.env`; backend template | Required to submit | Fake local origin | No | Never | Required; canonical public storefront origin |
+| `NEWSLETTER_RATE_LIMIT_WINDOW_SECONDS` | Backend / config | Backend `.env`; backend template | Required to submit | HTTP harness override | No | Never | Required |
+| `NEWSLETTER_RATE_LIMIT_MAX_REQUESTS` | Backend / config | Backend `.env`; backend template | Required to submit | HTTP harness override | No | Never | Required |
+| `NEWSLETTER_RATE_LIMIT_HASH_SECRET` | Backend / secret | Backend `.env`; backend template | Required to submit | Fake test secret | No | Never | Required |
+| `NEWSLETTER_TRUST_PROXY` | Backend / config | Backend `.env`; backend template | Set `false` | HTTP harness sets `true` | No | Never | Required decision; default remains off |
+| `NEWSLETTER_TRUSTED_IP_HEADER` | Backend / config | Backend `.env`; backend template | Unset while proxy trust is off | Test-only header | No | Never | Required only when proxy trust is enabled |
+| `NEXT_PUBLIC_RECAPTCHA_SITE_KEY` | Storefront / public | Storefront `.env.local`; storefront template | Required to exercise submission; unrelated dev pages may render without it | Explicit fake/injected boundary | Yes | Required in both | Never |
+| `NEXT_PUBLIC_MEDUSA_BACKEND_URL` | Storefront / public | Storefront `.env.local`; storefront template | Required | Explicit test boundary | Yes | Required in both | Never |
 
-| Variable | Source | Required | Notes |
-| --- | --- | --- | --- |
-| `DATABASE_URL` | Neon (**test** DB) | for integration tests | Neon direct connection string for `holotrail_medusa_test`. **The database name must contain `test`** or the test-database safety guard aborts the run (see [local-development.md](local-development.md)). |
-| `DB_NAME` | you | optional | `holotrail_medusa_test` |
+`NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY` is also required by both storefront
+development and production builds because all Medusa Store API requests use it.
+It is public, but should still be scoped through Medusa sales-channel controls.
 
-Unit tests (`pnpm --filter @dtc/backend test:unit`) do **not** need a database.
+## Validation, failure, logging and rotation
 
-## Storefront — `apps/storefront/.env.local`
+| Variable | Safe example | Validation and missing/invalid behavior | Logging rule | Rotation / change rule |
+| --- | --- | --- | --- | --- |
+| `RESEND_API_KEY` | blank placeholder | Non-empty; lazy resolution throws and subscribe returns generic `503` | Never log | Rotate in Resend on exposure or scheduled secret rotation |
+| `RESEND_FROM_EMAIL` | `Holo Trail TCG <hello@example.invalid>` | Bare or friendly address; invalid throws | Address is configuration but is not logged by Stage 2C | Change only with a verified sending domain |
+| `RESEND_REPLY_TO_EMAIL` | `support@example.invalid` | Valid bare address; invalid throws | Not logged by Stage 2C | Change with the support mailbox |
+| `RECAPTCHA_SECRET_KEY` | blank placeholder | Non-empty; missing/invalid fails closed before Google verification | Never log or expose | Rotate with Google; update backend only |
+| `NEWSLETTER_RECAPTCHA_MIN_SCORE` | `0.5` | Number `0`-`1`; invalid throws | May log only as deployment config, not with a token | Change-controlled abuse policy |
+| `NEWSLETTER_RECAPTCHA_ALLOWED_HOSTNAMES` | `localhost` | Optional comma-separated hostname-only entries; invalid entry throws | May log approved hostnames, never token/provider body | Update with approved storefront hosts |
+| `NEWSLETTER_RECAPTCHA_MAX_TOKEN_AGE_SECONDS` | `120` | Integer `1`-`300`; default `120`; invalid throws | Safe aggregate config only | Change-controlled abuse policy |
+| `NEWSLETTER_CONFIRMATION_TOKEN_TTL_MINUTES` | `60` | Integer `1`-`10080`; default `60`; invalid throws when lifecycle runs | Safe aggregate config only | Change-controlled security policy |
+| `NEWSLETTER_CONFIRMATION_EMAIL_COOLDOWN_SECONDS` | `300` | Integer `0`-`86400`; default `300`; invalid throws | Safe aggregate config only | Change-controlled delivery policy |
+| `NEWSLETTER_CONFIRMATION_EMAIL_STALE_RESERVATION_SECONDS` | `120` | Integer `1`-`3600`; default `120`; invalid throws | Safe aggregate config only | Keep comfortably above sender timeout |
+| `PUBLIC_STOREFRONT_URL` | `http://localhost:8000` | Bare HTTP(S) origin; production requires HTTPS; non-production HTTP is local-only | Origin may be logged, never a generated token URL | Change with canonical storefront origin |
+| `NEWSLETTER_RATE_LIMIT_WINDOW_SECONDS` | `60` | Integer `1`-`86400`; missing/invalid makes subscribe fail closed | Aggregate config only | Change-controlled abuse policy |
+| `NEWSLETTER_RATE_LIMIT_MAX_REQUESTS` | `5` | Integer `1`-`1000`; missing/invalid makes subscribe fail closed | Aggregate config only | Change-controlled abuse policy |
+| `NEWSLETTER_RATE_LIMIT_HASH_SECRET` | blank placeholder | Trimmed string of at least 32 characters; missing/invalid fails closed | Never log | Rotate on exposure; rotation intentionally starts fresh buckets |
+| `NEWSLETTER_TRUST_PROXY` | `false` | Only case-insensitive trimmed `true` enables trust; otherwise off | Safe boolean only | Enable only after host trust-boundary review |
+| `NEWSLETTER_TRUSTED_IP_HEADER` | blank while disabled | Required when proxy trust is true; one named single-IP header only | Header name may be logged, never its value | Change only with hosting topology |
+| `NEXT_PUBLIC_RECAPTCHA_SITE_KEY` | blank placeholder | Missing in development leaves pages available but submission fails closed; missing in production stops the build | Public value may be visible; generated tokens must never be logged | Rotate as a pair with the backend secret/key registration |
+| `NEXT_PUBLIC_MEDUSA_BACKEND_URL` | `http://localhost:9000` | Required by the adapter/result API and production storefront configuration | Origin is public; token-bearing fetch URLs must not be logged | Change with backend public origin |
 
-| Variable | Source | Required | Notes |
-| --- | --- | --- | --- |
-| `NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY` | Medusa Admin | yes | The **Medusa publishable API key**, created/copied from Medusa Admin → **Settings → Publishable API Keys** after the backend runs and is seeded. This is a **Medusa** key and is **not** a Stripe key. Do not assume a fixed prefix — copy the exact value the installed Medusa version shows. The storefront refuses to start without it. |
-| `NEXT_PUBLIC_MEDUSA_BACKEND_URL` | you | yes | `http://localhost:9000` |
-| `NEXT_PUBLIC_RECAPTCHA_SITE_KEY` | Google reCAPTCHA Admin | yes | Public reCAPTCHA v3 site key for the storefront hostname. Safe to expose; never use the secret key here. |
-| `NEXT_PUBLIC_DEFAULT_REGION` | you | yes | **`gb`** — Holo Trail is a UK/GBP store. (The upstream template default is `dk`; use `gb` here.) |
-| `NEXT_PUBLIC_BASE_URL` | you | yes | `http://localhost:8000` |
-| `NEXT_PUBLIC_STRIPE_KEY` | — | **no (leave empty)** | Stripe is out of scope for Stage 1. This is a **Stripe** publishable key, unrelated to the Medusa publishable key above. |
-| `MEDUSA_CLOUD_S3_HOSTNAME` / `MEDUSA_CLOUD_S3_PATHNAME` | — | no | Only for Medusa Cloud image hosting; leave empty locally. |
-| `NODE_ENV` | you | no | `development` |
+All required backend newsletter readers are lazy: the Medusa process can boot
+without provider configuration, but `POST /store/newsletter/subscribe` cannot
+proceed and returns a fixed generic `503`. Confirmation and unsubscribe do not
+need Google or Resend configuration. Storefront production builds deliberately
+require the public site key; development rendering does not, and the form has no
+simulation or fallback success path.
 
-## Paste-ready `.env.example` (root)
+## Consent version
 
-The committed root `.env.example` should contain the following placeholders
-(no secrets). It documents both apps in one place:
+`NEWSLETTER_CONSENT_TEXT_VERSION` is the source-controlled constant in
+`apps/backend/src/api/store/newsletter/shared/consent.ts`, not an environment
+variable. The backend controls it and the consent timestamp/source. Increment
+the constant whenever the displayed consent meaning changes. Do not add it to
+local env files or deployment platforms.
 
-```dotenv
-# ─── Backend (apps/backend/.env) — development ───────────────────────────────
-# Neon DIRECT connection string for the dev database (include ?sslmode=require).
-DATABASE_URL=postgres://USER:PASSWORD@HOST/holotrail_medusa_dev?sslmode=require
-DB_NAME=holotrail_medusa_dev
-JWT_SECRET=replace-with-local-dev-random-string
-COOKIE_SECRET=replace-with-local-dev-random-string
-STORE_CORS=http://localhost:8000
-ADMIN_CORS=http://localhost:5173,http://localhost:9000
-AUTH_CORS=http://localhost:5173,http://localhost:9000
-# REDIS_URL is NOT used in Stage 1 (Medusa runs in-memory). Leave unset.
+## Test harness variable
 
-# ─── Backend tests (apps/backend/.env.test) ─────────────────────────────────
-# Neon DIRECT connection string for the SEPARATE test database.
-# The database name MUST contain "test" or the test-db safety guard aborts.
-# DATABASE_URL=postgres://USER:PASSWORD@HOST/holotrail_medusa_test?sslmode=require
+`MEDUSA_ADMIN_DISABLE` exists only so the real Medusa HTTP integration harness
+can boot without a built Admin UI. The harness supplies it directly; it does not
+belong in normal templates, Vercel, or the future Medusa-host configuration.
+Admin is disabled only when the value is the exact case-sensitive string
+`"true"`; every other value leaves Admin enabled.
 
-# ─── Storefront (apps/storefront/.env.local) ────────────────────────────────
-# Medusa publishable API key from Admin → Settings → Publishable API Keys.
-# This is a MEDUSA key, not a Stripe key.
-NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY=
-NEXT_PUBLIC_RECAPTCHA_SITE_KEY=replace-with-public-recaptcha-v3-site-key
-NEXT_PUBLIC_MEDUSA_BACKEND_URL=http://localhost:9000
-NEXT_PUBLIC_DEFAULT_REGION=gb
-NEXT_PUBLIC_BASE_URL=http://localhost:8000
-# Stripe is out of scope for Stage 1 — leave empty.
-NEXT_PUBLIC_STRIPE_KEY=
-```
+## Baseline application variables
 
-The committed `.env.example` and the two `*.env.template` files
-(`apps/backend/.env.template`, `apps/storefront/.env.template`) are already
-populated with placeholder-only values matching the blocks above. The
-`.claude/settings.json` deny rule permits editing these committed templates while
-still blocking all real secret files (`.env`, `.env.local`, `.env.development`,
-`.env.production`, `.env.test`, `*.env.*.local`).
+- Backend: `DATABASE_URL`, `STORE_CORS`, `ADMIN_CORS`, `AUTH_CORS`,
+  `JWT_SECRET`, and `COOKIE_SECRET`. Use a direct test database whose name
+  contains `test` for integration tests. `DB_NAME` is documentation-only and is
+  not read by current code. Redis is not wired in this stage.
+- Storefront: `NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY`,
+  `NEXT_PUBLIC_MEDUSA_BACKEND_URL`, `NEXT_PUBLIC_BASE_URL`, and
+  `NEXT_PUBLIC_DEFAULT_REGION=gb`. `NEXT_PUBLIC_STRIPE_KEY` remains unused.
+- Next.js supplies `NODE_ENV`; do not set it in `.env.local`.
 
-## Backend — Stage 2C.4 newsletter abuse-protection variables
+## Test database safety
 
-All backend-only (`apps/backend/.env` locally, `apps/backend/.env.template`
-committed). None of these is exposed to the storefront and none uses
-`NEXT_PUBLIC_`. No public route calls the rate limiter or reCAPTCHA
-verifier yet (Stage 2C.5+), so none of these is required to boot the
-backend today — they become required only once a route resolves them.
-Every reader (`resolveRateLimitConfig`, `resolveRecaptchaConfig` in
-`apps/backend/src/modules/newsletter/{rate-limit,recaptcha}/config.ts`)
-throws on missing or invalid input in every environment; there is no
-environment-specific default, which is what makes "production fails
-closed on missing configuration" true without an explicit `NODE_ENV`
-branch.
-
-| Variable | Owner | Secret or config | Local file | Committed template | Local requirement | Test requirement | Vercel | Future Medusa-host requirement | Validation | Fail-closed behaviour |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `NEWSLETTER_RATE_LIMIT_WINDOW_SECONDS` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Not required until a route uses the rate limiter | Unit tests pass explicit fake env objects, not real env | None | None | Integer, 1–86,400 | Missing/invalid throws (never resolves to `allowed: true`) |
-| `NEWSLETTER_RATE_LIMIT_MAX_REQUESTS` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Not required until a route uses the rate limiter | Unit tests pass explicit fake env objects | None | None | Integer, 1–1,000 | Same as above |
-| `NEWSLETTER_RATE_LIMIT_HASH_SECRET` | Backend | Secret | `apps/backend/.env` | `apps/backend/.env.template` | Not required until a route uses the rate limiter | Unit tests pass explicit fake env objects; never a real secret | None | None | Non-empty string, ≥32 characters | Same as above |
-| `NEWSLETTER_TRUST_PROXY` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Leave `false`/unset until the Medusa host and its trusted proxy header are confirmed | Not required by current tests | None | Must be set together with `NEWSLETTER_TRUSTED_IP_HEADER` once the host is chosen | `true`/anything else | `true` without a header name throws |
-| `NEWSLETTER_TRUSTED_IP_HEADER` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Leave unset until the Medusa host is confirmed | Not required by current tests | None | Header name the confirmed host actually sets on trusted requests | Non-empty string | Only trusted when `NEWSLETTER_TRUST_PROXY=true` |
-| `RECAPTCHA_SECRET_KEY` | Backend | Secret | `apps/backend/.env` | `apps/backend/.env.template` | Not required until a route uses the verifier | Unit tests inject a resolved config object, not real env; never a real Google secret | None | None | Non-empty string | Missing/invalid throws |
-| `NEWSLETTER_RECAPTCHA_MIN_SCORE` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Not required until a route uses the verifier | Same as above | None | None | Number, 0.0–1.0 | Same as above |
-| `NEWSLETTER_RECAPTCHA_ALLOWED_HOSTNAMES` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Optional; unset disables hostname validation | Same as above | None | Storefront's confirmed production/preview hostnames | Comma-separated hostnames | Unset → hostname check skipped; malformed entry throws |
-| `NEWSLETTER_RECAPTCHA_MAX_TOKEN_AGE_SECONDS` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Optional; defaults to 120 seconds | Same as above | None | None | Integer, 1–300 | Malformed value throws |
-
-`apps/backend/.env.test.template` documents the same variables with
-clearly fake placeholder values, for a developer who wants to exercise the
-config readers against a real `.env.test` — the automated test suite
-itself never depends on real `.env.test` values for these, since the unit
-tests construct fake env objects directly.
-
-## Backend — Stage 2C.5 Resend confirmation-email variables
-
-All backend-only (`apps/backend/.env` locally, `apps/backend/.env.template`
-committed). None of these is exposed to the storefront and none uses
-`NEXT_PUBLIC_`. No public route calls the confirmation-email delivery
-boundary yet (Stage 2C.6+), so none of these is required to boot the
-backend today. `resolveResendConfig`
-(`apps/backend/src/modules/newsletter/resend/config.ts`) throws on missing
-or invalid input for the four required fields in every environment; the
-one environment-*dependent* check is `PUBLIC_STOREFRONT_URL`'s scheme
-(`https:` required in production, local-only `http:` permitted outside
-it), which is a narrow, explicit exception, not a general pattern.
-
-| Variable | Owner | Secret or config | Local file | Committed template | Local requirement | Test requirement | Vercel | Future Medusa-host requirement | Validation | Fail-closed behaviour |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `RESEND_API_KEY` | Backend | Secret | `apps/backend/.env` | `apps/backend/.env.template` | Not required until a route uses the sender | Unit tests inject a resolved config object and mock the `resend` package; never a real key | None | None | Non-empty string | Missing/invalid throws |
-| `RESEND_FROM_EMAIL` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Not required until a route uses the sender | Same as above | None | Must be on a domain verified with Resend | Valid email, optionally `"Display Name <email>"` | Missing/invalid throws |
-| `RESEND_REPLY_TO_EMAIL` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Not required until a route uses the sender | Same as above | None | None | Valid bare email address (no display-name format) | Missing/invalid throws |
-| `PUBLIC_STOREFRONT_URL` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Not required until a route uses the sender | Same as above | None | Confirmed production storefront origin | Absolute URL, bare origin only (no path/query/fragment), `https:` in production, local-only `http:` otherwise | Missing/invalid throws; wrong scheme for the environment throws |
-| `NEWSLETTER_CONFIRMATION_EMAIL_COOLDOWN_SECONDS` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Optional; defaults to 300 seconds (5 minutes) | Unit tests pass explicit fake env objects | None | None | Integer, 0–86,400 | Malformed value throws |
-| `NEWSLETTER_CONFIRMATION_EMAIL_STALE_RESERVATION_SECONDS` | Backend | Config | `apps/backend/.env` | `apps/backend/.env.template` | Optional; defaults to 120 seconds (2 minutes) | Same as above | None | None | Integer, 1–3,600 | Malformed value throws |
-
-`apps/backend/.env.test.template` documents the same variables with
-clearly fake placeholder values (a fake key, `.invalid` addresses, a local
-storefront URL) for a developer who wants to exercise the config reader
-against a real `.env.test` — the automated test suite never depends on
-real `.env.test` values for these, since the unit tests construct fake env
-objects directly and mock the `resend` package at the module boundary.
-
-## Storefront - Stage 2C.7 newsletter reCAPTCHA variable
-
-| Variable | Owner | Public or secret | Local file | Committed template | Local requirement | Vercel Preview | Vercel Production | Future Medusa host | Validation | Fail-closed behaviour |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `NEXT_PUBLIC_RECAPTCHA_SITE_KEY` | Storefront | Public | `apps/storefront/.env.local` | `apps/storefront/.env.template` | Required to exercise newsletter submission locally; the developer supplies a site key configured for the local hostname | Required for preview verification, with preview hostnames configured in Google | Required | No | Non-empty string checked by storefront startup and reCAPTCHA client construction; committed values are fake/public placeholders only | Missing configuration prevents startup; client construction also rejects, and the form never falls back to simulated success |
-
-The browser sends the resulting short-lived token to the Medusa backend for
-verification. `RECAPTCHA_SECRET_KEY` remains backend-only and must never be
-added to a storefront or `NEXT_PUBLIC_` variable.
+Before any automated database-backed test or reviewed migration command, load
+the effective test `DATABASE_URL`, parse the database name, and invoke
+`assertTestDatabase`. It rejects missing URLs and any database name that does
+not contain `test`, without printing credentials. Never reset, drop, or reseed a
+database merely to verify Stage 2C migrations.

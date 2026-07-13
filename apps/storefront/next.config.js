@@ -14,9 +14,14 @@ const S3_PATHNAME = process.env.MEDUSA_CLOUD_S3_PATHNAME
 const nextConfig = {
   reactStrictMode: true,
   logging: {
-    fetches: {
-      // Query strings may contain one-time newsletter tokens. Never print them.
-      fullUrl: false,
+    // Next 15 logs incoming request URLs verbatim in development. Ignore only
+    // the two token-bearing routes; unrelated operational request logging stays
+    // enabled. Fetch logging remains at Next's default-off setting because its
+    // `fullUrl: false` option truncates query values rather than redacting them.
+    incomingRequests: {
+      ignore: [
+        /^\/(?:[a-z]{2}\/)?newsletter\/(?:confirm|unsubscribe)(?:\?|$)/,
+      ],
     },
   },
   eslint: {

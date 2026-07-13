@@ -1,5 +1,6 @@
 import { defineMiddlewares, validateAndTransformBody } from "@medusajs/framework/http"
 import { subscribeBodySchema } from "./store/newsletter/shared/validation"
+import { redactNewsletterTokenQueryFromRequestLog } from "./store/newsletter/shared/request-logging"
 
 /**
  * Route-level middleware for the public newsletter routes (Stage 2C.6, see
@@ -20,6 +21,16 @@ export default defineMiddlewares({
       methods: ["POST"],
       bodyParser: { sizeLimit: "10kb" },
       middlewares: [validateAndTransformBody(subscribeBodySchema)],
+    },
+    {
+      matcher: "/store/newsletter/confirm",
+      methods: ["GET"],
+      middlewares: [redactNewsletterTokenQueryFromRequestLog],
+    },
+    {
+      matcher: "/store/newsletter/unsubscribe",
+      methods: ["GET"],
+      middlewares: [redactNewsletterTokenQueryFromRequestLog],
     },
   ],
 })

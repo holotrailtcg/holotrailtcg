@@ -1,8 +1,8 @@
 # 0005 — Newsletter backend design (module, tokens, rate limiting)
 
-- **Status:** Accepted (design only — no implementation in this stage)
+- **Status:** Implemented and verified (Stage 2C.8 complete)
 - **Date:** 2026-07-13
-- **Stage:** 2C.1 (repository reconnaissance and implementation design)
+- **Stage:** 2C (design through final verification and hardening)
 
 ## Context
 
@@ -1614,3 +1614,151 @@ Google, Resend, or production backend request is made.
 The only refinement from the earlier design sketch is adding route-specific
 HTTP security headers alongside metadata and disabling full-URL fetch logging.
 The proposed server-page/minimal-cleanup-client split is otherwise unchanged.
+
+## Stage 2C.8 final verification and hardening
+
+Stage 2C.8 verified the implementation, migrations, test database, local HTTP
+behaviour, configuration ownership and privacy boundaries. Stage 2C is now
+implemented. This section supersedes any earlier design-only or provisional
+statements in this record; it does not introduce Stage 2D route gating.
+
+### Final architecture and schema
+
+- The registered Medusa `newsletter` module and PostgreSQL tables
+  `newsletter_subscriber` and `newsletter_rate_limit_bucket` are the source of
+  truth. Resend remains a backend-only delivery boundary; signup never creates
+  a Medusa customer and does not use Resend contacts, audiences or broadcasts.
+- Subscriber states remain exactly `PENDING`, `CONFIRMED` and `UNSUBSCRIBED`.
+  Normalised email and current/consumed token hashes have partial unique
+  indexes. Only SHA-256 token hashes and HMAC-SHA-256 rate-limit request keys
+  are stored; there are no plaintext-token or raw-IP columns.
+- `Migration20260713205538` adds the database invariant
+  `CK_newsletter_subscriber_eligibility_requires_confirmation`, so
+  `first_purchase_discount_eligible = true` is possible only for a
+  `CONFIRMED` subscriber. The default remains false.
+- The four ordered newsletter migrations and the newsletter snapshot were
+  checked against the guarded `holotrail_medusa_test` database. Catalog queries
+  verified columns, types, nullability, defaults, constraints, partial/unique
+  indexes and migration-history rows. The compiled-module migrator reported no
+  pending newsletter migration after application and no schema drift was found.
+
+### Routes, lifecycle and delivery
+
+- Public routes are `POST /store/newsletter/subscribe`,
+  `GET /store/newsletter/confirm` and
+  `GET /store/newsletter/unsubscribe`. Subscribe accepts JSON only, requires
+  literal boolean consent, and applies rate limiting then honeypot handling
+  before reCAPTCHA or subscriber work. Responses remain generic and expose no
+  personal, subscriber, provider or delivery state.
+- Confirmation and unsubscribe accept one opaque token, hash it before lookup,
+  return only stable result codes and send no-store/no-referrer protection.
+  Confirmation expiry and rotation, consumed-hash idempotence, unsubscribe
+  idempotence, fresh resubscription consent and row-locked state transitions
+  were verified.
+- Database-backed fixed-window rate limiting uses deterministic UTC windows and
+  an atomic upsert. Proxy trust is disabled by default; a single trusted header
+  is used only when explicitly configured, and multi-hop values are rejected.
+  Failures fail closed and bounded cleanup uses the indexed window predicate.
+- Backend reCAPTCHA verification checks the exact `newsletter_subscribe`
+  action, score, optional hostname, challenge age, malformed/error responses
+  and network timeout. No environment or magic-token bypass exists.
+- Confirmation email delivery uses the official backend-only Resend SDK and a
+  transactionally reserved logical attempt. The HTML and text variants escape
+  names and URLs, require confirmation, make no discount promise, and use a
+  stable per-attempt idempotency key. Definitive failure and ambiguous outcome
+  are distinct; neither is blindly retried, confirms a subscriber or grants
+  eligibility.
+
+Module and HTTP integration tests cover new, repeated, confirmed and
+resubscribed signups; simultaneous new/pending requests; valid, repeated,
+expired and rotated confirmation; valid/repeated unsubscribe; and the
+confirmation/unsubscribe race. No duplicate normalised-email row, multiple
+current confirmation token or contradictory final state was found.
+
+### Storefront flow and result pages
+
+- The coming-soon form uses the real configuration-driven Medusa adapter.
+  Validation and literal consent happen before one fresh reCAPTCHA execution;
+  the bounded honeypot is included, double submit is locked and no request is
+  automatically retried. Copy is generic and makes no delivery, confirmation
+  or discount guarantee.
+- The public reCAPTCHA site key is required for production startup and Vercel
+  deployment. Its absence no longer blocks unrelated development rendering,
+  while an attempted newsletter submission still fails closed without a key.
+- Confirmation and unsubscribe token requests are intercepted and processed
+  server-side in middleware before React rendering. The browser receives a
+  single redirect to the country-aware page containing only a validated,
+  non-sensitive display result code. The cleanup client receives no token and
+  removes the result query with `history.replaceState`, without adding browser
+  history. Result pages remain dynamic, uncached, noindex/nofollow,
+  no-referrer, accessible, sitemap-excluded and independent of Stage 2D.
+
+### Environment ownership
+
+The authoritative variable-by-variable ownership matrix is
+`docs/operations/environment-variables.md`. Backend secrets, including the
+Resend key, reCAPTCHA secret and rate-limit HMAC secret, stay in backend local
+or future Medusa-host configuration and never belong in storefront templates
+or Vercel. `NEXT_PUBLIC_RECAPTCHA_SITE_KEY` and
+`NEXT_PUBLIC_MEDUSA_BACKEND_URL` are public storefront/Vercel configuration.
+`PUBLIC_STOREFRONT_URL` remains backend owned. `MEDUSA_ADMIN_DISABLE` is an
+opt-in test-harness switch and disables Admin only for exact string `"true"`.
+
+### Logging and token-URL protection
+
+Actual local requests exposed two framework defaults that static review alone
+did not reveal:
+
+- Next.js 15.5.18's `logging.fullUrl: false` still logged a truncated sensitive
+  URL. It was replaced with supported `logging.incomingRequests.ignore`
+  patterns scoped only to confirmation and unsubscribe token routes, retaining
+  unrelated request logging.
+- Medusa's Morgan request logger used `req.originalUrl`. Route middleware now
+  strips the query from that logging-only property for the two token GET
+  routes while preserving `req.url` and parsed query behaviour.
+
+Local sentinel requests confirmed that confirmation and unsubscribe tokens do
+not appear in framework request logs, redirect locations/bodies, final HTML or
+React Server Component payloads. Fetch logging is not enabled, routes are
+uncached, referrers are suppressed, robots and sitemap discovery are blocked,
+and no token-bearing value is provider metadata. Explicit logger/console,
+error, response and test-diagnostic searches found no Stage 2C personal data,
+raw IP, request key, secrets, token/hash, idempotency key, provider response or
+email body logging.
+
+### Tests and manual verification
+
+The final pass ran backend TypeScript, lint, unit, module-integration and HTTP
+integration suites; focused lifecycle, rate-limit, Resend reservation,
+reCAPTCHA failure and Admin-disable coverage; storefront TypeScript, lint,
+full/focused Vitest coverage; both builds; guarded migration and catalog
+checks; real local route/header/log checks; sitemap assertions; dependency,
+tracked-environment, secret-pattern, forbidden-logging and diff checks.
+External Google and Resend services were never called: provider boundaries used
+fakes and sentinel tokens only. The integration harness verified the full
+pending-to-confirmed-to-unsubscribed-to-resubscribed flow and all required
+failure/concurrency paths.
+
+### Hardening changes and design deviations
+
+The final implementation differs from the earlier record in four deliberate
+ways:
+
+1. Eligibility now has a generated database check constraint as well as
+   lifecycle-service enforcement.
+2. Result-token processing moved from the page Server Component into middleware
+   because Next.js serialized the original token URL into the RSC bootstrap
+   payload even when the token was not passed to a client component.
+3. Framework request-log protection is route-specific rather than disabling
+   unrelated operational logging.
+4. Missing public site-key configuration is development-lazy but
+   submission-fail-closed; production startup remains strict.
+
+One tooling limitation is accepted: under `NODE_ENV=test`, Medusa 2.17.2's CLI
+source-TypeScript migration path reported the newly generated migration as
+up-to-date. Verification therefore built the backend and ran Medusa's official
+MikroORM migrator against the compiled module migration directory; it found and
+applied exactly the missing migration, after which direct history/catalog and
+zero-pending checks passed. This affects the verification command path only,
+not runtime correctness or deployable migration contents. No security or
+correctness limitation remains in Stage 2C.

@@ -43,17 +43,11 @@ describe("confirmation result page", () => {
     },
   )
 
-  it("processes on the server without rendering or passing the token to cleanup", async () => {
-    vi.stubEnv("NEXT_PUBLIC_MEDUSA_BACKEND_URL", "https://backend.example")
-    vi.stubEnv("NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY", "pk_test")
+  it("renders only a stable middleware result and passes cleanup a clean path", async () => {
     const token = "opaque-confirmation-token"
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => Response.json({ result: "confirmed" })),
-    )
     const element = await ConfirmPage({
       params: Promise.resolve({ countryCode: "gb" }),
-      searchParams: Promise.resolve({ token }),
+      searchParams: Promise.resolve({ result: "confirmed", token }),
     })
     const html = renderToStaticMarkup(element)
     expect(html).toContain("Your email is confirmed")
@@ -98,17 +92,11 @@ describe("unsubscribe result page", () => {
     },
   )
 
-  it("processes on the server and gives cleanup only the clean path", async () => {
-    vi.stubEnv("NEXT_PUBLIC_MEDUSA_BACKEND_URL", "https://backend.example")
-    vi.stubEnv("NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY", "pk_test")
+  it("renders only a stable middleware result and gives cleanup a clean path", async () => {
     const token = "opaque-unsubscribe-token"
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => Response.json({ result: "unsubscribed" })),
-    )
     const element = await UnsubscribePage({
       params: Promise.resolve({ countryCode: "gb" }),
-      searchParams: Promise.resolve({ token }),
+      searchParams: Promise.resolve({ result: "unsubscribed", token }),
     })
     const html = renderToStaticMarkup(element)
     expect(html).toContain("You have been unsubscribed")

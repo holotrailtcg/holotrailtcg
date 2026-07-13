@@ -612,6 +612,11 @@
           "name": "CK_newsletter_subscriber_source_length",
           "expression": "length(source) <= 64",
           "definition": "check ((length(source) <= 64))"
+        },
+        {
+          "name": "CK_newsletter_subscriber_eligibility_requires_confirmation",
+          "expression": "not first_purchase_discount_eligible or status = 'CONFIRMED'",
+          "definition": "check ((not first_purchase_discount_eligible or status = 'CONFIRMED'))"
         }
       ],
       "foreignKeys": {},

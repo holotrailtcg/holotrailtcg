@@ -11,13 +11,16 @@ const requiredEnvs = [
     key: "NEXT_PUBLIC_RECAPTCHA_SITE_KEY",
     description:
       "Add the public reCAPTCHA v3 site key for the storefront hostname.",
+    productionOnly: true,
   },
 ];
 
 function checkEnvVariables() {
   const missingEnvs = requiredEnvs.filter(function (env) {
-    c;
-    return !process.env[env.key];
+    return (
+      !process.env[env.key] &&
+      (!env.productionOnly || process.env.NODE_ENV === "production")
+    );
   });
 
   if (missingEnvs.length > 0) {

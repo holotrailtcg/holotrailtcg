@@ -136,6 +136,11 @@ const Subscriber = model
       name: "CK_newsletter_subscriber_source_length",
       expression: (columns) => `length(${columns.source}) <= 64`,
     },
+    {
+      name: "CK_newsletter_subscriber_eligibility_requires_confirmation",
+      expression: (columns) =>
+        `not ${columns.first_purchase_discount_eligible} or ${columns.status} = 'CONFIRMED'`,
+    },
   ])
 
 export default Subscriber

@@ -1,9 +1,20 @@
 import { HttpTypes } from "@medusajs/types"
 import { NextRequest, NextResponse } from "next/server"
+import {
+  getConfirmationResult,
+  getUnsubscribeResult,
+} from "@lib/newsletter/result-api"
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_MEDUSA_BACKEND_URL
 const PUBLISHABLE_API_KEY = process.env.NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY
 const DEFAULT_REGION = process.env.NEXT_PUBLIC_DEFAULT_REGION || "dk"
+
+function redirectWithoutBody(url: string | URL): NextResponse {
+  return new NextResponse(null, {
+    status: 307,
+    headers: { Location: String(url) },
+  })
+}
 
 const regionMapCache = {
   regionMap: new Map<string, HttpTypes.StoreRegion>(),
@@ -116,6 +127,28 @@ export async function middleware(request: NextRequest) {
   const firstPathSegment = request.nextUrl.pathname.split("/")[1]?.toLowerCase()
   const urlHasCountry = firstPathSegment === country.toLowerCase()
 
+  const tokenRoute = request.nextUrl.pathname.match(
+    /^\/(?:[a-z]{2}\/)?newsletter\/(confirm|unsubscribe)$/,
+  )
+  const token = request.nextUrl.searchParams.get("token") ?? undefined
+
+  if (tokenRoute && token) {
+    const result =
+      tokenRoute[1] === "confirm"
+        ? await getConfirmationResult(token)
+        : await getUnsubscribeResult(token)
+    const redirectUrl = new URL(
+      `/${country}/newsletter/${tokenRoute[1]}`,
+      request.nextUrl.origin,
+    )
+    redirectUrl.searchParams.set("result", result)
+    const response = redirectWithoutBody(redirectUrl)
+    response.headers.set("Cache-Control", "no-store")
+    response.headers.set("Referrer-Policy", "no-referrer")
+    response.headers.set("X-Robots-Tag", "noindex, nofollow")
+    return response
+  }
+
   if (urlHasCountry) {
     if (!cacheIdCookie) {
       const response = NextResponse.next()
@@ -133,7 +166,13 @@ export async function middleware(request: NextRequest) {
   const queryString = request.nextUrl.search || ""
   const redirectUrl = `${request.nextUrl.origin}/${country}${redirectPath}${queryString}`
 
-  return NextResponse.redirect(redirectUrl, 307)
+  const response = redirectWithoutBody(redirectUrl)
+  if (/^\/newsletter\/(confirm|unsubscribe)$/.test(request.nextUrl.pathname)) {
+    response.headers.set("Cache-Control", "no-store")
+    response.headers.set("Referrer-Policy", "no-referrer")
+    response.headers.set("X-Robots-Tag", "noindex, nofollow")
+  }
+  return response
 }
 
 export const config = {

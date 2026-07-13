@@ -2,7 +2,7 @@ import type { Metadata } from "next"
 
 import { NewsletterResultView } from "@components/newsletter/result-view"
 import { UrlCleanup } from "@components/newsletter/url-cleanup"
-import { getUnsubscribeResult } from "@lib/newsletter/result-api"
+import type { UnsubscribeResult } from "@lib/newsletter/result-api"
 
 export const dynamic = "force-dynamic"
 export const revalidate = 0
@@ -18,19 +18,28 @@ export default async function NewsletterUnsubscribePage({
   searchParams,
 }: {
   params: Promise<{ countryCode: string }>
-  searchParams: Promise<{ token?: string | string[] }>
+  searchParams: Promise<{
+    token?: string | string[]
+    result?: string | string[]
+  }>
 }) {
   const [{ countryCode }, query] = await Promise.all([params, searchParams])
-  const token = typeof query.token === "string" ? query.token : undefined
-  const result = await getUnsubscribeResult(token)
   const cleanPathname = `/${countryCode}/newsletter/unsubscribe`
+
+  const result =
+    typeof query.result === "string" &&
+    ["unsubscribed", "already_unsubscribed", "invalid", "temporary_error"].includes(
+      query.result,
+    )
+      ? query.result
+      : "invalid"
 
   return (
     <>
       <NewsletterResultView
         countryCode={countryCode}
         type="unsubscribe"
-        result={result}
+        result={result as UnsubscribeResult}
       />
       <UrlCleanup cleanPathname={cleanPathname} />
     </>

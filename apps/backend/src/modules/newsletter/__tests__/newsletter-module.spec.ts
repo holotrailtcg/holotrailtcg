@@ -134,6 +134,17 @@ describe("subscriber model and schema behaviour", () => {
     expect(subscriber.first_purchase_discount_eligible).toBe(false)
   })
 
+  it("rejects eligibility before confirmation at the database boundary", async () => {
+    await expect(
+      service.createSubscribers(
+        baseSubscriberInput({
+          status: SUBSCRIBER_STATUS.PENDING,
+          first_purchase_discount_eligible: true,
+        })
+      )
+    ).rejects.toThrow()
+  })
+
   it("rejects a duplicate normalised_email", async () => {
     const suffix = uniqueSuffix()
     const normalisedEmail = `dup+${suffix}@example.com`
