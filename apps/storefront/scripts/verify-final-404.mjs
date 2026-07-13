@@ -17,26 +17,48 @@
  *      endpoint (so the middleware's region lookup succeeds without needing a
  *      real backend — this script does not start or depend on any Stage 2C+
  *      backend infrastructure).
- *   2. The real storefront (`next dev`) on an ephemeral port, pointed at that
- *      stub.
+ *   2. The real storefront (`next dev`) on a dynamically chosen free port,
+ *      pointed at that stub.
  *
  * Then it asserts, over real HTTP:
  *   - GET /gb/does-not-exist  -> 404 (valid country prefix, unknown route)
  *   - GET /definitely-missing -> 404 after the middleware's own redirect to
  *     /gb/definitely-missing (no country prefix, still unknown route)
  *
+ * Both the spawned Next process (and any workers it forks) and the region
+ * stub are torn down with a bounded timeout on every exit path, including
+ * Windows, where a plain `child.kill()` only signals the immediate `node`
+ * process and leaves Next's own child processes running.
+ *
  * Usage: `pnpm run verify:404` from `apps/storefront`.
  */
 
 import { createServer } from "node:http"
 import { spawn } from "node:child_process"
+import { createServer as createNetServer } from "node:net"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STOREFRONT_ROOT = path.resolve(__dirname, "..")
+const IS_WINDOWS = process.platform === "win32"
+
 const READY_TIMEOUT_MS = 90_000
 const POLL_INTERVAL_MS = 500
+const TERMINATE_TIMEOUT_MS = 10_000
+const TERMINATE_GRACE_MS = 4_000
+
+/** Find a currently-free TCP port without adding a "get-port"-style dependency. */
+function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createNetServer()
+    probe.on("error", reject)
+    probe.listen(0, "127.0.0.1", () => {
+      const { port } = probe.address()
+      probe.close((err) => (err ? reject(err) : resolve(port)))
+    })
+  })
+}
 
 function startRegionStub() {
   return new Promise((resolve) => {
@@ -58,7 +80,7 @@ function startRegionStub() {
 }
 
 function startStorefront(port, backendUrl) {
-  const child = spawn(
+  return spawn(
     "node",
     [
       "node_modules/next/dist/bin/next",
@@ -76,22 +98,206 @@ function startStorefront(port, backendUrl) {
         NEXT_PUBLIC_DEFAULT_REGION: "gb",
       },
       stdio: ["ignore", "pipe", "pipe"],
+      // POSIX: makes `child` the leader of its own process group, so we can
+      // terminate the whole tree (Next forks additional workers) by signalling
+      // the negative pid. Windows has no equivalent process-group signalling,
+      // so termination there goes through `taskkill /T` instead (see
+      // `killProcessTree`) and `detached` is left off to avoid spawning a
+      // detached console.
+      detached: !IS_WINDOWS,
     }
   )
-  return child
 }
 
-async function waitUntilReady(origin, deadline) {
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`${origin}/gb/coming-soon`)
-      if (res.status === 200) return
-    } catch {
-      // Server not accepting connections yet; keep polling.
+/**
+ * Resolves once the spawned Next process has both (a) announced readiness on
+ * its own stdout for our exact port, and (b) served a 200 with Next's
+ * `x-powered-by` header from that same origin. Gating on the child's own
+ * stdout output — rather than blind HTTP polling — ensures a stray,
+ * unrelated process that happens to already be listening on the chosen port
+ * cannot be mistaken for the instance this script started; the header check
+ * is a second, independent confirmation that the response actually came from
+ * a Next.js server.
+ *
+ * Rejects immediately (without waiting out the poll timeout) if the child
+ * process errors or exits before readiness is reached.
+ */
+function waitUntilReady(child, port, origin, getOutput) {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    let pollTimer
+
+    const finishOk = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(pollTimer)
+      child.off("error", onChildError)
+      child.off("exit", onChildExit)
+      resolve()
     }
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
-  }
-  throw new Error(`Storefront did not become ready within ${READY_TIMEOUT_MS}ms`)
+
+    const finishFail = (error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(pollTimer)
+      child.off("error", onChildError)
+      child.off("exit", onChildExit)
+      reject(error)
+    }
+
+    function onChildError(err) {
+      finishFail(new Error(`Next process failed to start: ${err.message}`))
+    }
+
+    function onChildExit(code, signal) {
+      finishFail(
+        new Error(
+          `Next process exited before becoming ready (code=${code}, signal=${signal})`
+        )
+      )
+    }
+
+    child.once("error", onChildError)
+    child.once("exit", onChildExit)
+
+    const deadline = Date.now() + READY_TIMEOUT_MS
+
+    async function poll() {
+      if (settled) return
+      if (Date.now() >= deadline) {
+        finishFail(
+          new Error(`Storefront did not become ready within ${READY_TIMEOUT_MS}ms`)
+        )
+        return
+      }
+
+      const output = getOutput()
+      const childAnnouncedReady =
+        output.includes(`:${port}`) && /Ready in/i.test(output)
+
+      if (childAnnouncedReady) {
+        try {
+          const res = await fetch(`${origin}/gb/coming-soon`)
+          const poweredBy = res.headers.get("x-powered-by") ?? ""
+          if (res.status === 200 && /next\.js/i.test(poweredBy)) {
+            finishOk()
+            return
+          }
+        } catch {
+          // Not accepting connections yet, or the port briefly serves
+          // something else during startup; keep polling.
+        }
+      }
+
+      pollTimer = setTimeout(poll, POLL_INTERVAL_MS)
+    }
+
+    void poll()
+  })
+}
+
+/**
+ * Terminates the whole process tree Next started, awaiting real exit (or a
+ * bounded timeout) so callers never hang indefinitely and never leave
+ * orphaned processes behind. Windows has no process-group signalling, so it
+ * shells out to `taskkill /T /F`; POSIX signals the negative pid (the process
+ * group created via `detached: true` in `startStorefront`) and escalates from
+ * SIGTERM to SIGKILL if the tree hasn't exited after a grace period.
+ */
+function killProcessTree(child) {
+  return new Promise((resolve) => {
+    if (!child || child.pid == null || child.exitCode !== null || child.signalCode !== null) {
+      resolve()
+      return
+    }
+
+    let settled = false
+    let graceTimer
+    let overallTimer
+
+    const finish = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(graceTimer)
+      clearTimeout(overallTimer)
+      resolve()
+    }
+
+    child.once("exit", finish)
+
+    overallTimer = setTimeout(() => {
+      console.error(
+        `[verify-final-404] Timed out after ${TERMINATE_TIMEOUT_MS}ms waiting for pid ${child.pid} to exit; abandoning further cleanup of this process.`
+      )
+      finish()
+    }, TERMINATE_TIMEOUT_MS)
+
+    if (IS_WINDOWS) {
+      const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+      })
+      killer.on("error", (err) => {
+        console.error(`[verify-final-404] taskkill failed to run: ${err.message}`)
+      })
+      return
+    }
+
+    try {
+      process.kill(-child.pid, "SIGTERM")
+    } catch {
+      try {
+        child.kill("SIGTERM")
+      } catch {
+        // Process may already have exited.
+      }
+    }
+
+    graceTimer = setTimeout(() => {
+      if (settled) return
+      try {
+        process.kill(-child.pid, "SIGKILL")
+      } catch {
+        try {
+          child.kill("SIGKILL")
+        } catch {
+          // Process may already have exited.
+        }
+      }
+    }, TERMINATE_GRACE_MS)
+  })
+}
+
+/** Closes the region stub, forcing idle/keep-alive sockets shut so `close()` cannot hang. */
+function closeServer(server, timeoutMs = TERMINATE_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    if (!server.listening) {
+      resolve()
+      return
+    }
+
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
+
+    const timer = setTimeout(() => {
+      console.error(
+        `[verify-final-404] Timed out after ${timeoutMs}ms closing the region stub.`
+      )
+      finish()
+    }, timeoutMs)
+
+    server.closeAllConnections?.()
+    server.close((err) => {
+      clearTimeout(timer)
+      if (err) {
+        console.error(`[verify-final-404] Error closing region stub: ${err.message}`)
+      }
+      finish()
+    })
+  })
 }
 
 async function main() {
@@ -99,7 +305,7 @@ async function main() {
   const stubPort = stub.address().port
   const backendUrl = `http://127.0.0.1:${stubPort}`
 
-  const appPort = 8731 // fixed, unlikely-to-collide dev-only verification port
+  const appPort = await getFreePort()
   const origin = `http://127.0.0.1:${appPort}`
   const child = startStorefront(appPort, backendUrl)
 
@@ -114,7 +320,7 @@ async function main() {
   const failures = []
 
   try {
-    await waitUntilReady(origin, Date.now() + READY_TIMEOUT_MS)
+    await waitUntilReady(child, appPort, origin, () => childOutput)
 
     const knownCountryMissingRoute = await fetch(`${origin}/gb/does-not-exist`)
     if (knownCountryMissingRoute.status !== 404) {
@@ -138,8 +344,7 @@ async function main() {
   } catch (error) {
     failures.push(error instanceof Error ? error.message : String(error))
   } finally {
-    child.kill()
-    stub.close()
+    await Promise.all([killProcessTree(child), closeServer(stub)])
   }
 
   if (failures.length > 0) {
