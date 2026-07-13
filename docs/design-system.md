@@ -186,13 +186,17 @@ control-agnostic.
 
 ## Brand asset paths
 
-`BrandLogo` renders a text wordmark until Scott adds the real approved SVGs
-(see [`public/brand/README.md`](../apps/storefront/public/brand/README.md)):
+`BrandLogo` uses the real approved PNG assets below and falls back to an
+accessible Barlow Condensed text wordmark only if an asset fails to load (see
+[`public/brand/README.md`](../apps/storefront/public/brand/README.md), which
+must stay in step with the `LOGO_ASSETS` map in `brand-logo.tsx`):
 
-- `public/brand/logo-primary.svg` — full logo, light/cream surfaces
-- `public/brand/logo-on-navy.svg` — full logo, navy/contrast surfaces
-- `public/brand/logo-icon.svg` — square icon / app mark
-- `public/brand/wordmark.svg` — wordmark only
+- `public/brand/holotrailtcg-full-logo.png` — `variant="primary"`, light/cream surfaces
+- `public/brand/holotrailtcg-full-logo-reverse.png` — `variant="primary"`, navy/contrast surfaces
+- `public/brand/holotrailtcg-text-logo.png` — `variant="wordmark"`, light/cream surfaces
+- `public/brand/holotrailtcg-text-logo-reverse.png` — `variant="wordmark"`, navy/contrast surfaces
+- `public/brand/holotrailtcg-icon-logo.png` — `variant="icon"`, light/cream surfaces
+- `public/brand/holotrailtcg-icon-logo-reverse.png` — `variant="icon"`, navy/contrast surfaces
 
 ## Light and navy surfaces
 

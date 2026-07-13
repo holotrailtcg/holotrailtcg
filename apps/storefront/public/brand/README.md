@@ -1,22 +1,24 @@
 # public/brand — Holo Trail logo assets
 
-`BrandLogo` (`components/brand/brand-logo.tsx`) looks for the SVG assets below.
-Until they exist, it renders an accessible Barlow Condensed text wordmark, so
-the storefront never breaks.
+`BrandLogo` (`components/brand/brand-logo.tsx`) uses the real approved PNG assets
+below. If an asset ever fails to load it falls back to an accessible Barlow
+Condensed text wordmark, so the storefront never breaks.
 
-Scott must add the **real** approved logo files (do not reconstruct them from
-screenshots or the guidelines) at exactly these paths:
+Assets in use (supplied by Scott):
 
-| Path                          | Use                                            |
-| ----------------------------- | ---------------------------------------------- |
-| `public/brand/logo-primary.svg` | Full logo for light/cream surfaces           |
-| `public/brand/logo-on-navy.svg` | Full logo for navy / dark-contrast surfaces  |
-| `public/brand/logo-icon.svg`    | Square icon / app mark                        |
-| `public/brand/wordmark.svg`     | Wordmark only                                 |
+| Path                                         | `BrandLogo` usage           |
+| -------------------------------------------- | --------------------------- |
+| `holotrailtcg-full-logo.png`                 | `variant="primary"` (light) |
+| `holotrailtcg-full-logo-reverse.png`         | `variant="primary"` (navy)  |
+| `holotrailtcg-text-logo.png`                 | `variant="wordmark"` (light)|
+| `holotrailtcg-text-logo-reverse.png`         | `variant="wordmark"` (navy) |
+| `holotrailtcg-icon-logo.png`                 | `variant="icon"` (light)    |
+| `holotrailtcg-icon-logo-reverse.png`         | `variant="icon"` (navy)     |
 
-Guidance:
+Notes:
 
-- Prefer SVG for crisp scaling.
-- Keep transparent backgrounds.
-- `logo-on-navy.svg` should read clearly on `--ht-navigation` (#121C30).
-- After adding assets, no code change is needed — `BrandLogo` picks them up.
+- "reverse" variants are for navy/contrast surfaces (`--ht-navigation` #121C30).
+- If higher-resolution or SVG versions are produced later, replace the files at
+  the same paths (or update the `LOGO_ASSETS` map in `brand-logo.tsx`).
+- `placeholders/` holds legacy reference images from the asset migration; they
+  are not wired into the coming-soon UI.
