@@ -7,27 +7,22 @@ import { cn } from "@lib/utils"
 const BRAND_NAME = "Holo Trail TCG"
 
 /**
- * Asset paths Scott must populate later (real SVGs, not reconstructions):
- *   public/brand/logo-primary.svg   -> full logo for light surfaces
- *   public/brand/logo-on-navy.svg   -> full logo for navy/contrast surfaces
- *   public/brand/logo-icon.svg      -> square icon / favicon-style mark
- *   public/brand/wordmark.svg       -> wordmark only
- *
- * Until the assets exist (or if one fails to load) BrandLogo renders an
- * accessible Barlow Condensed text wordmark, so nothing breaks.
+ * Real approved brand assets (supplied in public/brand). "reverse" variants are
+ * for navy/contrast surfaces. If an asset fails to load, BrandLogo falls back to
+ * an accessible Barlow Condensed text wordmark, so nothing breaks.
  */
 const LOGO_ASSETS = {
   primary: {
-    light: "/brand/logo-primary.svg",
-    navy: "/brand/logo-on-navy.svg",
+    light: "/brand/holotrailtcg-full-logo.png",
+    navy: "/brand/holotrailtcg-full-logo-reverse.png",
   },
   wordmark: {
-    light: "/brand/wordmark.svg",
-    navy: "/brand/wordmark.svg",
+    light: "/brand/holotrailtcg-text-logo.png",
+    navy: "/brand/holotrailtcg-text-logo-reverse.png",
   },
   icon: {
-    light: "/brand/logo-icon.svg",
-    navy: "/brand/logo-icon.svg",
+    light: "/brand/holotrailtcg-icon-logo.png",
+    navy: "/brand/holotrailtcg-icon-logo-reverse.png",
   },
 } as const
 

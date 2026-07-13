@@ -1,11 +1,13 @@
 # components/coming-soon
 
-Reserved for Stage 2B (the coming-soon page and its supporting UI). Do not add
-coming-soon, newsletter or subscription logic in Stage 2A.
+Coming-soon feature components (Stage 2B). These compose the Stage 2A shared
+primitives — they do not redefine standard controls.
 
-When Stage 2B begins, build these from the existing foundation:
+- `newsletter-form.tsx` — the page's single client island (form state + a11y).
+- `hero-visual.tsx` — server component; image area with a branded fallback.
 
-- `components/layout` (PageShell, ContentContainer, Section)
-- `components/ui` (Button, Input, Label, FormField, Alert)
-- `components/brand` (BrandLogo)
-- `components/feedback` (StatusMessage)
+Page copy lives in `content/coming-soon.ts`; the form's submission seam lives in
+`lib/newsletter`. See [docs/coming-soon.md](../../../../../docs/coming-soon.md).
+
+Do not add newsletter backend logic, analytics or route gating here — those are
+Stage 2C/2D/2E.

@@ -1,0 +1,40 @@
+import type {
+  NewsletterAdapter,
+  NewsletterResult,
+  NewsletterSubmission,
+} from "./types"
+
+/**
+ * Development-safe placeholder adapter.
+ *
+ * This DOES NOT persist anything, call Neon, or send email. It exists only so
+ * the coming-soon form UI has realistic states (loading, success, error) before
+ * the Stage 2C backend exists. It runs entirely client-side.
+ *
+ * Stage 2C replaces this with an adapter that POSTs to the storefront API
+ * route; the UI does not change because it depends on `NewsletterAdapter`.
+ */
+
+const SIMULATED_LATENCY_MS = 700
+
+export const devNewsletterAdapter: NewsletterAdapter = {
+  async submit(submission: NewsletterSubmission): Promise<NewsletterResult> {
+    // Simulate network latency so the loading state is exercised.
+    await new Promise((resolve) => setTimeout(resolve, SIMULATED_LATENCY_MS))
+
+    // Make the placeholder nature obvious in development, without logging the
+    // email address itself (avoid logging unnecessary personal data).
+    if (process.env.NODE_ENV !== "production") {
+      // eslint-disable-next-line no-console
+      console.info(
+        "[dev newsletter adapter] received a submission (not persisted). " +
+          "Replace with the Stage 2C API adapter."
+      )
+    }
+
+    // Always duplicate-safe success in development. The real adapter must not
+    // reveal whether the address already existed either.
+    void submission
+    return { status: "success" }
+  },
+}
