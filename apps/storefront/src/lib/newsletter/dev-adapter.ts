@@ -11,11 +11,13 @@ import type {
  * the coming-soon form UI has realistic states (loading, success, error) before
  * the Stage 2C backend exists. It runs entirely client-side.
  *
- * It fails closed outside development: if this placeholder is ever active under
- * production conditions (a misconfigured build, or the Stage 2C swap being
- * missed) it must never report a fake success, because that would tell a real
- * visitor they are subscribed when nothing was stored. Instead it returns the
- * existing recoverable error state, which the form surfaces as "try again".
+ * It fails closed outside development: simulated success is only ever returned
+ * when `NODE_ENV === "development"`. Every other value — production, test,
+ * unset, empty or a custom/staging-like value — must never report a fake
+ * success, because that would tell a real visitor they are subscribed when
+ * nothing was stored. Instead it returns the existing recoverable error state,
+ * which the form surfaces as "try again", with no simulated latency and no
+ * logging on that path.
  *
  * Stage 2C replaces this with an adapter that POSTs to the storefront API
  * route; the UI does not change because it depends on `NewsletterAdapter`.
@@ -25,10 +27,12 @@ const SIMULATED_LATENCY_MS = 700
 
 export const devNewsletterAdapter: NewsletterAdapter = {
   async submit(submission: NewsletterSubmission): Promise<NewsletterResult> {
-    // Fail closed in production: this placeholder never persists or emails, so
-    // reporting success would be dishonest. Return the recoverable error state
-    // instead. No latency simulation and no logging on this path.
-    if (process.env.NODE_ENV === "production") {
+    // Fail closed everywhere except development: this placeholder never
+    // persists or emails, so reporting success would be dishonest anywhere it
+    // could be reached by a real visitor (production, test, unset or a
+    // custom/staging value). Return the recoverable error state instead, with
+    // no latency simulation and no logging on this path.
+    if (process.env.NODE_ENV !== "development") {
       void submission
       return { status: "error" }
     }

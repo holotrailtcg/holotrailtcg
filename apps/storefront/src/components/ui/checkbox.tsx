@@ -35,6 +35,15 @@ const Checkbox = React.forwardRef<HTMLInputElement, CheckboxProps>(
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-page",
           "checked:border-action checked:bg-action checked:[background-image:var(--ht-checkbox-check)]",
           "disabled:cursor-not-allowed disabled:opacity-50",
+          // Forced-colors / high-contrast mode: the checked state above is a
+          // white SVG stroke painted on an author-controlled blue fill. Forced
+          // colors can substitute the fill without changing the SVG's baked-in
+          // stroke colour, so the check mark can disappear. Restore the native,
+          // system-colour-aware checkbox rendering instead of the custom paint
+          // whenever forced colors are active, so the checked state is always
+          // visible in the system's own contrast palette.
+          "forced-colors:appearance-auto forced-colors:[background-image:none]",
+          "forced-colors:checked:[background-image:none]",
           className
         )}
         style={

@@ -5,7 +5,7 @@ import {
   parseConsent,
   serializeConsent,
 } from "./store"
-import { CONSENT_VERSION } from "./types"
+import { CONSENT_VERSION, DEFAULT_CONSENT } from "./types"
 
 describe("parseConsent", () => {
   it("defaults to analytics rejected and undecided for missing input", () => {
@@ -143,6 +143,90 @@ describe("parseConsent", () => {
     expect(state.categories.analytics).toBe(true)
     expect(state.decided).toBe(true)
     expect(state.decidedAt).toBe(decidedAt)
+  })
+})
+
+describe("parseConsent semantic invariants", () => {
+  it("defaults when undecided but analytics is true", () => {
+    const state = parseConsent(
+      JSON.stringify({
+        categories: { essential: true, analytics: true },
+        decided: false,
+        version: CONSENT_VERSION,
+      })
+    )
+    expect(state).toEqual(DEFAULT_CONSENT)
+  })
+
+  it("defaults when undecided but a decidedAt is present", () => {
+    const state = parseConsent(
+      JSON.stringify({
+        categories: { essential: true, analytics: false },
+        decided: false,
+        decidedAt: new Date().toISOString(),
+        version: CONSENT_VERSION,
+      })
+    )
+    expect(state).toEqual(DEFAULT_CONSENT)
+  })
+
+  it("defaults when decided but decidedAt is missing", () => {
+    const state = parseConsent(
+      JSON.stringify({
+        categories: { essential: true, analytics: false },
+        decided: true,
+        version: CONSENT_VERSION,
+      })
+    )
+    expect(state).toEqual(DEFAULT_CONSENT)
+  })
+
+  it("defaults when decided but decidedAt is invalid", () => {
+    const state = parseConsent(
+      JSON.stringify({
+        categories: { essential: true, analytics: false },
+        decided: true,
+        decidedAt: "not-a-date",
+        version: CONSENT_VERSION,
+      })
+    )
+    expect(state).toEqual(DEFAULT_CONSENT)
+  })
+
+  it("accepts decided true, analytics true, with a valid decidedAt", () => {
+    const decidedAt = new Date().toISOString()
+    const state = parseConsent(
+      JSON.stringify({
+        categories: { essential: true, analytics: true },
+        decided: true,
+        decidedAt,
+        version: CONSENT_VERSION,
+      })
+    )
+    expect(state).toEqual({
+      categories: { essential: true, analytics: true },
+      decided: true,
+      decidedAt,
+      version: CONSENT_VERSION,
+    })
+  })
+
+  it("accepts decided true, analytics false, with a valid decidedAt", () => {
+    const decidedAt = new Date().toISOString()
+    const state = parseConsent(
+      JSON.stringify({
+        categories: { essential: true, analytics: false },
+        decided: true,
+        decidedAt,
+        version: CONSENT_VERSION,
+      })
+    )
+    expect(state).toEqual({
+      categories: { essential: true, analytics: false },
+      decided: true,
+      decidedAt,
+      version: CONSENT_VERSION,
+    })
   })
 })
 

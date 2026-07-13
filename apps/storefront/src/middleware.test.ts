@@ -91,9 +91,12 @@ describe("country-code middleware routing", () => {
   })
 
   it("passes a genuinely missing country-prefixed path through to a 404 render", async () => {
-    // The middleware does not itself 404; it hands off to the app, which renders
-    // the not-found page (verified over HTTP separately). It must NOT redirect a
-    // path that already has a valid country prefix.
+    // The middleware does not itself 404; it hands off to the app, which
+    // renders the not-found page. That final HTTP 404 depends on the app
+    // router actually running, which this unit-level test cannot exercise —
+    // it is verified over real HTTP by `scripts/verify-final-404.mjs`
+    // (`pnpm run verify:404`). This test only proves the middleware does NOT
+    // redirect a path that already has a valid country prefix.
     const res = await middleware(request("/gb/does-not-exist"))
     expect(isRedirect(res)).toBe(false)
     expect(isPassThrough(res)).toBe(true)

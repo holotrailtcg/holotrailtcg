@@ -56,9 +56,18 @@ export function parseConsent(raw: string | null | undefined): ConsentState {
   if (categories.essential !== true) return DEFAULT_CONSENT
   if (typeof categories.analytics !== "boolean") return DEFAULT_CONSENT
   if (typeof decided !== "boolean") return DEFAULT_CONSENT
-  // decidedAt is optional, but if present it must be a valid ISO timestamp.
-  if (decidedAt !== undefined && !isValidIsoTimestamp(decidedAt)) {
-    return DEFAULT_CONSENT
+
+  // Semantic invariants, not just per-field typing: an undecided state can
+  // never carry analytics consent or a completed-decision timestamp, and a
+  // decided state must always carry a valid one. A state that mixes these
+  // (e.g. `decided: false` with `analytics: true`) is internally
+  // inconsistent and falls back to the safe default rather than being
+  // accepted half-trusted.
+  if (!decided) {
+    if (categories.analytics !== false) return DEFAULT_CONSENT
+    if (decidedAt !== undefined) return DEFAULT_CONSENT
+  } else {
+    if (!isValidIsoTimestamp(decidedAt)) return DEFAULT_CONSENT
   }
 
   return {
