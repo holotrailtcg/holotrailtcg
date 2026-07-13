@@ -380,6 +380,35 @@ Copy approved design tokens and CSS values only after reviewing them.
 
 Do not copy obsolete page-level CSS or legacy commerce behaviour.
 
+## Design system (Stage 2A onward)
+
+The Holo Trail storefront design system is established in the storefront app.
+See [docs/design-system.md](docs/design-system.md) for the full reference. All
+future storefront work must follow these rules:
+
+- Holo Trail TCG Brand Guidelines v3 are the visual source of truth.
+- Use the global Holo Trail CSS variables (`--ht-*` in
+  `apps/storefront/src/styles/globals.css`); Tailwind is mapped to them.
+- Barlow Condensed is the display/heading font; Source Sans 3 is the
+  body/interface font. Both load globally via `next/font` (`lib/fonts.ts`).
+- All corners are square (`border-radius: 0`); the Tailwind theme owns this.
+- Blue is the primary action colour. Purple is restrained secondary emphasis.
+  Cyan is mainly for the signal trail and small highlights, never a button
+  background.
+- Reuse components from `components/ui`, `components/layout`, `components/brand`
+  and `components/feedback`. Do not duplicate standard controls inside feature
+  folders.
+- Do not introduce a second design system or a second (shadcn HSL) colour
+  system alongside the Medusa ui-preset and the `--ht-*` tokens.
+- Do not hard-code brand colours where a token exists.
+- Do not install unreviewed component registries. Add shadcn components only via
+  the reviewed flow documented in the design-system doc.
+- Maintain accessible focus states (the focus token) and colour contrast; never
+  communicate status by colour alone.
+- New storefront pages must use the existing global tokens, layout primitives
+  and shared UI components — no parallel styling systems or page-specific copies
+  of standard controls.
+
 ## Code standards
 
 - Use TypeScript strict mode.

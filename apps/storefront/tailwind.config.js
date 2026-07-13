@@ -33,17 +33,79 @@ module.exports = {
           80: "#1F2937",
           90: "#111827",
         },
+        /*
+         * Holo Trail brand palette. Every value reads from a CSS custom
+         * property defined in styles/globals.css (the source of truth).
+         * Do not hard-code the underlying hex in components.
+         */
+        page: "var(--ht-background-page)",
+        store: "var(--ht-background-store)",
+        surface: {
+          DEFAULT: "var(--ht-surface)",
+          alt: "var(--ht-surface-alt)",
+        },
+        ink: {
+          DEFAULT: "var(--ht-text-primary)",
+          muted: "var(--ht-text-muted)",
+          "on-dark": "var(--ht-text-on-dark)",
+        },
+        line: {
+          DEFAULT: "var(--ht-border)",
+          strong: "var(--ht-border-strong)",
+        },
+        action: {
+          DEFAULT: "var(--ht-action-primary)",
+          hover: "var(--ht-action-primary-hover)",
+          active: "var(--ht-action-primary-active)",
+          text: "var(--ht-action-primary-text)",
+        },
+        accent: "var(--ht-accent-secondary)",
+        navy: "var(--ht-navigation)",
+        signal: "var(--ht-signal-cyan)",
+        focus: "var(--ht-focus-ring)",
+        /* Functional UI status colours (not brand accents). */
+        success: {
+          DEFAULT: "var(--ht-status-success)",
+          surface: "var(--ht-status-success-surface)",
+        },
+        warning: {
+          DEFAULT: "var(--ht-status-warning)",
+          surface: "var(--ht-status-warning-surface)",
+        },
+        danger: {
+          DEFAULT: "var(--ht-status-error)",
+          surface: "var(--ht-status-error-surface)",
+        },
+        info: {
+          DEFAULT: "var(--ht-status-info)",
+          surface: "var(--ht-status-info-surface)",
+        },
       },
+      /*
+       * Square corners globally (Brand Guidelines v3). All box radii resolve to
+       * 0 so the theme owns the rule; components do not override per instance.
+       * `full`/`circle` are retained only for genuine circles (spinners,
+       * country flags), which are not "corners".
+       */
       borderRadius: {
         none: "0px",
-        soft: "2px",
-        base: "4px",
-        rounded: "8px",
-        large: "16px",
+        sm: "0px",
+        DEFAULT: "0px",
+        md: "0px",
+        lg: "0px",
+        xl: "0px",
+        "2xl": "0px",
+        "3xl": "0px",
+        soft: "0px",
+        base: "0px",
+        rounded: "0px",
+        large: "0px",
+        full: "9999px",
         circle: "9999px",
       },
       maxWidth: {
         "8xl": "100rem",
+        content: "var(--ht-content-width)",
       },
       screens: {
         "2xsmall": "320px",
@@ -58,14 +120,24 @@ module.exports = {
         "3xl": "2rem",
       },
       fontFamily: {
+        /* Source Sans 3 (var injected by next/font) is the interface default. */
         sans: [
-          "Inter",
+          "var(--font-body)",
           "-apple-system",
           "BlinkMacSystemFont",
           "Segoe UI",
           "Roboto",
           "Helvetica Neue",
           "Ubuntu",
+          "sans-serif",
+        ],
+        /* Barlow Condensed for display/headings. */
+        display: [
+          "var(--font-display)",
+          "Arial Narrow",
+          "Helvetica Neue",
+          "Helvetica",
+          "Arial",
           "sans-serif",
         ],
       },
