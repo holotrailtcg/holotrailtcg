@@ -47,6 +47,15 @@ export type ConfirmationSendState =
  * only to support a future resend cooldown and stuck-send detection
  * (Stage 2C.3+). They are not part of the subscriber's consent or
  * confirmation state.
+ *
+ * `confirmation_token_consumed_hash` (Stage 2C.3) records the hash of the
+ * confirmation token that was actually used to confirm, kept *after*
+ * `confirmation_token_hash` is cleared on success. Without it, a repeated
+ * click on an already-used confirmation link would be indistinguishable
+ * from an arbitrary invalid token, since the active hash no longer exists
+ * anywhere to compare against. This lets confirmation stay idempotent
+ * without retaining an active, still-usable confirmation token
+ * indefinitely. See docs/decisions/0005-newsletter-backend-design.md.
  */
 const Subscriber = model
   .define(
@@ -76,6 +85,10 @@ const Subscriber = model
         .unique("IDX_newsletter_subscriber_unsubscribe_token_hash")
         .nullable(),
       unsubscribed_at: model.dateTime().nullable(),
+      confirmation_token_consumed_hash: model
+        .text()
+        .unique("IDX_newsletter_subscriber_confirmation_token_consumed_hash")
+        .nullable(),
       first_purchase_discount_eligible: model.boolean().default(false),
       confirmation_email_last_sent_at: model.dateTime().nullable(),
       confirmation_send_state: model

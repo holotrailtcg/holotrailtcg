@@ -384,6 +384,22 @@
           "enumItems": [],
           "mappedType": "datetime"
         },
+        "confirmation_token_consumed_hash": {
+          "name": "confirmation_token_consumed_hash",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
         "first_purchase_discount_eligible": {
           "name": "first_purchase_discount_eligible",
           "type": "boolean",
@@ -523,6 +539,15 @@
           "primary": false,
           "unique": false,
           "expression": "CREATE UNIQUE INDEX IF NOT EXISTS \"IDX_newsletter_subscriber_unsubscribe_token_hash\" ON \"newsletter_subscriber\" (\"unsubscribe_token_hash\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "IDX_newsletter_subscriber_confirmation_token_consumed_hash",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE UNIQUE INDEX IF NOT EXISTS \"IDX_newsletter_subscriber_confirmation_token_consumed_hash\" ON \"newsletter_subscriber\" (\"confirmation_token_consumed_hash\") WHERE deleted_at IS NULL"
         },
         {
           "keyName": "IDX_newsletter_subscriber_deleted_at",

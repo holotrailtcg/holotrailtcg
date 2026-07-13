@@ -585,6 +585,137 @@ place implementation diverged from the plan.
   runner due to its undeclared `pg-god` dependency — a direct
   `MedusaApp`/`createPgConnection` bootstrap was used instead.
 
+## Stage 2C.3 implementation notes
+
+Stage 2C.3 implemented the subscriber lifecycle and token-security layer
+directly on `NewsletterModuleService`, not as Medusa workflows. Recorded
+here are the concrete outcomes, the one schema addition, and where this
+diverges from the 2C.1 design.
+
+- **Structure decision:** the 2C.1 design proposed one workflow per public
+  operation (`subscribeToNewsletterWorkflow`, etc.) specifically so a
+  Resend failure after a tentative write could trigger workflow
+  compensation. Stage 2C.3 has no public routes and no Resend call yet —
+  only the pure database lifecycle — so three transactional methods
+  (`prepareSubscription`, `confirmSubscription`, `unsubscribeSubscription`)
+  were added straight to `NewsletterModuleService` instead. This is the
+  smallest structure that still gives real transaction boundaries and
+  atomicity; introducing workflow scaffolding now, before there is any
+  compensable multi-step side effect to orchestrate, would be premature
+  abstraction. Workflows remain the right choice once a later stage adds
+  the Resend step — flagged here, not implemented.
+- **Raw-SQL transaction pattern:** each lifecycle method opens one
+  transaction via `this.manager_.transactional(...)` and issues
+  parameterised `manager.execute(sql, params)` calls (single conditional
+  `UPDATE`/`INSERT ... ON CONFLICT DO NOTHING`, plus `SELECT ... FOR
+  UPDATE` row locks where a decision has to be made before mutating). The
+  generated `MedusaService` CRUD methods cannot express these
+  single-statement conditional writes, so `container.manager` (the
+  module's own MikroORM `SqlEntityManager`, already injected by the
+  standard SQL-module connection loader) is used directly — this is the
+  same, official pattern `@medusajs/locking-postgres`'s
+  `PostgresAdvisoryLockProvider` uses (`container.manager`, `manager.execute`,
+  `manager.transactional`), not an invented one. A narrow local
+  `NewsletterEntityManager`/`NewsletterTransactionManager` interface
+  isolates the handful of methods actually called, instead of typing
+  `container.manager` as `any`.
+- **Email normalisation:** `lifecycle/email.ts` — trim, reject empty/over
+  254 chars, and lower-case the *entire* address (local part and domain)
+  for `normalisedEmail`. The *display* `email` keeps original casing
+  (whitespace-trimmed only). Deliberately does not strip dots or `+`
+  aliases and applies no Gmail-specific behaviour, per the brief; not an
+  attempt at full RFC 5321 mailbox canonicalisation.
+- **Token generation:** `lifecycle/token.ts` — `randomBytes(32)` (256 bits)
+  base64url-encoded (`generateOpaqueToken`), SHA-256 hex digest for storage
+  (`hashToken`), no salt (justified: the input already carries 256 bits of
+  entropy). No password-hashing dependency was added.
+- **Confirmation TTL:** `lifecycle/config.ts` —
+  `resolveConfirmationTokenTtlMinutes(overrideMinutes?)` reads
+  `NEWSLETTER_CONFIRMATION_TOKEN_TTL_MINUTES`, defaults to 60 minutes if
+  unset, rejects non-finite/non-integer/zero/negative/values over 10,080
+  minutes (7 days). The override parameter exists only for deterministic
+  tests; production always resolves from the environment or the default.
+  Added to `apps/backend/.env.template` only (commented out, backend-only,
+  never on the storefront) — this is a single narrow reader, not the full
+  Stage 2C environment schema (still deferred to Stage 2C.8).
+- **Schema addition — `confirmation_token_consumed_hash`:** the 2C.1/2C.2
+  schema could not correctly support idempotent repeated confirmation.
+  Confirmation clears the active `confirmation_token_hash` on success (so
+  the token cannot be reused to re-confirm or kept alive indefinitely), but
+  that alone makes a repeated click on the same link indistinguishable from
+  an arbitrary invalid token — both fail to match any row. A new nullable
+  `confirmation_token_consumed_hash` column (unique when non-null, indexed
+  the same way as the other token-hash columns —
+  `IDX_newsletter_subscriber_confirmation_token_consumed_hash`, `WHERE
+  deleted_at IS NULL`) records the hash of whichever token actually
+  confirmed the subscriber. A confirmation lookup matches on
+  `confirmation_token_hash OR confirmation_token_consumed_hash`; if only
+  the consumed-hash column matches, the subscriber was already confirmed
+  with that exact token and the method returns `ALREADY_CONFIRMED` (a
+  no-op); if neither matches, the token is treated as invalid. The
+  `PENDING_REFRESHED` and unsubscribed-resubscription transitions clear
+  `confirmation_token_consumed_hash` back to `null`, since a freshly
+  (re)issued token has nothing to be "already confirmed" against yet. This
+  is an additive-only migration
+  (`Migration20260713175132.ts`), generated and applied against the same
+  confirmed test database as Stage 2C.2, following the same guarded
+  one-off script (loads the `test` environment, calls the existing,
+  unmodified `assertTestDatabase` guard, prints a redacted target summary,
+  not committed). No other schema change was required.
+- **Unsubscribe-token idempotency:** no schema addition was needed here —
+  unlike the confirmation token, the unsubscribe token is never cleared on
+  use, so a repeated unsubscribe request naturally finds the same row via
+  the same hash and simply returns `ALREADY_UNSUBSCRIBED` without a second
+  write.
+- **Confirmation/unsubscribe race:** by construction, a subscriber can only
+  acquire a valid `unsubscribe_token_hash` *after* it is `CONFIRMED`, and
+  `prepareSubscription`'s unsubscribed-resubscription path always nulls the
+  old `unsubscribe_token_hash`. This means the window the 2C.1 design
+  worried about (a stray confirmation racing a valid unsubscribe on the
+  same row) cannot arise from a still-`PENDING` row — confirmation is a
+  one-shot, self-invalidating transition. The realistic race is a
+  *replayed* confirmation (the original, now-consumed token) arriving
+  concurrently with a valid unsubscribe; `newsletter-lifecycle.spec.ts`
+  exercises this directly with `Promise.all([unsubscribe(...),
+  confirm(originalToken)])` and asserts the subscriber never ends up
+  `CONFIRMED` with `unsubscribed_at` populated, and never `UNSUBSCRIBED`
+  with `first_purchase_discount_eligible` true. Safety comes from each
+  method's conditional `UPDATE ... WHERE status = '<expected>' AND
+  <token column> = ?` plus `SELECT ... FOR UPDATE` row locking, not from an
+  application-level mutex.
+- **Internal outcome types:** `lifecycle/types.ts` —
+  `SignupResult` (`PENDING_CREATED | PENDING_REFRESHED | ALREADY_CONFIRMED`),
+  `ConfirmationResult` (`CONFIRMED | ALREADY_CONFIRMED | INVALID_OR_EXPIRED`),
+  `UnsubscribeResult` (`UNSUBSCRIBED | ALREADY_UNSUBSCRIBED | INVALID`). An
+  unsubscribed-resubscription resolves to `PENDING_CREATED` (it behaves
+  identically to a new signup from the caller's perspective — a
+  confirmation email must be sent) rather than inventing a fourth outcome,
+  per the brief's "keep the set minimal" instruction.
+- **Tests added:**
+  `src/modules/newsletter/__tests__/email.unit.spec.ts`,
+  `token.unit.spec.ts`, `clean-input.unit.spec.ts`, `config.unit.spec.ts`
+  (pure unit tests, `TEST_TYPE=unit`), and new lifecycle/concurrency
+  `describe` blocks appended to the existing
+  `newsletter-module.spec.ts` (DB-backed, `TEST_TYPE=integration:modules`)
+  covering every transition in the table above plus the concurrency/race
+  scenarios. A separate `newsletter-lifecycle.spec.ts` file with its own
+  `MedusaApp` bootstrap was tried first and reverted: two spec files in the
+  same `--runInBand` Jest worker each bootstrapping the `newsletter` module
+  key corrupts `MedusaModule`'s process-wide static registry (`Method
+  Map.prototype.set called on incompatible receiver`), even with a full
+  `onApplicationShutdown()` + `MedusaModule.clearInstances()` in each
+  file's `afterAll`. Sharing one bootstrap per Jest worker avoids the
+  problem entirely.
+- **Deviation summary:** (1) direct transactional module-service methods
+  instead of workflows, deferred until a compensable side effect (Resend)
+  exists to orchestrate; (2) one additive schema field
+  (`confirmation_token_consumed_hash`) not anticipated by the 2C.1 design,
+  required to make repeated-confirmation idempotency actually distinguish
+  a consumed valid token from an arbitrary invalid one; (3) the
+  confirmation/unsubscribe race is structurally narrower than the 2C.1
+  design assumed, because the unsubscribe token cannot exist before
+  confirmation and is always invalidated on resubscription.
+
 ## Consequences
 
 - Stage 2C.2+ implements this design: models, migrations, module service,
