@@ -1098,6 +1098,419 @@ boundaries.
   tests during this stage, not anticipated by the initial design — see
   "Bug found and fixed" above.
 
+## Stage 2C.6 implementation notes
+
+Stage 2C.6 implemented the three public Medusa store routes and wired the
+2C.2–2C.5 module into them for the first time. Recorded here are the
+concrete outcomes, deviations from the 2C.1 design, and the HTTP
+integration-test architecture.
+
+- **Route paths (as designed):**
+  `apps/backend/src/api/store/newsletter/subscribe/route.ts` (`POST`),
+  `.../confirm/route.ts` (`GET`), `.../unsubscribe/route.ts` (`GET`) — the
+  supported Medusa 2.17.2 file-based route convention, one directory per
+  endpoint, exactly as the task brief required.
+- **Shared route layer:**
+  `apps/backend/src/api/store/newsletter/shared/` — `validation.ts` (zod
+  schemas for the subscribe body and the `token` query param),
+  `response.ts` (the one generic subscribe body, cache/referrer-protection
+  headers, result-code types), `dependencies.ts` (module-service and
+  adapter resolution), `client-address.ts` (thin wrapper over the existing
+  `rate-limit/client-address.ts`), `error-mapping.ts` (safe generic 503 for
+  any unexpected error), `subscribe-orchestrator.ts` (the processing-order
+  coordinator), `consent.ts` (see "Consent handling" below). Each route
+  file is under 90 lines and contains no domain logic of its own.
+- **Orchestration:** a plain async function
+  (`orchestrateNewsletterSubscription`), not a Medusa workflow. The 2C.1
+  design anticipated a workflow specifically so a Resend failure could
+  trigger compensation; Stage 2C.3 already deferred that (no compensable
+  multi-step side effect existed yet), and Stage 2C.6 confirms the same
+  reasoning still holds — `prepareSubscription` and
+  `sendConfirmationEmailWithProtections` are each already a single
+  transactional/reservation-scoped unit with their own correct
+  concurrency behaviour (Stages 2C.3/2C.5); the route only needs to call
+  them in order and discard the email outcome (see "Confirmation email
+  delivery outcome" below), which a plain function expresses with less
+  ceremony than workflow scaffolding would. Workflows remain the right
+  choice if a later stage adds a second, genuinely compensable side effect.
+- **Dependency resolution:** the module service is resolved via
+  `req.scope.resolve(NEWSLETTER_MODULE)`, as designed. The reCAPTCHA
+  verifier and Resend sender have no Medusa module of their own, so
+  `dependencies.ts` uses a **lazy self-registration** pattern: on first
+  resolution, if the container has no registration under a fixed key
+  (`newsletterRecaptchaVerifier` / `newsletterConfirmationEmailSender`), it
+  constructs the real production adapter (which resolves its own env
+  config, throwing if misconfigured) and registers it as a container
+  value; every later request reuses that same instance.
+  `integration-tests/http/support/bootstrap.ts` registers a fake under the
+  same key immediately after the app boots, before any request is made, so
+  the real adapters (and their env-var requirements) are never constructed
+  during the HTTP test suite. This is the "smallest supported registration
+  mechanism" the brief asked for — no separate `src/loaders/` file was
+  introduced (an unverified convention for this Medusa version; the
+  self-registering resolver functions use only documented `awilix`
+  container APIs already exercised elsewhere in Medusa core, e.g.
+  `@medusajs/locking-postgres`'s `container.manager` pattern cited in
+  Stage 2C.3).
+- **CORS:** the routes rely entirely on Medusa's existing `STORE_CORS`
+  configuration (`storeCors` in `medusa-config.ts`, unchanged) — no
+  route-specific CORS handling was added.
+
+### Subscribe validation (`shared/validation.ts`)
+
+- `firstName`: required string, trimmed, 1–100 characters (matches
+  `lifecycle/clean-input.ts`'s own bound).
+- `email`: required string, trimmed, ≤254 characters, a conservative shape
+  regex identical to the storefront's own
+  `apps/storefront/src/lib/newsletter/validation.ts` pattern.
+- `consent`: `z.literal(true)` — the exact-boolean-`true` requirement is
+  satisfied by construction, since a zod literal fails the type check for
+  any value that is not `=== true` (covers `false`, the strings `"true"`/
+  `"false"`, `1`, `0`, `""`, arrays, objects, and a missing field alike).
+- `honeypot`: optional string, ≤200 characters.
+- `recaptchaToken`: required non-empty string, ≤4096 characters.
+- `countryCode`: required string, trimmed, lower-cased, validated with the
+  existing `isSupportedCountryCode` shape check
+  (`resend/confirmation-url.ts`) — the same function the confirmation-URL
+  builder already uses, so route-level validation and URL construction can
+  never disagree about what counts as a supported code.
+- The whole body schema is `.strict()` — an unrecognised extra field is
+  rejected outright, not silently dropped.
+- Body size: `bodyParser: { sizeLimit: "10kb" }` on the subscribe route
+  only (`src/api/middlewares.ts`), via `defineMiddlewares` +
+  `validateAndTransformBody`, the documented Medusa v2 route-middleware
+  pattern. No image/file field is ever accepted here, so 10kb is generous
+  but still bounded.
+- Content type: Medusa's JSON body parser only populates a body for
+  `application/json`; a request with any other `Content-Type` therefore
+  fails the same zod validation as a missing body (empty `firstName`/
+  `email`/etc.), so no separate content-type branch was needed.
+
+### Consent handling — deviation from the 2C.1 design
+
+The 2C.1 design record proposed a client-supplied `consentTextVersion`
+kept in sync with a backend env var by documentation alone. The Stage
+2C.6 task brief's accepted-body field list (`firstName`, `email`,
+`consent`, `honeypot`, `recaptchaToken`, `countryCode`) does not include
+`consentTextVersion`, and on reflection a client-supplied consent-text
+version is the wrong shape for an authoritative value — a caller could
+otherwise assert consent to wording it never actually saw. Stage 2C.6
+instead fixes both `consentTextVersion` and `source` as source-controlled
+constants in `shared/consent.ts`
+(`NEWSLETTER_CONSENT_TEXT_VERSION = "2026-07-13-v1"`,
+`NEWSLETTER_SIGNUP_SOURCE = "coming-soon"`), not a new environment
+variable — per the brief's "do not introduce new variables unless the
+route genuinely requires them," a plain versioned code constant is
+sufficient since nothing outside this backend ever needs to read it.
+Bump `NEWSLETTER_CONSENT_TEXT_VERSION` in that one file whenever the
+storefront's consent copy changes.
+
+### Processing order (`shared/subscribe-orchestrator.ts`)
+
+Implemented exactly as specified:
+
+1. Parse/validate the request shape (route middleware, before the handler
+   runs at all).
+2. Extract the trusted client address (`resolveRequestClientAddress`).
+3. Apply the rate limiter (`checkRateLimit`) — a failed address extraction
+   is treated as an immediate rate-limit denial (fails closed the same way
+   a limiter/database failure does), so an untrusted address can never
+   fall through to reCAPTCHA or the subscriber lifecycle.
+4. If denied, return `429` immediately.
+5. Honeypot check — filled short-circuits to the accepted outcome with no
+   further work.
+6. reCAPTCHA verification.
+7. `prepareSubscription` (the subscriber lifecycle).
+8. `sendConfirmationEmailWithProtections`, only when the lifecycle result
+   is `PENDING_CREATED`/`PENDING_REFRESHED` (an `ALREADY_CONFIRMED` result
+   sends nothing).
+9. Return the one generic accepted response.
+
+No database transaction is held open across the reCAPTCHA or Resend
+network calls — `prepareSubscription` and the email-delivery reservation
+are each already self-contained, single-statement-scoped operations (per
+Stages 2C.3/2C.5); the orchestrator adds no additional transaction of its
+own around them.
+
+### Rate limiting
+
+- Client address source: `shared/client-address.ts`, an unmodified
+  pass-through to the existing, unmodified
+  `rate-limit/client-address.ts` trust model (no proxy header trusted by
+  default; both `NEWSLETTER_TRUST_PROXY` and `NEWSLETTER_TRUSTED_IP_HEADER`
+  must be set together to trust a header).
+- Atomic limiter: the existing `checkRateLimit` +
+  `NewsletterModuleService.incrementRateLimitBucket` (Stage 2C.4),
+  unmodified.
+- **Rate-limit status/body — deviation from the 2C.1 design record:** 2C.1
+  proposed that a rate-limited request receive "the same generic public
+  response used for every other rejected/duplicate case," on the theory
+  that a distinct rate-limit response would be a fingerprinting oracle.
+  The Stage 2C.6 task brief instead explicitly calls for `429` with a
+  `Retry-After` header and only requires that the **body** not disclose
+  subscriber state — it does not require the *status code* to match the
+  `202` success case. Stage 2C.6 follows the more specific, more recent
+  brief: `429` with `{ success: false, message: "Too many requests..." }`
+  and a `Retry-After: <seconds>` header. This is a deliberate, documented
+  narrowing of the earlier draft design, not an oversight — a rate-limit
+  `429` reveals only "you are sending too many requests," which is already
+  observable by the caller from their own request volume; it does not
+  reveal anything about a specific email address's subscriber state.
+- `Retry-After` is included whenever the computed value is greater than
+  zero.
+- Failure behaviour: unchanged — `checkRateLimit` never resolves
+  `allowed: true` on a configuration or database failure (Stage 2C.4).
+- Raw IP: never persisted or logged, unchanged.
+
+### Honeypot
+
+- Behaviour: a filled honeypot returns the **same** `202` /
+  `SUBSCRIBE_ACCEPTED_RESPONSE_BODY` as a genuine new signup — covered
+  directly by the "honeypot-triggered request as for a genuine success"
+  response-consistency test.
+- Rate-limit interaction: the honeypot check runs **after** the rate
+  limiter (step 5, after step 3/4) — a filled-honeypot request still
+  consumes one rate-limit attempt, so the honeypot field cannot become a
+  free, unlimited request-flood path, exactly as the brief's "preferred
+  behaviour" specified.
+- Subscriber mutation: none — `prepareSubscription` is never called.
+- reCAPTCHA call: none — verified directly in the HTTP test via the fake
+  verifier's call count.
+- Public response: identical to success, per above.
+
+### reCAPTCHA
+
+- Verifier: the existing, unmodified `GoogleRecaptchaVerifier` (Stage
+  2C.4), resolved via the lazy container registration described above.
+- Attempts per token: exactly one — the orchestrator calls `verify()` once
+  per request, never retries.
+- **Failure status — deviation from the 2C.1 design record:** 2C.1 again
+  proposed a single generic response for every rejection reason. The Stage
+  2C.6 brief explicitly allows differentiated status codes for input vs.
+  provider-availability failures ("Choose an appropriate status such as
+  400, 403, or 503 based on whether the failure is invalid input or
+  provider availability, but do not disclose precise anti-bot details").
+  Stage 2C.6 maps `PROVIDER_ERROR` (Google unreachable/non-2xx/malformed
+  response) to `503` and every other reason (`MISSING_TOKEN`,
+  `INVALID_RESPONSE`, `ACTION_MISMATCH`, `LOW_SCORE`, `HOSTNAME_MISMATCH`,
+  `EXPIRED_TOKEN`, `MISCONFIGURED`) to `403` — the internal reason string
+  is never included in the response body (verified directly by the "fails
+  closed on reCAPTCHA provider unavailability" test, which asserts the
+  literal string `PROVIDER_ERROR` does not appear in the response).
+- Test injection: `integration-tests/http/support/fakes.ts`'s
+  `FakeRecaptchaVerifier`, registered before any request per the
+  dependency-resolution section above. No `NODE_ENV` branch, magic header,
+  or magic token exists anywhere in the production verifier or the routes.
+
+### Subscription lifecycle and confirmation email
+
+- New pending / refreshed pending / already confirmed / unsubscribed
+  resubscription: unchanged, delegated entirely to the existing
+  `prepareSubscription` (Stage 2C.3).
+- Public state disclosure: none of the four internal outcomes changes the
+  route's response — verified directly by the response-consistency test
+  suite comparing all four cases byte-for-byte.
+- **Confirmation email delivery outcome — deviation/clarification of the
+  2C.1 design record:** the brief allows (but does not require) mapping a
+  *definitive* Resend failure to a distinct "temporary failure" response.
+  Stage 2C.6 does **not** do this: every reachable path past reCAPTCHA
+  verification returns the same `202` accepted response regardless of
+  whether the confirmation email was sent, suppressed by cooldown,
+  already in flight, definitively failed, or ambiguous. Distinguishing a
+  definitive email failure at the HTTP layer would make the response an
+  oracle correlated with whether the submitted address is a real,
+  deliverable inbox (Resend's `invalid_to_address` is a *definitive*
+  failure reason) — exactly the kind of enumeration the rest of this
+  design works to prevent. Subscriber state itself still faithfully
+  records what happened (`confirmation_send_state`
+  `SENT`/`FAILED`/`UNKNOWN`), so a future operational/retry job can act on
+  it; the public response simply never reflects it. Verified directly:
+  "never confirms a subscriber when Resend definitively fails" and "does
+  not retry an ambiguous Resend outcome" both assert `202` with the
+  unchanged generic body while checking `confirmation_send_state`
+  independently via the module service.
+
+### Subscribe response
+
+- Status: `202 Accepted` for every reachable outcome past reCAPTCHA
+  verification (new/pending/confirmed/unsubscribed-resubscribing/
+  honeypot); `429` for rate-limited; `403`/`503` for reCAPTCHA failure;
+  `400` for invalid input; `503` for any unexpected internal error.
+- Body: `{ "success": true, "message": "If the details are valid, check
+  your inbox for a confirmation email." }` — exactly the body the brief
+  suggested, unchanged.
+- No subscriber id, status, email, first name, token, provider id, send
+  state, or discount eligibility is ever present — enforced by an explicit
+  `Object.keys(body)` assertion in the HTTP tests, not just a visual
+  inspection of the object literal.
+
+### Confirmation and unsubscribe endpoints
+
+- Input: `?token=` only, validated by `tokenQuerySchema` — required,
+  trimmed, 1–1024 characters, base64url shape
+  (`/^[A-Za-z0-9_-]+$/`, matching exactly what
+  `lifecycle/token.ts`'s `generateOpaqueToken` produces). No email,
+  subscriber id, or token hash is ever accepted.
+- Successful/repeated/invalid results map 1:1 to the existing
+  `ConfirmationResult`/`UnsubscribeResult` outcomes
+  (`CONFIRMED→confirmed`, `ALREADY_CONFIRMED→already_confirmed`,
+  `INVALID_OR_EXPIRED→invalid_or_expired`; `UNSUBSCRIBED→unsubscribed`,
+  `ALREADY_UNSUBSCRIBED→already_unsubscribed`, `INVALID→invalid`) — a
+  malformed token shape that fails `tokenQuerySchema` is mapped to the
+  same `invalid_or_expired`/`invalid` code with `400` instead of `200`,
+  never a distinct third code.
+- Idempotency, `first_purchase_discount_eligible` transitions, and the
+  confirmation/unsubscribe race behaviour are entirely inherited from the
+  existing, unmodified lifecycle methods (Stage 2C.3) — the routes add no
+  new concurrency logic.
+- Cache/referrer protection: `Cache-Control: no-store`, `Pragma: no-cache`,
+  `Referrer-Policy: no-referrer` are set on every response from both
+  routes (`shared/response.ts`'s `setTokenRouteProtectionHeaders`),
+  including error responses, before the token is even parsed.
+- No redirect: both routes return JSON directly, as the brief permitted
+  ("Do not redirect from the backend in this task unless the existing
+  design explicitly requires it") — Stage 2C.7's storefront result pages
+  will call these routes and render their own UI from the JSON result.
+- **Testing an expired confirmation token:** `confirmSubscription`'s
+  expiry check reads `Date.now()` directly (no injectable clock), so
+  genuinely exercising an expired token from an HTTP test would require
+  waiting out a real TTL. That mechanism is already covered directly
+  against the module service in `newsletter-module.spec.ts` (Stage 2C.3);
+  the Stage 2C.6 HTTP suite instead proves the *route*-level concern —
+  that `INVALID_OR_EXPIRED`, however it arose, maps to the public
+  `invalid_or_expired` code and is never distinguished from an arbitrary
+  invalid token — using an arbitrary token as the practical stand-in for
+  both. This is a documented, narrow gap, not a silent omission.
+
+### Error handling and logging
+
+- A safe `error-mapping.ts` wraps every route handler in a `try`/`catch`;
+  any unexpected error (configuration failure, database error, an
+  unhandled adapter exception) is mapped to one generic `503` body and one
+  fixed, safe log line identifying only the endpoint name — never
+  `error.message`, a stack trace, or any provider/database detail.
+  Distinct, intentional rejections (validation, rate limit, reCAPTCHA)
+  never reach this `catch` — they are returned directly by the route logic
+  above, per the status-code table in the "Subscribe response" section.
+- Logging convention: plain `console.error`/`console.log` with a fixed,
+  category-only message — the same convention already established by
+  `src/jobs/newsletter-rate-limit-cleanup.ts` (no dedicated structured
+  logger exists in this backend yet).
+
+### HTTP integration-test architecture
+
+- **`medusaIntegrationTestRunner` cannot be used.** Its
+  `dist/medusa-test-runner.js` unconditionally `require()`s `./database`,
+  which itself unconditionally `require()`s `pg-god` at module-load time
+  (used for out-of-band database create/drop against separate
+  `DB_HOST`/`DB_USERNAME` env vars, not the already-guarded
+  `DATABASE_URL`), and `pg-god` is not an installed dependency — the same
+  issue Stage 2C.2 documented for the module-test runner, now confirmed to
+  also block the HTTP test runner. Verified directly: requiring
+  `@medusajs/test-utils/dist/medusa-test-runner-utils/bootstrap-app`
+  (a deep import bypassing `dist/index.js`/`dist/medusa-test-runner.js`
+  entirely) loads without error, while the documented top-level entry
+  point does not.
+- **Bootstrap:** `integration-tests/http/support/bootstrap.ts` calls that
+  deep-imported `startApp()` directly, which boots the real Express app
+  via the same official `@medusajs/medusa/loaders/index` the CLI itself
+  uses and returns an actual listening HTTP server plus the root DI
+  container. No second, ungoverned database create/drop mechanism is
+  introduced — the suite reuses the already-guarded, already-migrated test
+  database exactly as the module-test suite does (the existing, unmodified
+  `assertTestDatabase` guard still runs first, via
+  `integration-tests/setup.js`).
+- **`admin.disable` config addition:** booting the real app also tries to
+  serve the Admin UI, which fails in this environment (no Admin build
+  exists). `medusa-config.ts` gained one narrowly-scoped, opt-in option —
+  `admin: { disable: process.env.MEDUSA_ADMIN_DISABLE === "true" }` —
+  defaulting to `false` (Admin stays enabled) unless that exact env var is
+  present with the exact literal value `"true"`. Only the HTTP test
+  bootstrap ever sets it; the variable is not documented as a normal
+  project environment variable (absent from `.env.template`/
+  `docs/operations/environment-variables.md`) since it exists solely for
+  this test harness. `src/__tests__/medusa-config-admin-disable.unit.spec.ts`
+  proves the scoping directly: Admin stays enabled when the variable is
+  unset, and only the exact string `"true"` disables it (`"1"`, `"TRUE"`,
+  `"yes"`, `"on"`, and an empty string all leave Admin enabled).
+- **Publishable API key:** every Medusa Store API route — including
+  `/store/newsletter/*` — requires a valid `x-publishable-api-key` header
+  via Medusa's own `ensurePublishableApiKeyMiddleware`, applied globally to
+  `/store`, not something this stage opted into. The bootstrap creates one
+  real publishable key directly via the API Key module service
+  (`IApiKeyModuleService.createApiKeys`) after the app boots — no
+  different from an operator creating one in Admin — and revokes/deletes
+  it again in `close()`.
+- **Fake adapters:** `integration-tests/http/support/fakes.ts`'s
+  `FakeRecaptchaVerifier`/`FakeConfirmationEmailSender`, registered into
+  the root container immediately after boot under the exact keys
+  `shared/dependencies.ts` resolves through (see "Dependency resolution"
+  above). No real Google or Resend network call is ever made during this
+  suite.
+- **Client-address control for rate-limit tests:** the bootstrap sets
+  `NEWSLETTER_TRUST_PROXY=true` and
+  `NEWSLETTER_TRUSTED_IP_HEADER=x-test-client-address`, the same
+  configurable trusted-header mechanism Stage 2C.4 designed for a real
+  proxy in front of Medusa — applied here to the test harness itself, not
+  a separate bypass. Each request helper accepts an optional client
+  address (defaulting to a freshly generated, per-call-unique IPv4 address
+  via `nextTestClientAddress()`) so unrelated test cases never
+  unintentionally share a rate-limit bucket. The counter seeds from a
+  random offset (not `0`) specifically so two test *processes* started
+  within the same 60-second fixed window never regenerate the same address
+  sequence and collide with a bucket left over from a previous run against
+  the same persistent test database — this was caught directly during
+  development (a rerun within the rate-limit window produced spurious
+  `429`s) and fixed before this suite was considered complete.
+- **Single shared bootstrap per file — the same class of issue Stage
+  2C.3 documented.** All Stage 2C.6 HTTP tests live in one file,
+  `integration-tests/http/newsletter.spec.ts`, sharing exactly one
+  `bootstrapNewsletterHttpTestApp()` call in a top-level `beforeAll`/
+  `afterAll` outside every `describe`. Splitting the tests into
+  `newsletter-subscribe.spec.ts`, `newsletter-confirm.spec.ts`, etc. (each
+  with its own bootstrap) was tried first and reverted: Jest's
+  `--runInBand` runs every matched spec file in one worker **process**,
+  and a second full `startApp()` boot in that process throws `Method
+  Map.prototype.set called on incompatible receiver` while loading the
+  Notification module — Medusa's module registry (`MedusaModule`) is
+  process-wide static state, the exact failure mode Stage 2C.3 recorded
+  for two module-test bootstraps in one worker, now confirmed to apply
+  across separate HTTP spec files too.
+- **Test database safety:** unchanged — `integration-tests/setup.js`'s
+  `assertTestDatabase` guard runs before this suite via Jest's
+  `setupFiles`, identical to every other integration test type.
+
+### Deviation summary
+
+1. Rate-limit and reCAPTCHA failures use differentiated HTTP status codes
+   (`429`/`403`/`503`) rather than the single generic response the 2C.1
+   design record originally proposed, per the more specific and more
+   recent Stage 2C.6 task brief — documented above under "Rate limiting"
+   and "reCAPTCHA."
+2. `consentTextVersion`/`source` are fixed source-controlled constants
+   (`shared/consent.ts`), not a client-supplied field synced against a
+   backend env var as 2C.1 sketched — the Stage 2C.6 brief's accepted-body
+   field list does not include `consentTextVersion`, and a client-supplied
+   value would let a caller assert consent to wording it never saw.
+3. Orchestration is a plain async function, not a Medusa workflow —
+   consistent with, not a reversal of, Stage 2C.3's earlier deferral;
+   still no compensable multi-step side effect exists that a workflow
+   would meaningfully help with.
+4. A definitive Resend failure does **not** produce a distinct HTTP
+   response — every reachable path past reCAPTCHA returns the same `202`,
+   to avoid a subscriber-address-deliverability oracle; this uses the
+   "may" (not "must") language in the brief's own delivery-outcome
+   section.
+5. One narrowly-scoped, opt-in `medusa-config.ts` addition
+   (`admin.disable`, gated by a test-only env var never documented as a
+   normal project variable) was required to boot the real app for HTTP
+   testing at all — flagged separately in the completion report's Checks
+   section.
+6. The originally-planned per-route spec-file split
+   (`newsletter-subscribe.spec.ts` etc.) was reverted in favour of one
+   shared-bootstrap file, for the process-wide `MedusaModule` registry
+   reason recorded above.
+
 ## Consequences
 
 - Stage 2C.2+ implements this design: models, migrations, module service,
