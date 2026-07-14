@@ -100,6 +100,29 @@ Admin is disabled only when the value is the exact case-sensitive string
 
 ## Baseline application variables
 
+### Stage 4A.1 TCGdex client
+
+The backend TCGdex client is server-only and requires no provider credential.
+It supports English (`en`), Japanese (`ja`), and Traditional Chinese (`zh-tw`).
+`TCGDEX_MAX_RETRIES` means retries after the initial request, so the default of
+`3` permits at most four HTTP requests for one client method call. Responses are
+validated and bounded before they are returned; this stage does not persist
+provider data.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TCGDEX_API_BASE_URL` | `https://api.tcgdex.net` | TCGdex API origin; HTTPS is required except explicitly permitted localhost test use |
+| `TCGDEX_REQUEST_TIMEOUT_MS` | `5000` | Per-request timeout |
+| `TCGDEX_MAX_RETRIES` | `3` | Retries after the initial request |
+| `TCGDEX_RETRY_BASE_DELAY_MS` | `250` | Initial exponential-backoff delay |
+| `TCGDEX_RETRY_MAX_DELAY_MS` | `4000` | Maximum retry delay, including bounded `Retry-After` values |
+| `TCGDEX_MAX_RESPONSE_BYTES` | `1048576` | Maximum response body size |
+
+The client exposes safe error codes for `NOT_FOUND`, `RATE_LIMITED`,
+`SERVER_ERROR`, `INVALID_RESPONSE`, `TIMEOUT`, `NETWORK_ERROR`,
+`INVALID_REQUEST`, and `CONFIGURATION_ERROR`. It has no persistence, matching,
+enrichment, workflow, or Admin responsibility in Stage 4A.1.
+
 - Backend: `DATABASE_URL`, `STORE_CORS`, `ADMIN_CORS`, `AUTH_CORS`,
   `JWT_SECRET`, and `COOKIE_SECRET`. Use a direct test database whose name
   contains `test` for integration tests. `DB_NAME` is documentation-only and is
