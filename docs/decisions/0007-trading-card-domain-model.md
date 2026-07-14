@@ -171,22 +171,27 @@ and high-value cases are explicitly structural. No CSV is imported.
 - `Migration20260714064500` is the narrowly scoped hand-written follow-up for
   link one-to-one indexes, justified by inspected Medusa 2.17.2 SQL.
 - `Migration20260714120000` is an additive migration for
-  `CK_trading_card_external_reference_note_length`; its down migration removes
-  only that check.
+  `CK_trading_card_external_reference_note_length`. Its up migration queries
+  PostgreSQL's catalog for that named constraint on the exact
+  `public.trading_card_external_reference` table and adds it only when absent;
+  the check remains exactly `length(raw_payload_note) <= 500`. Its down
+  migration conditionally removes only that check from that table.
 
 Migrations are applied only to the guarded direct Neon endpoint whose database
 is exactly `holotrail_medusa_test`. Host/database are printed without
 credentials. Up/down/reapply and final catalog results are recorded in the
 Stage 3 implementation report.
 
-The review-fix verification applied `Migration20260714120000`, inspected the
-catalog definition as `CHECK ((length(raw_payload_note) <= 500))`, rolled back
-only that migration from module `tradingCards`, and reapplied it. All earlier
-Stage 3 migrations remained current. Focused tests cover matching and
-mismatched real product hierarchies, two-way and five-way reference creation,
-conflicting creates and optimistic updates, deterministic audit counts, note
-boundaries and exclusion markers, complete lock snapshots, idempotent
-lock/unlock, and transaction rollback when audit creation fails.
+The review-fix verification applies the migration in the final up/up/down/down/up
+sequence. Focused migration coverage proves conditional add and removal,
+reapplication, the catalog definition, rejection of a 501-character note,
+acceptance of a 500-character note, and no changes to unrelated constraints,
+indexes, or tables. All earlier Stage 3 migrations remain current. The broader
+focused tests cover matching and mismatched real product hierarchies, two-way
+and five-way reference creation, conflicting creates and optimistic updates,
+deterministic audit counts, note boundaries and exclusion markers, complete
+lock snapshots, idempotent lock/unlock, and transaction rollback when audit
+creation fails.
 
 ## Known limitations and exclusions
 
