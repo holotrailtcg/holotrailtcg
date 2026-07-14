@@ -1,5 +1,5 @@
 import { TCGDEX_ERROR_CODE, TcgDexError } from "../errors"
-import { equivalentCardNumbers, matchTcgdexCard, type TcgDexLookupClient } from "../matching"
+import { matchesLocalIdentity, matchTcgdexCard, type TcgDexLookupClient } from "../matching"
 import { TCGDEX_MATCH_CODE } from "../matching-types"
 import { normalizeTcgdexCard, normalizeTcgdexRarity } from "../normalization"
 import { PROTECTED_ENRICHMENT_FIELDS } from "../enrichment"
@@ -33,41 +33,71 @@ describe("TCGdex matching and normalization", () => {
   it("classifies not-found separately and provider failures safely", async () => {
     const input = { language: "EN" as const, setCode: "local", cardNumber: "1", setIdentity: { tcgdexSetId: "sv06" } }
     await expect(matchTcgdexCard(input, clientFor(new TcgDexError({ code: "NOT_FOUND", operation: "x", message: "not found" })))).resolves.toMatchObject({ code: "NO_MATCH" })
-    const error = new TcgDexError({ code: TCGDEX_ERROR_CODE.TIMEOUT, operation: "x", message: "safe" , attemptCount: 4 })
-    await expect(matchTcgdexCard(input, clientFor(error))).resolves.toMatchObject({ code: "PROVIDER_ERROR", providerCode: "TIMEOUT", attemptCount: 4 })
+    for (const code of [TCGDEX_ERROR_CODE.TIMEOUT, TCGDEX_ERROR_CODE.RATE_LIMITED, TCGDEX_ERROR_CODE.INVALID_RESPONSE]) {
+      const error = new TcgDexError({ code, operation: "x", message: "provider payload must not leak", attemptCount: 4 })
+      const result = await matchTcgdexCard(input, clientFor(error))
+      expect(result).toMatchObject({ code: "PROVIDER_ERROR", providerCode: code, attemptCount: 4 })
+      expect(result).not.toHaveProperty("message")
+      expect(JSON.stringify(result)).not.toContain("provider payload")
+    }
+    await expect(matchTcgdexCard(input, clientFor(new Error("unexpected programmer failure")))).rejects.toThrow("unexpected programmer failure")
   })
 
   it("rejects invalid input without requesting", async () => {
     const client = clientFor(card())
     await expect(matchTcgdexCard({ language: "EN", setCode: " ", cardNumber: "1" }, client)).resolves.toMatchObject({ code: "INVALID_LOCAL_IDENTITY" })
     await expect(matchTcgdexCard({ language: "FR" as never, setCode: "local", cardNumber: "1", setIdentity: { tcgdexSetId: "sv06" } }, client)).resolves.toMatchObject({ code: "INVALID_LOCAL_IDENTITY", field: "language" })
+    for (const cardNumber of ["", " ", "/", "//", "/196", "066/", "066//196", "\u0001", "\u007f"]) {
+      await expect(matchTcgdexCard({ language: "EN", setCode: "local", cardNumber, setIdentity: { tcgdexSetId: "sv06" } }, client)).resolves.toMatchObject({ code: "INVALID_LOCAL_IDENTITY" })
+    }
     expect(client.getCardBySetAndLocalId).not.toHaveBeenCalled()
   })
 
-  it("checks returned identity and manual references", async () => {
-    const client = clientFor(card({ id: "sv06-99", set: { id: "other", name: "Other" }, localId: "99" }))
+  it("isolates a returned set mismatch", async () => {
+    const client = clientFor(card({ set: { id: "other", name: "Other" } }))
+    const result = await matchTcgdexCard({ language: "EN", setCode: "local", cardNumber: "066", setIdentity: { tcgdexSetId: "sv06" } }, client)
+    expect(result.code).toBe("IDENTITY_MISMATCH")
+  })
+
+  it("checks manual references and skips automatic lookup", async () => {
+    const client = clientFor(card({ id: "sv06-99", localId: "99" }))
     const result = await matchTcgdexCard({ language: "EN", setCode: "local", cardNumber: "066", setIdentity: { tcgdexSetId: "sv06" }, manualCardReference: { provider: "TCGDEX", providerIdentifier: "sv06-66" } }, client)
     expect(client.getCardById).toHaveBeenCalledWith("EN", "sv06-66")
     expect(client.getCardBySetAndLocalId).not.toHaveBeenCalled()
     expect(result.code).toBe("IDENTITY_MISMATCH")
   })
 
-  it("normalizes supported number forms without stripping meaningful text", () => {
-    expect(equivalentCardNumbers(" 066/196 ", "66/196")).toBe(true)
-    expect(equivalentCardNumbers("066/196", "066")).toBe(true)
-    expect(equivalentCardNumbers("0104/15", "104/15")).toBe(true)
-    expect(equivalentCardNumbers("53/62", "53/61")).toBe(false)
-    expect(equivalentCardNumbers("SV1V-008", "008")).toBe(false)
+  it("rejects conflicting trusted set references without requesting", async () => {
+    const client = clientFor(card())
+    const base = { language: "EN" as const, setCode: "local", cardNumber: "066" }
+    await expect(matchTcgdexCard({ ...base, setIdentity: { tcgdexSetId: "sv06", externalReference: { provider: "TCGDEX", providerIdentifier: "other" } } }, client)).resolves.toMatchObject({ code: "INVALID_LOCAL_IDENTITY", field: "reference" })
+    await expect(matchTcgdexCard({ ...base, setIdentity: { tcgdexSetId: " sv06 ", externalReference: { provider: "TCGDEX", providerIdentifier: "sv06" } } }, client)).resolves.toMatchObject({ code: "MATCHED" })
+    await expect(matchTcgdexCard({ ...base, setIdentity: { tcgdexSetId: "", externalReference: { provider: "TCGDEX", providerIdentifier: "sv06" } } }, client)).resolves.toMatchObject({ code: "INVALID_LOCAL_IDENTITY" })
+    expect(client.getCardBySetAndLocalId).toHaveBeenCalledTimes(1)
+  })
+
+  it("matches card numbers directionally and preserves meaningful identifiers", () => {
+    expect(matchesLocalIdentity("066/196", "066")).toBe(true)
+    expect(matchesLocalIdentity("066/196", "66")).toBe(true)
+    expect(matchesLocalIdentity("066", "066/999")).toBe(false)
+    expect(matchesLocalIdentity("066/196", "066/999")).toBe(false)
+    expect(matchesLocalIdentity("066/196", "067")).toBe(false)
+    expect(matchesLocalIdentity("TG01", "TG01")).toBe(true)
+    expect(matchesLocalIdentity("TG01", "1")).toBe(false)
+    expect(matchesLocalIdentity("SVP001", "001")).toBe(false)
+    expect(matchesLocalIdentity("001", "1")).toBe(true)
+    expect(matchesLocalIdentity("008/078", "008")).toBe(true)
+    expect(matchesLocalIdentity("0104/15", "0104")).toBe(true)
   })
 
   it("normalizes Pokemon, Trainer and Energy fields without commercial inference", () => {
     const pokemon = normalizeTcgdexCard(card({ category: "Pokemon", image: "https://img.example/card.png", rarity: "Common", dexId: [133], types: ["Colorless"] }))
     const trainer = normalizeTcgdexCard(card({ category: "Trainer", image: undefined, illustrator: undefined }))
-    const energy = normalizeTcgdexCard(card({ category: "Energy", variants: { normal: false, reverse: true, holo: false, firstEdition: false } }))
+    const energy = normalizeTcgdexCard(card({ category: "Energy", variants: { normal: false, reverse: true, holo: false, firstEdition: false, wPromo: true } }))
     expect(pokemon.referenceArtworkUrl).toBe("https://img.example/card.png")
     expect(pokemon.pokedexNumbers).toEqual([133])
     expect(trainer.referenceArtworkUrl).toBeUndefined()
-    expect(energy.variants.reverse).toBe(true)
+    expect(energy.variants).toEqual({ normal: false, reverse: true, holo: false, firstEdition: false })
     expect(normalizeTcgdexRarity("Unknown")).toEqual({ status: "UNMAPPED", providerValue: "Unknown" })
     expect(energy).not.toHaveProperty("condition")
     expect(energy).not.toHaveProperty("finish")
@@ -76,5 +106,16 @@ describe("TCGdex matching and normalization", () => {
   it("keeps protected commercial fields outside the enrichment proposal", () => {
     const proposal = normalizeTcgdexCard(card())
     for (const field of PROTECTED_ENRICHMENT_FIELDS) expect(proposal).not.toHaveProperty(field)
+  })
+
+  it("exposes only normalized enrichment from a match", async () => {
+    const client = clientFor(card({ variants: { normal: true, reverse: false, holo: true, firstEdition: false, wPromo: true } }))
+    const result = await matchTcgdexCard({ language: "EN", setCode: "local", cardNumber: "066", setIdentity: { tcgdexSetId: "sv06" } }, client)
+    expect(result.code).toBe("MATCHED")
+    expect(result).not.toHaveProperty("card")
+    if (result.code === "MATCHED") {
+      expect(result.enrichment.variants).toEqual({ normal: true, reverse: false, holo: true, firstEdition: false })
+      expect(result.enrichment).not.toHaveProperty("wPromo")
+    }
   })
 })

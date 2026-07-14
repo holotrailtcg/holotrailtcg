@@ -36,6 +36,11 @@ export function normalizeTcgdexCard(card: TcgDexCard): CardEnrichmentData {
     ...(card.rarity ? { providerRarity: card.rarity, rarityCandidate: normalizeTcgdexRarity(card.rarity) } : {}),
     ...(card.dexId ? { pokedexNumbers: [...card.dexId] } : {}),
     ...(card.types ? { types: [...card.types] } : {}),
-    variants: { ...card.variants },
+    variants: {
+      normal: card.variants.normal,
+      reverse: card.variants.reverse,
+      holo: card.variants.holo,
+      firstEdition: card.variants.firstEdition,
+    },
   }
 }

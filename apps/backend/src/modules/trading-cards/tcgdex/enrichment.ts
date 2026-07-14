@@ -1,21 +1,14 @@
 import type { CardFinish, CardCondition, SpecialTreatment } from "../types"
+import type { CardEnrichmentData } from "./matching-types"
 
 export const PROTECTED_ENRICHMENT_FIELDS = [
-  "condition", "conditionSource", "language", "finish", "specialTreatment", "sku", "stock",
+  "condition", "conditionSource", "language", "finish", "specialTreatment", "sku", "stock", "quantity",
   "acquisitionCost", "sellingPrice", "priceLocked", "realListingPhotographs", "publicationState", "manualProviderMatch",
 ] as const
 
 export type ProtectedEnrichmentField = (typeof PROTECTED_ENRICHMENT_FIELDS)[number]
 
-export type EnrichmentProposal = {
-  name?: string
-  rarity?: string
-  illustrator?: string
-  referenceArtworkUrl?: string
-  pokedexNumbers?: number[]
-  types?: string[]
-  // Commercial fields are intentionally not part of this DTO.
-}
+export type EnrichmentProposal = CardEnrichmentData
 
 export type ProtectedCommercialFields = {
   condition: CardCondition
@@ -25,6 +18,7 @@ export type ProtectedCommercialFields = {
   specialTreatment: SpecialTreatment
   sku: string
   stock: number
+  quantity: number
   acquisitionCost?: number
   sellingPrice?: number
   priceLocked: boolean

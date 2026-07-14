@@ -1,5 +1,4 @@
 import type { CardLanguage, Rarity, RarityIconKey } from "../types"
-import type { TcgDexCard } from "./types"
 
 export const TCGDEX_MATCH_CODE = {
   MATCHED: "MATCHED",
@@ -32,6 +31,13 @@ export type NormalizedRarityCandidate =
   | { status: "MAPPED"; providerValue: string; rarity: Rarity; iconKey: RarityIconKey }
   | { status: "UNMAPPED"; providerValue: string }
 
+export type NormalizedCardVariants = {
+  normal: boolean
+  reverse: boolean
+  holo: boolean
+  firstEdition: boolean
+}
+
 export type CardEnrichmentData = {
   provider: "TCGDEX"
   providerCardId: string
@@ -45,11 +51,11 @@ export type CardEnrichmentData = {
   rarityCandidate?: NormalizedRarityCandidate
   pokedexNumbers?: number[]
   types?: string[]
-  variants: TcgDexCard["variants"]
+  variants: NormalizedCardVariants
 }
 
 export type TcgDexMatchResult =
-  | { code: "MATCHED"; source: TcgDexMatchSource; card: TcgDexCard; enrichment: CardEnrichmentData }
+  | { code: "MATCHED"; source: TcgDexMatchSource; enrichment: CardEnrichmentData }
   | { code: "NO_MATCH"; source: TcgDexMatchSource; reason: "NOT_FOUND" }
   | { code: "UNRESOLVED_SET"; source: "AUTOMATIC"; setCode: string }
   | { code: "IDENTITY_MISMATCH"; source: TcgDexMatchSource; expected: { setId?: string; localId: string }; actual: { setId: string; localId: string } }
