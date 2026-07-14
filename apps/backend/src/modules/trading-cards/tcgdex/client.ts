@@ -27,9 +27,25 @@ function isAbortError(error: unknown) {
     error instanceof Error && error.name === "AbortError"
 }
 
+type BodyReadFailureKind = "TIMEOUT" | "NETWORK_ERROR" | "INVALID_RESPONSE"
+
+class BodyReadFailure extends Error {
+  readonly kind: BodyReadFailureKind
+
+  constructor(kind: BodyReadFailureKind) {
+    super("TCGdex response body could not be read")
+    this.kind = kind
+  }
+}
+
 async function readBoundedBody(response: Response, maximumBytes: number) {
   if (!response.body) {
-    const body = await response.text()
+    let body: string
+    try {
+      body = await response.text()
+    } catch (error) {
+      throw new BodyReadFailure(isAbortError(error) ? "TIMEOUT" : "INVALID_RESPONSE")
+    }
     return new TextEncoder().encode(body).byteLength > maximumBytes ? null : body
   }
 
@@ -43,13 +59,16 @@ async function readBoundedBody(response: Response, maximumBytes: number) {
       if (done) break
       totalBytes += value.byteLength
       if (totalBytes > maximumBytes) {
-        await reader.cancel()
+        try { await reader.cancel() } catch { /* preserve the size classification */ }
         return null
       }
       chunks.push(value)
     }
+  } catch (error) {
+    try { await reader.cancel() } catch { /* preserve the primary body-read failure */ }
+    throw new BodyReadFailure(isAbortError(error) ? "TIMEOUT" : "NETWORK_ERROR")
   } finally {
-    reader.releaseLock()
+    try { reader.releaseLock() } catch { /* no raw reader error may escape */ }
   }
 
   const body = new Uint8Array(totalBytes)
@@ -96,7 +115,8 @@ export class TcgDexClient {
       try {
         let response: Response
         try {
-          response = await this.fetchImpl(url, { method: "GET", headers: { Accept: "application/json" }, signal: controller.signal })
+          // Redirects are rejected so a provider response cannot silently move this client to another origin.
+          response = await this.fetchImpl(url, { method: "GET", headers: { Accept: "application/json" }, redirect: "error", signal: controller.signal })
         } catch (error) {
           const timedOut = isAbortError(error)
           const code = timedOut ? TCGDEX_ERROR_CODE.TIMEOUT : TCGDEX_ERROR_CODE.NETWORK_ERROR
@@ -123,7 +143,23 @@ export class TcgDexClient {
           throw this.error(TCGDEX_ERROR_CODE.INVALID_RESPONSE, "TCGdex response is too large", operation, attemptCount)
         }
 
-        const body = await readBoundedBody(response, this.config.maxResponseBytes)
+        let body: string | null
+        try {
+          body = await readBoundedBody(response, this.config.maxResponseBytes)
+        } catch (error) {
+          const failure = error instanceof BodyReadFailure ? error.kind : "INVALID_RESPONSE"
+          if (failure === TCGDEX_ERROR_CODE.TIMEOUT || failure === TCGDEX_ERROR_CODE.NETWORK_ERROR) {
+            if (retry < this.config.maxRetries) {
+              await this.waitBeforeRetry(retry, undefined)
+              continue
+            }
+          }
+          throw this.error(failure, failure === TCGDEX_ERROR_CODE.TIMEOUT
+            ? "TCGdex response timed out while reading"
+            : failure === TCGDEX_ERROR_CODE.NETWORK_ERROR
+              ? "TCGdex response failed while reading"
+              : "TCGdex response could not be read", operation, attemptCount)
+        }
         if (body === null) {
           throw this.error(TCGDEX_ERROR_CODE.INVALID_RESPONSE, "TCGdex response is too large", operation, attemptCount)
         }

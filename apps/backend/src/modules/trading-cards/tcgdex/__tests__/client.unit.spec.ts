@@ -18,6 +18,13 @@ const response = (body: unknown, status = 200, headers: Record<string, string> =
     headers: { "Content-Type": "application/json", ...headers },
   })
 
+const responseWithBody = (body: ReadableStream<Uint8Array>) => ({
+  ok: true,
+  status: 200,
+  headers: new Headers({ "Content-Type": "application/json" }),
+  body,
+}) as unknown as Response
+
 const validCard = (overrides: Record<string, unknown> = {}) => ({
   category: "Pokemon",
   id: "sv06-1",
@@ -77,6 +84,19 @@ describe("TcgDexClient", () => {
     })))
     const { client } = makeClient(fetchImpl)
     await expect(client.getCardById("EN", "sv06-1")).resolves.toMatchObject({ category: "Trainer", effect: "Draw a card." })
+  })
+
+  it("validates an Energy response", async () => {
+    const fetchImpl = jest.fn(async () => response(validCard({
+      category: "Energy",
+      image: undefined,
+      illustrator: undefined,
+      rarity: undefined,
+      energyType: "Basic",
+      effect: "Provides energy.",
+    })))
+    const { client } = makeClient(fetchImpl)
+    await expect(client.getCardById("EN", "sv06-1")).resolves.toMatchObject({ category: "Energy", energyType: "Basic" })
   })
 
   it("validates nested structures and required identity fields", async () => {
@@ -147,8 +167,10 @@ describe("TcgDexClient", () => {
   it("classifies final 5xx after retries", async () => {
     const fetchImpl = jest.fn(async () => response({}, 500))
     const { client } = makeClient(fetchImpl)
-    await expectCode(client.getCardById("EN", "sv06-1"), TCGDEX_ERROR_CODE.SERVER_ERROR)
-    await expect(client.getCardById("EN", "sv06-1")).rejects.toMatchObject({ attemptCount: 4, status: 500 })
+    let error: unknown
+    try { await client.getCardById("EN", "sv06-1") } catch (caught) { error = caught }
+    expect(error).toMatchObject({ code: TCGDEX_ERROR_CODE.SERVER_ERROR, attemptCount: 4, status: 500 })
+    expect(fetchImpl).toHaveBeenCalledTimes(4)
   })
 
   it("retries a timeout and succeeds", async () => {
@@ -174,6 +196,91 @@ describe("TcgDexClient", () => {
     await expectCode(schemaClient.getCardById("EN", "sv06-1"), TCGDEX_ERROR_CODE.INVALID_RESPONSE)
     expect(malformedFetch).toHaveBeenCalledTimes(1)
     expect(schemaFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it("classifies a response.text failure as invalid without leaking its error", async () => {
+    const providerSecret = "provider-secret-payload"
+    const fetchImpl = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      body: null,
+      text: async () => { throw new Error(providerSecret) },
+    }) as unknown as Response)
+    const { client } = makeClient(fetchImpl)
+    let error: unknown
+    try { await client.getCardById("EN", "sv06-1") } catch (caught) { error = caught }
+    expect(error).toMatchObject({ code: TCGDEX_ERROR_CODE.INVALID_RESPONSE, attemptCount: 1 })
+    expect(error).not.toMatchObject({ message: expect.stringContaining(providerSecret) })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ["network", new Error("provider-body-secret")],
+    ["timeout", new DOMException("provider-body-secret", "AbortError")],
+  ] as const)("retries a body-read %s failure and succeeds", async (_kind, readError) => {
+    const failingBody = new ReadableStream<Uint8Array>({ start(controller) { controller.error(readError) } })
+    const fetchImpl = jest.fn()
+      .mockResolvedValueOnce(responseWithBody(failingBody))
+      .mockResolvedValueOnce(response(validCard()))
+    const { client, sleep } = makeClient(fetchImpl)
+    await expect(client.getCardById("EN", "sv06-1")).resolves.toMatchObject({ id: "sv06-1" })
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(sleep).toHaveBeenCalledTimes(1)
+  })
+
+  it("classifies exhausted body-read network failure", async () => {
+    const fetchImpl = jest.fn(async () => responseWithBody(new ReadableStream<Uint8Array>({
+      start(controller) { controller.error(new Error("provider-body-secret")) },
+    })))
+    const { client, sleep } = makeClient(fetchImpl)
+    let error: unknown
+    try { await client.getCardById("EN", "sv06-1") } catch (caught) { error = caught }
+    expect(error).toMatchObject({ code: TCGDEX_ERROR_CODE.NETWORK_ERROR, attemptCount: 4 })
+    expect(error).not.toMatchObject({ message: expect.stringContaining("provider-body-secret") })
+    expect(fetchImpl).toHaveBeenCalledTimes(4)
+    expect(sleep).toHaveBeenCalledTimes(3)
+  })
+
+  it("classifies exhausted body-read timeout", async () => {
+    const fetchImpl = jest.fn(async () => responseWithBody(new ReadableStream<Uint8Array>({
+      start(controller) { controller.error(new DOMException("provider-body-secret", "AbortError")) },
+    })))
+    const { client, sleep } = makeClient(fetchImpl)
+    let error: unknown
+    try { await client.getCardById("EN", "sv06-1") } catch (caught) { error = caught }
+    expect(error).toMatchObject({ code: TCGDEX_ERROR_CODE.TIMEOUT, attemptCount: 4 })
+    expect(error).not.toMatchObject({ message: expect.stringContaining("provider-body-secret") })
+    expect(fetchImpl).toHaveBeenCalledTimes(4)
+    expect(sleep).toHaveBeenCalledTimes(3)
+  })
+
+  it("does not leak a reader cancellation failure or retry an invalid oversized response", async () => {
+    const cancelError = new Error("cancel-provider-secret")
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) { controller.enqueue(new Uint8Array(10_001)) },
+      cancel() { return Promise.reject(cancelError) },
+    })
+    const fetchImpl = jest.fn(async () => responseWithBody(body))
+    const { client, sleep } = makeClient(fetchImpl)
+    let error: unknown
+    try { await client.getCardById("EN", "sv06-1") } catch (caught) { error = caught }
+    expect(error).toMatchObject({ code: TCGDEX_ERROR_CODE.INVALID_RESPONSE, attemptCount: 1 })
+    expect(error).not.toMatchObject({ message: expect.stringContaining("cancel-provider-secret") })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(sleep).not.toHaveBeenCalled()
+  })
+
+  it("classifies rejected redirects safely", async () => {
+    const fetchImpl = jest.fn(async (_url: string | URL, init?: RequestInit) => {
+      expect(init?.redirect).toBe("error")
+      throw new TypeError("redirected-to-provider-secret")
+    })
+    const { client } = makeClient(fetchImpl)
+    let error: unknown
+    try { await client.getCardById("EN", "sv06-1") } catch (caught) { error = caught }
+    expect(error).toMatchObject({ code: TCGDEX_ERROR_CODE.NETWORK_ERROR, attemptCount: 4 })
+    expect(error).not.toMatchObject({ message: expect.stringContaining("redirected-to-provider-secret") })
   })
 
   it("rejects oversized responses without exposing the body", async () => {
