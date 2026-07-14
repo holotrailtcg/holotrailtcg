@@ -1711,7 +1711,13 @@
           "unique": true
         }
       ],
-      "checks": [],
+      "checks": [
+        {
+          "name": "CK_trading_card_external_reference_note_length",
+          "expression": "length(raw_payload_note) <= 500",
+          "definition": "check ((length(raw_payload_note) <= 500))"
+        }
+      ],
       "foreignKeys": {
         "trading_card_external_reference_trading_card_id_foreign": {
           "constraintName": "trading_card_external_reference_trading_card_id_foreign",

@@ -41,6 +41,10 @@ export interface UpdateVariantTreatmentInput extends AuditContext {
 }
 
 export interface UpsertExternalReferenceInput extends AuditContext {
+  /** Required for an intentional update; omitted calls are create-or-return-idempotently. */
+  referenceId?: string
+  /** PostgreSQL row version returned by the preceding read; prevents racing updates. */
+  expectedVersion?: string
   tradingCardId: string
   tradingCardVariantId?: string | null
   provider: ExternalProvider
@@ -49,6 +53,31 @@ export interface UpsertExternalReferenceInput extends AuditContext {
   region?: string | null
   rawPayloadNote?: string | null
 }
+
+export const EXTERNAL_REFERENCE_NOTE_MAX_LENGTH = 500
+
+interface PriceLockState {
+  price_locked: boolean
+  price_locked_at: Date | string | null
+  price_locked_actor: string | null
+  price_lock_reason: string | null
+}
+
+const auditPriceLockState = (state: PriceLockState) => ({
+  price_locked: state.price_locked,
+  price_locked_at: state.price_locked_at,
+  price_locked_by: state.price_locked_actor,
+  price_lock_reason: state.price_lock_reason,
+})
+
+const externalReferenceAuditState = (value: Record<string, unknown>) => ({
+  provider: value.provider,
+  provider_identifier: value.provider_identifier,
+  trading_card_id: value.trading_card_id,
+  trading_card_variant_id: value.trading_card_variant_id ?? null,
+  language: value.language ?? null,
+  region: value.region ?? null,
+})
 
 class TradingCardsModuleService extends MedusaService({
   CardSet, TradingCard, TradingCardVariant, ExternalCardReference, CardAuditEntry, RarityMapping,
@@ -165,18 +194,22 @@ class TradingCardsModuleService extends MedusaService({
 
   async lockVariantPrice(input: AuditContext & { id: string }) {
     return this.manager_.transactional(async (manager) => {
-      const [current] = await manager.execute<{ price_locked: boolean }>(
-        `select price_locked from trading_card_variant where id = ? and deleted_at is null for update`, [input.id]
+      const [current] = await manager.execute<PriceLockState>(
+        `select price_locked, price_locked_at, price_locked_actor, price_lock_reason
+         from trading_card_variant where id = ? and deleted_at is null for update`, [input.id]
       )
       if (!current) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Trading card variant not found")
       if (!current.price_locked) {
-        await manager.execute(
+        const [locked] = await manager.execute<PriceLockState>(
           `update trading_card_variant set price_locked = true, price_locked_at = now(), price_locked_actor = ?,
-           price_lock_reason = ?, updated_at = now() where id = ?`, [input.actor, input.reason ?? null, input.id]
+           price_lock_reason = ?, updated_at = now() where id = ?
+           returning price_locked, price_locked_at, price_locked_actor, price_lock_reason`,
+          [input.actor, input.reason ?? null, input.id]
         )
         await this.writeAudit(manager, {
           ...input, entityType: AUDIT_ENTITY_TYPE.TRADING_CARD_VARIANT, entityId: input.id,
-          action: AUDIT_ACTION.PRICE_LOCKED, oldValue: { price_locked: false }, newValue: { price_locked: true },
+          action: AUDIT_ACTION.PRICE_LOCKED,
+          oldValue: auditPriceLockState(current), newValue: auditPriceLockState(locked),
         })
       }
       const [saved] = await manager.execute<Record<string, unknown>>(
@@ -188,18 +221,21 @@ class TradingCardsModuleService extends MedusaService({
 
   async unlockVariantPrice(input: AuditContext & { id: string }) {
     return this.manager_.transactional(async (manager) => {
-      const [current] = await manager.execute<{ price_locked: boolean }>(
-        `select price_locked from trading_card_variant where id = ? and deleted_at is null for update`, [input.id]
+      const [current] = await manager.execute<PriceLockState>(
+        `select price_locked, price_locked_at, price_locked_actor, price_lock_reason
+         from trading_card_variant where id = ? and deleted_at is null for update`, [input.id]
       )
       if (!current) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Trading card variant not found")
       if (current.price_locked) {
-        await manager.execute(
+        const [unlocked] = await manager.execute<PriceLockState>(
           `update trading_card_variant set price_locked = false, price_locked_at = null, price_locked_actor = null,
-           price_lock_reason = null, updated_at = now() where id = ?`, [input.id]
+           price_lock_reason = null, updated_at = now() where id = ?
+           returning price_locked, price_locked_at, price_locked_actor, price_lock_reason`, [input.id]
         )
         await this.writeAudit(manager, {
           ...input, entityType: AUDIT_ENTITY_TYPE.TRADING_CARD_VARIANT, entityId: input.id,
-          action: AUDIT_ACTION.PRICE_UNLOCKED, oldValue: { price_locked: true }, newValue: { price_locked: false },
+          action: AUDIT_ACTION.PRICE_UNLOCKED,
+          oldValue: auditPriceLockState(current), newValue: auditPriceLockState(unlocked),
         })
       }
       const [saved] = await manager.execute<Record<string, unknown>>(
@@ -228,8 +264,40 @@ class TradingCardsModuleService extends MedusaService({
     return rows[0] ?? null
   }
 
+  async assertVariantProductHierarchy(input: { productVariantProductId?: string | null; tradingCardProductId?: string | null }): Promise<void> {
+    if (!input.productVariantProductId) {
+      throw new MedusaError(MedusaError.Types.INVALID_DATA, "Product variant is not assigned to a Medusa product")
+    }
+    if (!input.tradingCardProductId) {
+      throw new MedusaError(MedusaError.Types.INVALID_DATA, "Trading card is not linked to a Medusa product")
+    }
+    if (input.productVariantProductId !== input.tradingCardProductId) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "Product variant and trading card must belong to the same Medusa product"
+      )
+    }
+  }
+
   async upsertExternalReference(input: UpsertExternalReferenceInput) {
+    if (input.rawPayloadNote !== undefined && input.rawPayloadNote !== null) {
+      if (typeof input.rawPayloadNote !== "string") {
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, "External reference note must be a string")
+      }
+      if (input.rawPayloadNote.length > EXTERNAL_REFERENCE_NOTE_MAX_LENGTH) {
+        throw new MedusaError(
+          MedusaError.Types.INVALID_DATA,
+          `External reference note must be at most ${EXTERNAL_REFERENCE_NOTE_MAX_LENGTH} characters`
+        )
+      }
+    }
     return this.manager_.transactional(async (manager) => {
+      // A transaction-scoped PostgreSQL lock serialises this logical key across
+      // backend processes without weakening the active-row unique index.
+      await manager.execute(
+        `select pg_advisory_xact_lock(hashtextextended(?::text, 0))`,
+        [`${input.provider}:${input.providerIdentifier}`]
+      )
       if (input.tradingCardVariantId) {
         const [variant] = await manager.execute<{ trading_card_id: string }>(
           `select trading_card_id from trading_card_variant where id = ? and deleted_at is null`, [input.tradingCardVariantId]
@@ -239,7 +307,7 @@ class TradingCardsModuleService extends MedusaService({
         }
       }
       const [current] = await manager.execute<Record<string, unknown>>(
-        `select * from trading_card_external_reference where provider = ? and provider_identifier = ?
+        `select *, xmin::text as version from trading_card_external_reference where provider = ? and provider_identifier = ?
          and deleted_at is null for update`, [input.provider, input.providerIdentifier]
       )
       const next = {
@@ -249,6 +317,25 @@ class TradingCardsModuleService extends MedusaService({
       }
       const id = (current?.id as string | undefined) ?? generateEntityId(undefined, "tcref")
       if (current) {
+        const currentComparable = {
+          trading_card_id: current.trading_card_id,
+          trading_card_variant_id: current.trading_card_variant_id ?? null,
+          provider: current.provider,
+          provider_identifier: current.provider_identifier,
+          language: current.language ?? null,
+          region: current.region ?? null,
+          raw_payload_note: current.raw_payload_note ?? null,
+        }
+        if (JSON.stringify(currentComparable) === JSON.stringify(next)) return current
+        if (!input.referenceId || input.referenceId !== current.id || !input.expectedVersion) {
+          throw new MedusaError(
+            MedusaError.Types.INVALID_DATA,
+            "External reference already exists with different data; its reference ID and version are required for an update"
+          )
+        }
+        if (input.expectedVersion !== current.version) {
+          throw new MedusaError(MedusaError.Types.INVALID_DATA, "External reference changed before this update")
+        }
         await manager.execute(
           `update trading_card_external_reference set trading_card_id = ?, trading_card_variant_id = ?, language = ?,
            region = ?, raw_payload_note = ?, updated_at = now() where id = ?`,
@@ -262,13 +349,21 @@ class TradingCardsModuleService extends MedusaService({
           [id, next.trading_card_id, next.trading_card_variant_id, next.provider, next.provider_identifier, next.language, next.region, next.raw_payload_note]
         )
       }
+      const currentAudit = current ? externalReferenceAuditState(current) : undefined
+      const nextAudit = externalReferenceAuditState(next)
+      const changedKeys = currentAudit
+        ? Object.keys(nextAudit).filter((key) => currentAudit[key as keyof typeof currentAudit] !== nextAudit[key as keyof typeof nextAudit])
+        : []
       await this.writeAudit(manager, {
         ...input, entityType: AUDIT_ENTITY_TYPE.EXTERNAL_CARD_REFERENCE, entityId: id,
         action: current ? AUDIT_ACTION.EXTERNAL_REFERENCE_CHANGED : AUDIT_ACTION.EXTERNAL_REFERENCE_ADDED,
-        oldValue: current, newValue: next,
+        oldValue: currentAudit && Object.fromEntries(changedKeys.map((key) => [key, currentAudit[key as keyof typeof currentAudit]])),
+        newValue: currentAudit
+          ? Object.fromEntries(changedKeys.map((key) => [key, nextAudit[key as keyof typeof nextAudit]]))
+          : nextAudit,
       })
       const [saved] = await manager.execute<Record<string, unknown>>(
-        `select * from trading_card_external_reference where id = ? and deleted_at is null`, [id]
+        `select *, xmin::text as version from trading_card_external_reference where id = ? and deleted_at is null`, [id]
       )
       return saved
     })
@@ -283,7 +378,7 @@ class TradingCardsModuleService extends MedusaService({
       await manager.execute(`update trading_card_external_reference set deleted_at = now(), updated_at = now() where id = ?`, [input.id])
       await this.writeAudit(manager, {
         ...input, entityType: AUDIT_ENTITY_TYPE.EXTERNAL_CARD_REFERENCE, entityId: input.id,
-        action: AUDIT_ACTION.EXTERNAL_REFERENCE_REMOVED, oldValue: current,
+        action: AUDIT_ACTION.EXTERNAL_REFERENCE_REMOVED, oldValue: externalReferenceAuditState(current),
       })
     })
   }

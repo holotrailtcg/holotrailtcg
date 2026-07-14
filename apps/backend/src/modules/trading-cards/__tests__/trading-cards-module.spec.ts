@@ -3,6 +3,7 @@ import { ContainerRegistrationKeys, createPgConnection } from "@medusajs/framewo
 import { TRADING_CARDS_MODULE } from "../index"
 import { canonicalIdentityKey, variantIdentityKey } from "../identity/identity-key"
 import { VERIFIED_DUPLICATE_EEVEE_ROWS } from "../__fixtures__/pulse-rows"
+import { EXTERNAL_REFERENCE_NOTE_MAX_LENGTH } from "../service"
 
 let pgConnection: ReturnType<typeof createPgConnection>
 let medusaApp: Awaited<ReturnType<typeof MedusaApp>>
@@ -156,23 +157,176 @@ describe("rarity and external references", () => {
       trading_card_id: second.card.id, provider: "PULSE", provider_identifier: providerIdentifier,
     })).rejects.toThrow()
   })
+
+  it("makes equivalent concurrent reference creation idempotent", async () => {
+    const { card } = await createCard()
+    const providerIdentifier = `card:concurrent|${suffix()}`
+    const input = {
+      tradingCardId: card.id, provider: "PULSE", providerIdentifier,
+      language: "EN", region: "GB", rawPayloadNote: "short diagnostic",
+      actor: "concurrency-test", source: "MANUAL",
+    }
+
+    const two = await Promise.all([service.upsertExternalReference(input), service.upsertExternalReference(input)])
+    expect(new Set(two.map((reference: any) => reference.id)).size).toBe(1)
+
+    const five = await Promise.all(Array.from({ length: 5 }, () => service.upsertExternalReference(input)))
+    expect(new Set(five.map((reference: any) => reference.id)).size).toBe(1)
+    const references = await service.listExternalCardReferences({ provider: "PULSE", provider_identifier: providerIdentifier })
+    expect(references).toHaveLength(1)
+    const audits = await service.listCardAuditEntries({ entity_id: references[0].id })
+    expect(audits.map((entry: any) => entry.action)).toEqual(["EXTERNAL_REFERENCE_ADDED"])
+  })
+
+  it("rejects racing conflicting creates without leaking a unique-constraint error", async () => {
+    const first = await createCard()
+    const second = await createCard()
+    const providerIdentifier = `card:conflict|${suffix()}`
+    const base = { provider: "PULSE", providerIdentifier, actor: "concurrency-test", source: "MANUAL" }
+    const results = await Promise.allSettled([
+      service.upsertExternalReference({ ...base, tradingCardId: first.card.id, region: "GB" }),
+      service.upsertExternalReference({ ...base, tradingCardId: second.card.id, region: "JP" }),
+    ])
+    expect(results.map((result) => result.status).sort()).toEqual(["fulfilled", "rejected"])
+    const rejected = results.find((result) => result.status === "rejected") as PromiseRejectedResult
+    expect(rejected.reason.message).toContain("already exists with different data")
+    expect(rejected.reason.message).not.toMatch(/unique|constraint|duplicate key/i)
+
+    const references = await service.listExternalCardReferences({ provider: "PULSE", provider_identifier: providerIdentifier })
+    expect(references).toHaveLength(1)
+    const audits = await service.listCardAuditEntries({ entity_id: references[0].id })
+    expect(audits.map((entry: any) => entry.action)).toEqual(["EXTERNAL_REFERENCE_ADDED"])
+  })
+
+  it("requires the current reference ID for a genuine update and audits only changed structural fields", async () => {
+    const { card, variant } = await createVariant()
+    const providerIdentifier = `card:update|${suffix()}`
+    const base = { tradingCardId: card.id, provider: "PULSE", providerIdentifier,
+      actor: "update-test", source: "MANUAL", rawPayloadNote: "initial private marker" }
+    const reference = await service.upsertExternalReference(base)
+    const repeated = await service.upsertExternalReference(base)
+    expect(repeated.id).toBe(reference.id)
+
+    await expect(service.upsertExternalReference({ ...base, region: "GB" }))
+      .rejects.toThrow("reference ID and version are required")
+    const updated = await service.upsertExternalReference({
+      ...base, referenceId: reference.id, expectedVersion: reference.version, tradingCardVariantId: variant.id,
+      region: "GB", rawPayloadNote: "updated private marker",
+    })
+    expect(updated.region).toBe("GB")
+    expect(updated.raw_payload_note).toBe("updated private marker")
+    const audits = await service.listCardAuditEntries({ entity_id: reference.id })
+    expect(audits.map((entry: any) => entry.action)).toEqual([
+      "EXTERNAL_REFERENCE_ADDED", "EXTERNAL_REFERENCE_CHANGED",
+    ])
+    expect(audits[1].old_value).toEqual({ trading_card_variant_id: null, region: null })
+    expect(audits[1].new_value).toEqual({ trading_card_variant_id: variant.id, region: "GB" })
+  })
+
+  it("uses the returned row version to reject racing non-equivalent updates", async () => {
+    const { card } = await createCard()
+    const providerIdentifier = `card:update-race|${suffix()}`
+    const base = { tradingCardId: card.id, provider: "PULSE", providerIdentifier,
+      actor: "update-race-test", source: "MANUAL" }
+    const reference = await service.upsertExternalReference(base)
+    const results = await Promise.allSettled([
+      service.upsertExternalReference({
+        ...base, referenceId: reference.id, expectedVersion: reference.version, region: "GB",
+      }),
+      service.upsertExternalReference({
+        ...base, referenceId: reference.id, expectedVersion: reference.version, region: "JP",
+      }),
+    ])
+    expect(results.map((result) => result.status).sort()).toEqual(["fulfilled", "rejected"])
+    const rejected = results.find((result) => result.status === "rejected") as PromiseRejectedResult
+    expect(rejected.reason.message).toBe("External reference changed before this update")
+    const references = await service.listExternalCardReferences({ provider_identifier: providerIdentifier })
+    expect(["GB", "JP"]).toContain(references[0].region)
+    const audits = await service.listCardAuditEntries({ entity_id: reference.id })
+    expect(audits.map((entry: any) => entry.action)).toEqual([
+      "EXTERNAL_REFERENCE_ADDED", "EXTERNAL_REFERENCE_CHANGED",
+    ])
+  })
+
+  it("bounds diagnostic notes at 500 characters and excludes them from every audit snapshot", async () => {
+    const { card } = await createCard()
+    const marker = `SECRET_NOTE_${suffix()}`
+    const providerIdentifier = `card:note|${suffix()}`
+    const note = marker + "x".repeat(EXTERNAL_REFERENCE_NOTE_MAX_LENGTH - marker.length)
+    const base = { tradingCardId: card.id, provider: "PULSE", providerIdentifier,
+      actor: "note-test", source: "MANUAL" }
+    const reference = await service.upsertExternalReference({ ...base, rawPayloadNote: note })
+    expect(reference.raw_payload_note).toBe(note)
+    await service.removeExternalReference({ id: reference.id, actor: "note-test", source: "MANUAL" })
+    const audits = await service.listCardAuditEntries({ entity_id: reference.id })
+    expect(JSON.stringify(audits)).not.toContain(marker)
+    expect(audits).toHaveLength(2)
+
+    const oversizedIdentifier = `card:oversized|${suffix()}`
+    await expect(service.upsertExternalReference({
+      ...base, providerIdentifier: oversizedIdentifier,
+      rawPayloadNote: "x".repeat(EXTERNAL_REFERENCE_NOTE_MAX_LENGTH + 1),
+    })).rejects.toThrow("at most 500 characters")
+    expect(await service.listExternalCardReferences({ provider_identifier: oversizedIdentifier })).toHaveLength(0)
+    expect(await service.listCardAuditEntries({ actor: "note-test", entity_id: oversizedIdentifier })).toHaveLength(0)
+    await expect(pgConnection.raw(
+      `insert into trading_card_external_reference
+       (id, trading_card_id, provider, provider_identifier, raw_payload_note)
+       values (?, ?, 'PULSE', ?, ?)`,
+      [`tcref_${suffix()}`, card.id, `card:db-oversized|${suffix()}`, "x".repeat(EXTERNAL_REFERENCE_NOTE_MAX_LENGTH + 1)]
+    )).rejects.toThrow(/note_length|check constraint/i)
+  })
 })
 
 describe("audited lifecycle", () => {
-  it("audits condition, finish, treatment, lock, and unlock changes", async () => {
+  it("audits complete persisted lock state and treats repeated lock operations as idempotent", async () => {
     const { variant } = await createVariant()
     const context = { id: variant.id, actor: "test-admin", source: "MANUAL", reason: "test" }
     await service.updateVariantCondition({ ...context, condition: "LIGHTLY_PLAYED", conditionSource: "EXPLICIT" })
     await service.updateVariantFinish({ ...context, finish: "REVERSE_HOLO", confirmed: true })
     await service.updateVariantSpecialTreatment({ ...context, specialTreatment: "POKE_BALL_REVERSE", confirmed: true })
-    await service.lockVariantPrice(context)
+    const locked = await service.lockVariantPrice(context)
     await expect(service.assertPriceNotLocked(variant.id)).rejects.toThrow("price is locked")
+    await service.lockVariantPrice(context)
+    const unlocked = await service.unlockVariantPrice(context)
     await service.unlockVariantPrice(context)
     await expect(service.assertPriceNotLocked(variant.id)).resolves.toBeUndefined()
+    expect(unlocked).toMatchObject({
+      price_locked: false, price_locked_at: null, price_locked_actor: null, price_lock_reason: null,
+    })
     const audits = await service.listCardAuditEntries({ entity_id: variant.id })
     expect(audits.map((entry: any) => entry.action)).toEqual(expect.arrayContaining([
       "CONDITION_CHANGED", "FINISH_CHANGED", "SPECIAL_TREATMENT_CHANGED", "PRICE_LOCKED", "PRICE_UNLOCKED",
     ]))
+    const lockAudit = audits.find((entry: any) => entry.action === "PRICE_LOCKED")
+    const unlockAudit = audits.find((entry: any) => entry.action === "PRICE_UNLOCKED")
+    expect(lockAudit).toMatchObject({ actor: "test-admin", source: "MANUAL", reason: "test" })
+    expect(lockAudit.old_value).toEqual({
+      price_locked: false, price_locked_at: null, price_locked_by: null, price_lock_reason: null,
+    })
+    expect(lockAudit.new_value).toEqual({
+      price_locked: true, price_locked_at: locked.price_locked_at.toISOString(),
+      price_locked_by: "test-admin", price_lock_reason: "test",
+    })
+    expect(unlockAudit).toMatchObject({ actor: "test-admin", source: "MANUAL", reason: "test" })
+    expect(unlockAudit.old_value).toEqual(lockAudit.new_value)
+    expect(unlockAudit.new_value).toEqual({
+      price_locked: false, price_locked_at: null, price_locked_by: null, price_lock_reason: null,
+    })
+    expect(audits.filter((entry: any) => entry.action === "PRICE_LOCKED")).toHaveLength(1)
+    expect(audits.filter((entry: any) => entry.action === "PRICE_UNLOCKED")).toHaveLength(1)
+  })
+
+  it("rolls back a price-lock mutation when audit creation fails", async () => {
+    const { variant } = await createVariant()
+    await expect(service.lockVariantPrice({
+      id: variant.id, actor: "rollback-test", source: "INVALID", reason: "must rollback",
+    })).rejects.toThrow()
+    const after = await service.retrieveTradingCardVariant(variant.id)
+    expect(after).toMatchObject({
+      price_locked: false, price_locked_at: null, price_locked_actor: null, price_lock_reason: null,
+    })
+    expect(await service.listCardAuditEntries({ entity_id: variant.id })).toHaveLength(0)
   })
 
   it("rolls back the mutation and audit if a database constraint fails", async () => {
@@ -191,7 +345,10 @@ describe("audited lifecycle", () => {
     const base = { tradingCardId: card.id, provider: "PULSE", providerIdentifier,
       actor: "test-admin", source: "MANUAL" }
     const ref = await service.upsertExternalReference(base)
-    await service.upsertExternalReference({ ...base, tradingCardVariantId: variant.id, region: "UK" })
+    await service.upsertExternalReference({
+      ...base, referenceId: ref.id, expectedVersion: ref.version,
+      tradingCardVariantId: variant.id, region: "UK",
+    })
     await service.removeExternalReference({ id: ref.id, actor: "test-admin", source: "MANUAL" })
     const audits = await service.listCardAuditEntries({ entity_id: ref.id })
     expect(audits.map((entry: any) => entry.action)).toEqual([
@@ -201,6 +358,18 @@ describe("audited lifecycle", () => {
 })
 
 describe("grouped identity and link guarantees", () => {
+  it("rejects a mismatched product hierarchy at the shared service boundary", async () => {
+    await expect(service.assertVariantProductHierarchy({
+      productVariantProductId: "prod_b", tradingCardProductId: "prod_a",
+    })).rejects.toThrow("must belong to the same Medusa product")
+    await expect(service.assertVariantProductHierarchy({
+      productVariantProductId: "prod_a", tradingCardProductId: null,
+    })).rejects.toThrow("not linked to a Medusa product")
+    await expect(service.assertVariantProductHierarchy({
+      productVariantProductId: "prod_a", tradingCardProductId: "prod_a",
+    })).resolves.toBeUndefined()
+  })
+
   it("converges duplicate Pulse rows without representing quantity", () => {
     const keys = VERIFIED_DUPLICATE_EEVEE_ROWS.map((row) => ({
       card: canonicalIdentityKey("tcset_cbb2_scn_zh", row.cardNumber),

@@ -21,5 +21,9 @@ const ExternalCardReference = model
     on: ["provider", "provider_identifier"],
     unique: true,
   }])
+  .checks([{
+    name: "CK_trading_card_external_reference_note_length",
+    expression: (columns) => `length(${columns.raw_payload_note}) <= 500`,
+  }])
 
 export default ExternalCardReference
