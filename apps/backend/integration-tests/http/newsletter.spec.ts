@@ -1,5 +1,11 @@
+import { generateJwtToken, Modules } from "@medusajs/framework/utils"
+import type { IProductModuleService } from "@medusajs/framework/types"
 import { NEWSLETTER_MODULE } from "../../src/modules/newsletter"
 import type NewsletterModuleService from "../../src/modules/newsletter/service"
+import { TRADING_CARDS_MODULE } from "../../src/modules/trading-cards"
+import type TradingCardsModuleService from "../../src/modules/trading-cards/service"
+import { createTradingCardForProductWorkflow } from "../../src/workflows/trading-cards/create-trading-card-for-product"
+import { createVariantForProductVariantWorkflow } from "../../src/workflows/trading-cards/create-variant-for-product-variant"
 import {
   bootstrapNewsletterHttpTestApp,
   nextTestClientAddress,
@@ -323,6 +329,82 @@ describe("POST /store/newsletter/subscribe", () => {
     expect(JSON.stringify(body)).not.toContain(submission.email)
     expect(JSON.stringify(body)).not.toContain(submission.firstName)
     expect(JSON.stringify(body)).not.toMatch(/nlsub|fake-provider-message-id/)
+  })
+})
+
+describe("GET /admin/trading-cards/by-product/:id", () => {
+  const adminToken = generateJwtToken({
+    actor_id: "user_trading_card_http_test",
+    actor_type: "user",
+    auth_identity_id: "auth_trading_card_http_test",
+  }, { secret: process.env.JWT_SECRET ?? "supersecret", expiresIn: 3600 })
+
+  const getTradingCard = (productId: string, authenticated = true) => fetch(
+    `${app.baseUrl}/admin/trading-cards/by-product/${encodeURIComponent(productId)}`,
+    { headers: authenticated ? { authorization: `Bearer ${adminToken}` } : {} }
+  )
+
+  it("uses normal Admin authentication", async () => {
+    expect((await getTradingCard("prod_missing", false)).status).toBe(401)
+  })
+
+  it("returns a stable null response for an unlinked product", async () => {
+    const response = await getTradingCard("prod_missing")
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ trading_card: null })
+  })
+
+  it("returns card and variant data created through the link workflows", async () => {
+    const products = app.container.resolve<IProductModuleService>(Modules.PRODUCT)
+    const cards = app.container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
+    const marker = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+    const product = await products.createProducts({
+      title: `Trading card HTTP test ${marker}`,
+      status: "draft",
+      variants: [{ title: "Near Mint Holo", manage_inventory: false }],
+    })
+    const set = await cards.createCardSets({
+      game: "POKEMON", language: "EN", display_name: "HTTP Test Set", provider_set_code: `http_${marker}`,
+    })
+    const { result: card } = await createTradingCardForProductWorkflow(app.container).run({ input: {
+      productId: product.id,
+      card: {
+        card_set_id: set.id, name: "Gengar", search_name: "gengar", card_number: "066/196",
+        origin: "MANUAL",
+      },
+    } })
+    const productVariant = product.variants?.[0]
+    expect(productVariant).toBeDefined()
+    const { result: variant } = await createVariantForProductVariantWorkflow(app.container).run({ input: {
+      productVariantId: productVariant!.id,
+      tradingCardId: card.id,
+      condition: "NEAR_MINT",
+      conditionSource: "EXPLICIT",
+      finish: "HOLO",
+      finishConfirmed: true,
+      specialTreatment: "NONE",
+      specialTreatmentConfirmed: true,
+      isHighValueTrackIndividually: true,
+    } })
+
+    const response = await getTradingCard(product.id)
+    expect(response.status).toBe(200)
+    expect((await response.json()).trading_card).toMatchObject({
+      id: card.id,
+      name: "Gengar",
+      card_number: "066/196",
+      medusa_product_id: product.id,
+      card_set: { display_name: "HTTP Test Set", language: "EN" },
+      variants: [{
+        id: variant.id,
+        medusa_product_variant_id: productVariant!.id,
+        condition: "NEAR_MINT",
+        finish: "HOLO",
+        price_locked: false,
+        is_high_value_track_individually: true,
+      }],
+    })
+
   })
 })
 
