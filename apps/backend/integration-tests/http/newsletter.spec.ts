@@ -462,6 +462,7 @@ describe("GET /admin/trading-cards/by-product/:id", () => {
       trading_card: { id: card.id },
       variants: [{ id: productA.variants![0].id, trading_card_variant: { id: linkedVariant.id } }],
     })
+    if (!unlinkedB) throw new Error("Expected the second product to be returned")
     expect(unlinkedB.trading_card).toBeUndefined()
     expect(unlinkedB.variants[0].trading_card_variant).toBeUndefined()
   })
