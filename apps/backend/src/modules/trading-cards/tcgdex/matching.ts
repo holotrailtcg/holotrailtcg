@@ -18,7 +18,7 @@ function clean(value: unknown): string | undefined {
 }
 
 function numberParts(value: string): NumberParts | undefined {
-  const match = /^(\d+)(?:\s*\/\s*(\d+))?$/.exec(value)
+  const match = /^(\d+)(?: *\/ *(\d+))?$/.exec(value)
   return match ? { numerator: match[1].replace(/^0+(?=\d)/, ""), ...(match[2] ? { denominator: match[2].replace(/^0+(?=\d)/, "") } : {}) } : undefined
 }
 
@@ -30,9 +30,10 @@ function validLocalCardNumber(value: unknown): value is string {
   if (typeof value !== "string") return false
   const cleaned = clean(value)
   if (!cleaned || hasControlCharacter(cleaned)) return false
-  if (!cleaned.includes("/")) return true
+  if (cleaned.includes("?") || cleaned.includes("#")) return false
+  if (!cleaned.includes("/")) return !/\s/u.test(cleaned)
   const parts = cleaned.split("/")
-  return parts.length === 2 && parts.every((part) => part.length > 0)
+  return parts.length === 2 && parts.every((part) => part.length > 0) && numberParts(cleaned) !== undefined
 }
 
 function validProviderIdentifier(value: unknown): value is string {

@@ -53,6 +53,26 @@ describe("TCGdex matching and normalization", () => {
     expect(client.getCardBySetAndLocalId).not.toHaveBeenCalled()
   })
 
+  it("rejects unsafe local card numbers before either lookup", async () => {
+    for (const cardNumber of ["066?x", "066#fragment", "066 value", "TG 01", "066\t196", "066\n196"]) {
+      const client = clientFor(card())
+      const result = await matchTcgdexCard({ language: "EN", setCode: "local", cardNumber, setIdentity: { tcgdexSetId: "sv06" } }, client)
+      expect(result).toMatchObject({ code: "INVALID_LOCAL_IDENTITY", field: "cardNumber" })
+      expect(client.getCardBySetAndLocalId).not.toHaveBeenCalled()
+      expect(client.getCardById).not.toHaveBeenCalled()
+    }
+  })
+
+  it.each([
+    ["EN", "066"], ["EN", "066/196"], ["EN", "066 / 196"],
+    ["JA", "TG01"], ["ZH", "SVP001"],
+  ] as const)("accepts supported %s local identifier %s", async (language, cardNumber) => {
+    const client = clientFor(card({ localId: cardNumber.includes("/") ? "066" : cardNumber }))
+    const result = await matchTcgdexCard({ language, setCode: "local", cardNumber, setIdentity: { tcgdexSetId: "sv06" } }, client)
+    expect(result).toMatchObject({ code: "MATCHED", source: "AUTOMATIC" })
+    expect(client.getCardBySetAndLocalId).toHaveBeenCalledTimes(1)
+  })
+
   it("isolates a returned set mismatch", async () => {
     const client = clientFor(card({ set: { id: "other", name: "Other" } }))
     const result = await matchTcgdexCard({ language: "EN", setCode: "local", cardNumber: "066", setIdentity: { tcgdexSetId: "sv06" } }, client)

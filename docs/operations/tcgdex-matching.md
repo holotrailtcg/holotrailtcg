@@ -19,10 +19,11 @@ When both sides contain denominators, both components must match. Non-numeric
 identifiers compare exactly; meaningful text is never stripped.
 
 Empty, whitespace-only, control-character, denominator-only, leading-slash,
-trailing-slash, repeated-slash, query, fragment, and internal-whitespace
-provider identifiers are rejected before a provider request. Outer whitespace
-is trimmed consistently. Valid prefixed, hyphenated, and alphanumeric IDs
-remain supported.
+trailing-slash, repeated-slash, query, fragment, and internal-whitespace local
+card numbers are rejected before a provider request. Outer whitespace is
+trimmed consistently. Ordinary spaces are supported only around the separator
+of a numeric denominator form. Valid prefixed, hyphenated, and alphanumeric
+IDs remain supported.
 
 Results use `MATCHED`, `NO_MATCH`, `UNRESOLVED_SET`, `IDENTITY_MISMATCH`,
 `INVALID_LOCAL_IDENTITY`, and `PROVIDER_ERROR`. Provider errors retain only a
