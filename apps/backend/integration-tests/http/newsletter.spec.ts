@@ -333,11 +333,12 @@ describe("POST /store/newsletter/subscribe", () => {
 })
 
 describe("GET /admin/trading-cards/by-product/:id", () => {
+  if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required for HTTP integration tests")
   const adminToken = generateJwtToken({
     actor_id: "user_trading_card_http_test",
     actor_type: "user",
     auth_identity_id: "auth_trading_card_http_test",
-  }, { secret: process.env.JWT_SECRET ?? "supersecret", expiresIn: 3600 })
+  }, { secret: process.env.JWT_SECRET, expiresIn: 3600 })
 
   const getTradingCard = (productId: string, authenticated = true) => fetch(
     `${app.baseUrl}/admin/trading-cards/by-product/${encodeURIComponent(productId)}`,

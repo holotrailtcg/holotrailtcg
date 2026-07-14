@@ -217,14 +217,19 @@ describe("grouped identity and link guarantees", () => {
     ["product_product_variant_tradingcards_trading_card_variant", "product_variant_id", "trading_card_variant_id"],
   ])("enforces one active link on each side of %s", async (table, left, right) => {
     const marker = suffix()
-    const firstId = `link_${marker}_1`
-    await pgConnection.raw(`insert into ${table} (${left}, ${right}, id) values (?, ?, ?)`, [`left_${marker}`, `right_${marker}`, firstId])
-    await expect(pgConnection.raw(`insert into ${table} (${left}, ${right}, id) values (?, ?, ?)`, [
-      `left_${marker}`, `right_other_${marker}`, `link_${marker}_2`,
-    ])).rejects.toThrow()
-    await expect(pgConnection.raw(`insert into ${table} (${left}, ${right}, id) values (?, ?, ?)`, [
-      `left_other_${marker}`, `right_${marker}`, `link_${marker}_3`,
-    ])).rejects.toThrow()
-    await pgConnection.raw(`delete from ${table} where id = ?`, [firstId])
+    const insert = (leftId: string, rightId: string, id: string) =>
+      pgConnection.raw(`insert into ${table} (${left}, ${right}, id) values (?, ?, ?)`, [leftId, rightId, id])
+    const leftRace = await Promise.allSettled([
+      insert(`left_${marker}`, `right_${marker}_1`, `link_${marker}_1`),
+      insert(`left_${marker}`, `right_${marker}_2`, `link_${marker}_2`),
+    ])
+    expect(leftRace.map(({ status }) => status).sort()).toEqual(["fulfilled", "rejected"])
+
+    const rightRace = await Promise.allSettled([
+      insert(`left_${marker}_3`, `right_${marker}_3`, `link_${marker}_3`),
+      insert(`left_${marker}_4`, `right_${marker}_3`, `link_${marker}_4`),
+    ])
+    expect(rightRace.map(({ status }) => status).sort()).toEqual(["fulfilled", "rejected"])
+    await pgConnection.raw(`delete from ${table} where id like ?`, [`link_${marker}_%`])
   })
 })
