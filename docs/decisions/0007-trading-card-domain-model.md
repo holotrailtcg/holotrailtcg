@@ -1,6 +1,6 @@
 # 0007 — Trading-card domain model
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-14
 - **Stage:** 3 (trading-card domain foundation)
 
