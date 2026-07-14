@@ -34,6 +34,15 @@ Unicode NFC plus outer-whitespace trimming and never parses a number.
 One canonical card links to one Medusa product. Card names and slugs are
 descriptive/search fields, not identity.
 
+The product hierarchy is an invariant of the only variant-link creation
+workflow: a Medusa product variant can link to a trading-card variant only
+when its owning product is the same product linked to the canonical card. The
+workflow resolves both products itself and calls the shared trading-card
+service guard before it creates either the domain variant or the remote link.
+Callers and Admin presentation are not trusted to enforce this rule. Raw
+variant creation alone cannot create a Medusa link and is not a second link
+path.
+
 ### Commercial variants
 
 `trading_card_variant` represents condition + finish + special treatment and
@@ -81,6 +90,25 @@ Structured references support TCGdex, Pulse, eBay, and Other. Active
 card and may identify a variant. Duplicate Pulse rows later affect inventory,
 not reference count.
 
+Reference upsert takes a transaction-scoped PostgreSQL advisory lock derived
+from provider and provider identifier. The lock works across backend processes,
+then the transaction reads the active row under `FOR UPDATE`. Equivalent
+creates return the same row without another audit. Non-equivalent create calls
+receive a domain conflict rather than a unique-index error. An intentional
+update must provide both the reference ID and the PostgreSQL `xmin` row version
+returned by the previous read; this makes racing non-equivalent updates
+optimistic conflicts instead of race-order overwrites. The database unique
+index remains the final invariant.
+
+`raw_payload_note` is a diagnostic breadcrumb capped at 500 characters. The
+service rejects oversized values without truncation, and
+`CK_trading_card_external_reference_note_length` enforces the same maximum in
+PostgreSQL. Notes must not contain full payloads or CSV rows, secrets, tokens,
+customer information, or other arbitrary content. External-reference audit
+snapshots exclude the note entirely and contain only provider, identifier,
+card/variant IDs, language, and region. Add/remove snapshots use that bounded
+structure; change snapshots include only structural fields that changed.
+
 Explicit service methods write append-only audit rows for identity, commercial
 attributes, price locks, and reference lifecycle changes in the same module
 transaction. Corrections are new entries. No ORM-wide subscriber records
@@ -89,6 +117,12 @@ incidental changes.
 Price locking records timestamp, actor, and optional reason. The domain guard
 rejects automatic/batch price mutation while leaving future market observation
 and suggestion work possible. Stage 3 implements no pricing workflow.
+Lock and unlock audits use the actual state returned by the persisted mutation
+and contain exactly `price_locked`, `price_locked_at`, `price_locked_by`, and
+`price_lock_reason`. The top-level audit actor, source, and reason remain the
+mutation context. Repeating an already-satisfied lock or unlock is an idempotent
+no-op and creates no duplicate audit. Mutation and audit share one transaction,
+so either both persist or both roll back.
 
 ### Medusa links and database enforcement
 
@@ -136,11 +170,23 @@ and high-value cases are explicitly structural. No CSV is imported.
   pairing.
 - `Migration20260714064500` is the narrowly scoped hand-written follow-up for
   link one-to-one indexes, justified by inspected Medusa 2.17.2 SQL.
+- `Migration20260714120000` is an additive migration for
+  `CK_trading_card_external_reference_note_length`; its down migration removes
+  only that check.
 
 Migrations are applied only to the guarded direct Neon endpoint whose database
 is exactly `holotrail_medusa_test`. Host/database are printed without
 credentials. Up/down/reapply and final catalog results are recorded in the
 Stage 3 implementation report.
+
+The review-fix verification applied `Migration20260714120000`, inspected the
+catalog definition as `CHECK ((length(raw_payload_note) <= 500))`, rolled back
+only that migration from module `tradingCards`, and reapplied it. All earlier
+Stage 3 migrations remained current. Focused tests cover matching and
+mismatched real product hierarchies, two-way and five-way reference creation,
+conflicting creates and optimistic updates, deterministic audit counts, note
+boundaries and exclusion markers, complete lock snapshots, idempotent
+lock/unlock, and transaction rollback when audit creation fails.
 
 ## Known limitations and exclusions
 
