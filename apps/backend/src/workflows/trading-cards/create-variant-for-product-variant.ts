@@ -1,6 +1,6 @@
 import { createRemoteLinkStep } from "@medusajs/medusa/core-flows"
 import { createStep, createWorkflow, StepResponse, transform, WorkflowResponse } from "@medusajs/framework/workflows-sdk"
-import { Modules } from "@medusajs/framework/utils"
+import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import type { IProductModuleService } from "@medusajs/framework/types"
 import { TRADING_CARDS_MODULE } from "../../modules/trading-cards"
 import type TradingCardsModuleService from "../../modules/trading-cards/service"
@@ -24,9 +24,19 @@ const createTradingCardVariantStep = createStep(
   "create-trading-card-variant",
   async (input: CreateVariantForProductVariantInput, { container }) => {
     const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
-    await products.retrieveProductVariant(input.productVariantId)
+    const productVariant = await products.retrieveProductVariant(input.productVariantId)
     const cards = container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
     const card = await cards.retrieveTradingCard(input.tradingCardId, { relations: ["card_set"] })
+    const query = container.resolve(ContainerRegistrationKeys.QUERY)
+    const { data: linkedCards } = await query.graph({
+      entity: "trading_card",
+      fields: ["id", "product.id"],
+      filters: { id: card.id },
+    })
+    await cards.assertVariantProductHierarchy({
+      productVariantProductId: productVariant.product_id,
+      tradingCardProductId: linkedCards[0]?.product?.id,
+    })
     const sku = generateSku({
       tradingCardId: card.id,
       game: card.card_set.game,

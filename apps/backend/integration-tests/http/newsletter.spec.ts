@@ -1,4 +1,4 @@
-import { generateJwtToken, Modules } from "@medusajs/framework/utils"
+import { ContainerRegistrationKeys, generateJwtToken, Modules } from "@medusajs/framework/utils"
 import type { IProductModuleService } from "@medusajs/framework/types"
 import { NEWSLETTER_MODULE } from "../../src/modules/newsletter"
 import type NewsletterModuleService from "../../src/modules/newsletter/service"
@@ -406,6 +406,64 @@ describe("GET /admin/trading-cards/by-product/:id", () => {
       }],
     })
 
+  })
+
+  it("rejects a product variant from a different product before creating domain or link state", async () => {
+    const products = app.container.resolve<IProductModuleService>(Modules.PRODUCT)
+    const cards = app.container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
+    const query = app.container.resolve(ContainerRegistrationKeys.QUERY)
+    const marker = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+    const [productA, productB] = await products.createProducts([
+      { title: `Hierarchy A ${marker}`, status: "draft", variants: [{ title: "A", manage_inventory: false }] },
+      { title: `Hierarchy B ${marker}`, status: "draft", variants: [{ title: "B", manage_inventory: false }] },
+    ])
+    const set = await cards.createCardSets({
+      game: "POKEMON", language: "EN", display_name: "Hierarchy Test Set", provider_set_code: `hier_${marker}`,
+    })
+    const { result: card } = await createTradingCardForProductWorkflow(app.container).run({ input: {
+      productId: productA.id,
+      card: { card_set_id: set.id, name: "Eevee", search_name: "eevee", card_number: "104/203", origin: "MANUAL" },
+    } })
+    const input = {
+      tradingCardId: card.id,
+      condition: "NEAR_MINT" as const,
+      conditionSource: "EXPLICIT" as const,
+      finish: "HOLO" as const,
+      finishConfirmed: true,
+      specialTreatment: "NONE" as const,
+      specialTreatmentConfirmed: true,
+    }
+    const { result: linkedVariant } = await createVariantForProductVariantWorkflow(app.container).run({ input: {
+      ...input, productVariantId: productA.variants![0].id,
+    } })
+    const variantsBefore = await cards.listTradingCardVariants({ trading_card_id: card.id })
+    const auditsBefore = await cards.listCardAuditEntries({})
+
+    let mismatchError: unknown
+    try {
+      await createVariantForProductVariantWorkflow(app.container).run({ input: {
+        ...input, productVariantId: productB.variants![0].id,
+      }, throwOnError: true })
+    } catch (error) {
+      mismatchError = error
+    }
+    expect((mismatchError as Error)?.message).toContain("must belong to the same Medusa product")
+
+    expect(await cards.listTradingCardVariants({ trading_card_id: card.id })).toHaveLength(variantsBefore.length)
+    expect(await cards.listCardAuditEntries({})).toHaveLength(auditsBefore.length)
+    const { data } = await query.graph({
+      entity: "product",
+      fields: ["id", "trading_card.id", "variants.id", "variants.trading_card_variant.id"],
+      filters: { id: [productA.id, productB.id] },
+    })
+    const linkedA = data.find((product: any) => product.id === productA.id)
+    const unlinkedB = data.find((product: any) => product.id === productB.id)
+    expect(linkedA).toMatchObject({
+      trading_card: { id: card.id },
+      variants: [{ id: productA.variants![0].id, trading_card_variant: { id: linkedVariant.id } }],
+    })
+    expect(unlinkedB.trading_card).toBeUndefined()
+    expect(unlinkedB.variants[0].trading_card_variant).toBeUndefined()
   })
 })
 
