@@ -1,11 +1,12 @@
 import { TCGDEX_ERROR_CODE, TcgDexError } from "./errors"
 import { TCGDEX_LANGUAGE, type TcgDexCard, type TcgDexLanguage } from "./types"
+import { tcgDexCardSchema } from "./schemas"
 import { normalizeTcgdexCard } from "./normalization"
 import { TCGDEX_MATCH_CODE, TCGDEX_MATCH_SOURCE, type TcgDexMatchInput, type TcgDexMatchResult } from "./matching-types"
 
-export type TcgDexLookupClient = {
-  getCardBySetAndLocalId(language: TcgDexLanguage, setId: string, localId: string): Promise<TcgDexCard>
-  getCardById(language: TcgDexLanguage, cardId: string): Promise<TcgDexCard>
+type TcgDexLookupDependency = {
+  getCardBySetAndLocalId(language: TcgDexLanguage, setId: string, localId: string): Promise<unknown>
+  getCardById(language: TcgDexLanguage, cardId: string): Promise<unknown>
 }
 
 type NumberParts = { numerator: string; denominator?: string }
@@ -36,7 +37,7 @@ function validLocalCardNumber(value: unknown): value is string {
 
 function validProviderIdentifier(value: unknown): value is string {
   const cleaned = clean(value)
-  return Boolean(cleaned && !hasControlCharacter(cleaned) && !cleaned.includes("/"))
+  return Boolean(cleaned && !hasControlCharacter(cleaned) && !/[\s\/?#]/u.test(cleaned))
 }
 
 export function matchesLocalIdentity(localCardNumber: string, providerLocalId: string): boolean {
@@ -87,7 +88,7 @@ function identityResult(input: TcgDexMatchInput, card: TcgDexCard, source: "AUTO
   return { code: TCGDEX_MATCH_CODE.MATCHED, source, enrichment: normalizeTcgdexCard(card) }
 }
 
-export async function matchTcgdexCard(input: TcgDexMatchInput, client: TcgDexLookupClient): Promise<TcgDexMatchResult> {
+export async function matchTcgdexCard(input: TcgDexMatchInput, client: TcgDexLookupDependency): Promise<TcgDexMatchResult> {
   const source = input.manualCardReference ? TCGDEX_MATCH_SOURCE.MANUAL : TCGDEX_MATCH_SOURCE.AUTOMATIC
   if (!validInput(input)) {
     const field = !Object.prototype.hasOwnProperty.call(TCGDEX_LANGUAGE, input.language) || !clean(input.language)
@@ -99,12 +100,17 @@ export async function matchTcgdexCard(input: TcgDexMatchInput, client: TcgDexLoo
   if (input.manualCardReference && (!manualId || !validProviderIdentifier(manualId) || input.manualCardReference.provider !== "TCGDEX")) return { code: TCGDEX_MATCH_CODE.INVALID_LOCAL_IDENTITY, source, field: "reference" }
   const setResolution = trustedSetId(input)
   if (setResolution.status === "INVALID") return { code: TCGDEX_MATCH_CODE.INVALID_LOCAL_IDENTITY, source, field: "reference" }
-  if (!manualId && setResolution.status === "MISSING") return { code: TCGDEX_MATCH_CODE.UNRESOLVED_SET, source: TCGDEX_MATCH_SOURCE.AUTOMATIC, setCode: input.setCode }
+  if (setResolution.status === "MISSING") return { code: TCGDEX_MATCH_CODE.UNRESOLVED_SET, source, setCode: input.setCode }
   const resolvedSetId = setResolution.status === "VALID" ? setResolution.id : undefined
 
   let card: TcgDexCard
   try {
-    card = manualId ? await client.getCardById(input.language as TcgDexLanguage, manualId) : await client.getCardBySetAndLocalId(input.language as TcgDexLanguage, resolvedSetId!, input.cardNumber.trim())
+    const response = manualId
+      ? await client.getCardById(input.language as TcgDexLanguage, manualId)
+      : await client.getCardBySetAndLocalId(input.language as TcgDexLanguage, resolvedSetId!, input.cardNumber.trim())
+    const parsed = tcgDexCardSchema.safeParse(response)
+    if (!parsed.success) return providerFailure(new TcgDexError({ code: TCGDEX_ERROR_CODE.INVALID_RESPONSE, operation: "matching-response", message: "TCGdex response failed validation" }), source)
+    card = parsed.data
   } catch (error) {
     if (!(error instanceof TcgDexError)) throw error
     if (error.code === TCGDEX_ERROR_CODE.NOT_FOUND) return { code: TCGDEX_MATCH_CODE.NO_MATCH, source, reason: "NOT_FOUND" }

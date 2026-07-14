@@ -57,7 +57,7 @@ export type CardEnrichmentData = {
 export type TcgDexMatchResult =
   | { code: "MATCHED"; source: TcgDexMatchSource; enrichment: CardEnrichmentData }
   | { code: "NO_MATCH"; source: TcgDexMatchSource; reason: "NOT_FOUND" }
-  | { code: "UNRESOLVED_SET"; source: "AUTOMATIC"; setCode: string }
+  | { code: "UNRESOLVED_SET"; source: TcgDexMatchSource; setCode: string }
   | { code: "IDENTITY_MISMATCH"; source: TcgDexMatchSource; expected: { setId?: string; localId: string }; actual: { setId: string; localId: string } }
   | { code: "INVALID_LOCAL_IDENTITY"; source: TcgDexMatchSource; field: "language" | "setCode" | "cardNumber" | "reference" }
   | { code: "PROVIDER_ERROR"; source: TcgDexMatchSource; providerCode: string; attemptCount: number }
