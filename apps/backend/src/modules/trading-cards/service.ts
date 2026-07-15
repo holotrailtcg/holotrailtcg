@@ -14,8 +14,12 @@ import {
   AUDIT_ACTION, AUDIT_ENTITY_TYPE, type CardCondition, type CardFinish,
   type CardLanguage, type ConditionSource, type ExternalProvider, type RecordOrigin, type SpecialTreatment,
   EXTERNAL_REFERENCE_PROVENANCE, type ExternalReferenceProvenance, IMAGE_STATUS,
+  MAX_CARD_IMAGE_BYTE_SIZE, CARD_IMAGE_UPLOAD_EXPIRY_MINUTES, SUPPORTED_IMAGE_MIME_TYPES,
 } from "./types"
-import { generateStagingObjectKey, sanitiseOriginalFilename, derivePublicImageUrl } from "./images/object-keys"
+import { generateStagingObjectKey, generateFinalObjectKey, sanitiseOriginalFilename, derivePublicImageUrl } from "./images/object-keys"
+import type { R2ImageStorageClient } from "./images/r2-client"
+import { expiresAtFromNow } from "./images/r2-client"
+import { processCardImageUpload } from "./images/image-processing"
 import type { TcgDexMatchInput, TcgDexMatchResult } from "./tcgdex/matching-types"
 import type { TcgDexLookupDependency } from "./tcgdex/matching"
 import { matchTcgdexCard } from "./tcgdex/matching"
@@ -81,7 +85,20 @@ export interface CreatePendingCardImageInput extends AuditContext {
   originalFilename: string
   declaredMimeType: string
   declaredByteSize: number
-  uploadExpiresAt?: Date | string | null
+}
+
+export interface BeginCardImageUploadInput extends AuditContext {
+  tradingCardVariantId: string
+  uploadedBy: string
+  originalFilename: string
+  declaredMimeType: string
+  declaredByteSize: number
+  r2Client: R2ImageStorageClient
+}
+
+export interface ConfirmPendingCardImageInput extends AuditContext {
+  id: string
+  r2Client: R2ImageStorageClient
 }
 
 export interface ReorderReadyCardImagesInput extends AuditContext {
@@ -690,6 +707,18 @@ class TradingCardsModuleService extends MedusaService({
     if (!Number.isInteger(input.declaredByteSize) || input.declaredByteSize <= 0) {
       throw new MedusaError(MedusaError.Types.INVALID_DATA, "declaredByteSize must be a positive integer")
     }
+    if (input.declaredByteSize > MAX_CARD_IMAGE_BYTE_SIZE) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        `declaredByteSize must not exceed ${MAX_CARD_IMAGE_BYTE_SIZE} bytes`
+      )
+    }
+    if (!(SUPPORTED_IMAGE_MIME_TYPES as readonly string[]).includes(input.declaredMimeType)) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        `declaredMimeType must be one of ${SUPPORTED_IMAGE_MIME_TYPES.join(", ")}`
+      )
+    }
     return this.manager_.transactional(async (manager) => {
       await this.lockCardImageVariant(manager, input.tradingCardVariantId)
       const [{ count }] = await manager.execute<{ count: string }>(
@@ -703,6 +732,10 @@ class TradingCardsModuleService extends MedusaService({
         variantId: input.tradingCardVariantId, imageId: id, mimeType: input.declaredMimeType,
       })
       const originalFilename = sanitiseOriginalFilename(input.originalFilename)
+      // Server-computed, never caller-supplied: an upload window the caller
+      // controlled would let a client keep its own PENDING row alive
+      // indefinitely.
+      const uploadExpiresAt = expiresAtFromNow(CARD_IMAGE_UPLOAD_EXPIRY_MINUTES)
       await manager.execute(
         `insert into trading_card_image
          (id, trading_card_variant_id, status, staging_object_key, original_filename,
@@ -710,7 +743,7 @@ class TradingCardsModuleService extends MedusaService({
          values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id, input.tradingCardVariantId, IMAGE_STATUS.PENDING, stagingObjectKey, originalFilename,
-          input.declaredMimeType, input.declaredByteSize, sortOrder, input.uploadedBy, input.uploadExpiresAt ?? null,
+          input.declaredMimeType, input.declaredByteSize, sortOrder, input.uploadedBy, uploadExpiresAt,
         ]
       )
       await this.writeAudit(manager, {
@@ -851,6 +884,256 @@ class TradingCardsModuleService extends MedusaService({
         action: AUDIT_ACTION.IMAGE_RESTORED,
         oldValue: { status: current.status },
         newValue: { status: IMAGE_STATUS.READY, sortOrder },
+      })
+      const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_image where id = ?`, [input.id])
+      return saved
+    })
+  }
+
+  /**
+   * Requests a new upload target for a variant: creates the PENDING row
+   * (via `createPendingCardImage`, unchanged) and then, outside any DB
+   * transaction, asks R2 for a presigned PUT URL for its staging key. If
+   * the presign call fails after the row is created, the row is simply
+   * left to expire via the normal EXPIRED path later — no compensating
+   * delete, consistent with this stage's "no synchronous cleanup"
+   * principle everywhere else.
+   */
+  async beginCardImageUpload(input: BeginCardImageUploadInput) {
+    if (!(SUPPORTED_IMAGE_MIME_TYPES as readonly string[]).includes(input.declaredMimeType)) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        `declaredMimeType must be one of ${SUPPORTED_IMAGE_MIME_TYPES.join(", ")}`
+      )
+    }
+    if (!Number.isInteger(input.declaredByteSize) || input.declaredByteSize <= 0 || input.declaredByteSize > MAX_CARD_IMAGE_BYTE_SIZE) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        `declaredByteSize must be a positive integer not exceeding ${MAX_CARD_IMAGE_BYTE_SIZE} bytes`
+      )
+    }
+    // Friendly pre-check for a fast, specific 404; createPendingCardImage's
+    // own row lock is the authoritative existence check.
+    await this.retrieveTradingCardVariant(input.tradingCardVariantId)
+
+    const image = await this.createPendingCardImage({
+      actor: input.actor, source: input.source, reason: input.reason,
+      tradingCardVariantId: input.tradingCardVariantId, uploadedBy: input.uploadedBy,
+      originalFilename: input.originalFilename, declaredMimeType: input.declaredMimeType,
+      declaredByteSize: input.declaredByteSize,
+    }) as Record<string, unknown>
+
+    const presigned = await input.r2Client.createPresignedPutUrl({
+      key: image.staging_object_key as string,
+      contentType: input.declaredMimeType,
+      expiresInSeconds: CARD_IMAGE_UPLOAD_EXPIRY_MINUTES * 60,
+    })
+
+    return { image, presigned }
+  }
+
+  private assertConfirmableStatus(status: string): void {
+    if (status === IMAGE_STATUS.PENDING) return
+    if (status === IMAGE_STATUS.DUPLICATE) {
+      throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This upload was already confirmed as a duplicate of an existing image")
+    }
+    if (status === IMAGE_STATUS.READY || status === IMAGE_STATUS.ARCHIVED) {
+      throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This upload has already been confirmed")
+    }
+    if (status === IMAGE_STATUS.REJECTED) {
+      throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This upload was already rejected")
+    }
+    if (status === IMAGE_STATUS.EXPIRED) {
+      throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This upload has expired")
+    }
+    throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This upload cannot be confirmed")
+  }
+
+  /**
+   * Clears every staging/final key and confirmed-metadata column and moves
+   * a `CardImage` row to one of the three terminal non-active statuses
+   * (`REJECTED`/`EXPIRED`/`DUPLICATE`), which the
+   * `CK_trading_card_image_lifecycle_keys` CHECK constraint treats
+   * identically. Caller must already hold the row's `for update` lock.
+   */
+  private async transitionPendingCardImage(manager: TxManager, input: AuditContext & {
+    id: string
+    currentStatus: string
+    target: "REJECTED" | "EXPIRED" | "DUPLICATE"
+    action: string
+    extraNewValue?: Record<string, unknown>
+  }) {
+    await manager.execute(
+      `update trading_card_image set status = ?, staging_object_key = null, final_object_key = null,
+       confirmed_mime_type = null, confirmed_byte_size = null, width = null, height = null, sha256_hash = null,
+       updated_at = now() where id = ?`,
+      [input.target, input.id]
+    )
+    await this.writeAudit(manager, {
+      actor: input.actor, source: input.source, reason: input.reason,
+      entityType: AUDIT_ENTITY_TYPE.CARD_IMAGE, entityId: input.id, action: input.action,
+      oldValue: { status: input.currentStatus },
+      newValue: { status: input.target, ...input.extraNewValue },
+    })
+    const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_image where id = ?`, [input.id])
+    return saved
+  }
+
+  /**
+   * Locks the variant + image row and transitions to a terminal status only
+   * if the row is still `PENDING` — a no-op if a concurrent call already
+   * moved it elsewhere, since `confirmPendingCardImage` throws its own
+   * specific error immediately after calling this regardless of outcome.
+   */
+  private async performTerminalTransition(input: AuditContext & {
+    id: string
+    variantId: string
+    target: "REJECTED" | "EXPIRED"
+    action: string
+    extraNewValue?: Record<string, unknown>
+  }): Promise<void> {
+    await this.manager_.transactional(async (manager) => {
+      await this.lockCardImageVariant(manager, input.variantId)
+      const [locked] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_image where id = ? and deleted_at is null for update`, [input.id]
+      )
+      if (!locked || locked.status !== IMAGE_STATUS.PENDING) return
+      await this.transitionPendingCardImage(manager, {
+        actor: input.actor, source: input.source, reason: input.reason,
+        id: input.id, currentStatus: locked.status as string, target: input.target, action: input.action,
+        extraNewValue: input.extraNewValue,
+      })
+    })
+  }
+
+  /**
+   * Confirms a PENDING upload: fetches the object from R2, validates it
+   * (magic bytes via sharp's own format-sniffing, size), strips metadata,
+   * auto-orients, re-encodes deterministically, hashes it, checks for a
+   * per-variant duplicate, and transitions to READY/DUPLICATE/REJECTED/
+   * EXPIRED accordingly. Every R2 call and the CPU-bound sharp pipeline run
+   * outside any DB transaction; only the final status write (plus its
+   * duplicate check, which must happen under the same variant lock) runs
+   * inside one short transaction, mirroring every other CardImage method in
+   * this class.
+   */
+  async confirmPendingCardImage(input: ConfirmPendingCardImageInput) {
+    const [current] = await this.manager_.execute<Record<string, unknown>>(
+      `select * from trading_card_image where id = ? and deleted_at is null`, [input.id]
+    )
+    if (!current) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Card image not found")
+    this.assertConfirmableStatus(current.status as string)
+
+    const variantId = current.trading_card_variant_id as string
+    const declaredByteSize = current.declared_byte_size as number
+    const currentExpiresAt = current.upload_expires_at ? new Date(current.upload_expires_at as string) : null
+    if (currentExpiresAt && currentExpiresAt.getTime() < Date.now()) {
+      await this.performTerminalTransition({
+        actor: input.actor, source: input.source, reason: input.reason,
+        id: input.id, variantId, target: "EXPIRED", action: AUDIT_ACTION.IMAGE_UPLOAD_EXPIRED,
+      })
+      throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This upload window has expired")
+    }
+
+    const fetched = await input.r2Client.getObject(current.staging_object_key as string)
+
+    if (fetched.byteSize === 0) {
+      await this.performTerminalTransition({
+        actor: input.actor, source: input.source, reason: input.reason,
+        id: input.id, variantId, target: "REJECTED", action: AUDIT_ACTION.IMAGE_UPLOAD_REJECTED,
+        extraNewValue: { reason: "zero-byte-upload", declaredByteSize, actualByteSize: fetched.byteSize },
+      })
+      throw new MedusaError(MedusaError.Types.INVALID_DATA, "The uploaded file was empty")
+    }
+    if (fetched.byteSize > MAX_CARD_IMAGE_BYTE_SIZE) {
+      await this.performTerminalTransition({
+        actor: input.actor, source: input.source, reason: input.reason,
+        id: input.id, variantId, target: "REJECTED", action: AUDIT_ACTION.IMAGE_UPLOAD_REJECTED,
+        extraNewValue: { reason: "oversized-upload", declaredByteSize, actualByteSize: fetched.byteSize },
+      })
+      throw new MedusaError(MedusaError.Types.INVALID_DATA, `The uploaded file exceeds the ${MAX_CARD_IMAGE_BYTE_SIZE} byte limit`)
+    }
+
+    const processed = await processCardImageUpload(fetched.bytes)
+    if (!processed.ok) {
+      await this.performTerminalTransition({
+        actor: input.actor, source: input.source, reason: input.reason,
+        id: input.id, variantId, target: "REJECTED", action: AUDIT_ACTION.IMAGE_UPLOAD_REJECTED,
+        extraNewValue: { reason: processed.reason, declaredByteSize, actualByteSize: fetched.byteSize },
+      })
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        processed.reason.startsWith("unsupported-format")
+          ? "The uploaded file is not a supported image format"
+          : "The uploaded file is corrupted or not a readable image"
+      )
+    }
+
+    const { result } = processed
+    // Diagnostic-only: the server never trusts declared_byte_size for
+    // anything security-relevant — only the fetched bytes matter — but a
+    // large mismatch is recorded on the confirmation audit entry so it is
+    // visible after the fact for troubleshooting.
+    const sizeMismatch = { declaredByteSize, actualByteSize: fetched.byteSize }
+
+    const finalObjectKey = generateFinalObjectKey({ variantId, imageId: input.id, mimeType: result.mimeType })
+    await input.r2Client.putObject({
+      key: finalObjectKey, body: result.buffer, contentType: result.mimeType, contentLength: result.byteSize,
+    })
+
+    return this.manager_.transactional(async (manager) => {
+      await this.lockCardImageVariant(manager, variantId)
+      const [locked] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_image where id = ? and deleted_at is null for update`, [input.id]
+      )
+      if (!locked) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Card image not found")
+      this.assertConfirmableStatus(locked.status as string)
+      const lockedExpiresAt = locked.upload_expires_at ? new Date(locked.upload_expires_at as string) : null
+      if (lockedExpiresAt && lockedExpiresAt.getTime() < Date.now()) {
+        await this.transitionPendingCardImage(manager, {
+          actor: input.actor, source: input.source, reason: input.reason,
+          id: input.id, currentStatus: locked.status as string, target: "EXPIRED", action: AUDIT_ACTION.IMAGE_UPLOAD_EXPIRED,
+        })
+        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This upload window has expired")
+      }
+
+      const [duplicate] = await manager.execute<Record<string, unknown>>(
+        `select id from trading_card_image
+         where trading_card_variant_id = ? and status = ? and sha256_hash = ? and deleted_at is null
+         for update`,
+        [variantId, IMAGE_STATUS.READY, result.sha256]
+      )
+      if (duplicate) {
+        return this.transitionPendingCardImage(manager, {
+          actor: input.actor, source: input.source, reason: input.reason,
+          id: input.id, currentStatus: locked.status as string, target: "DUPLICATE", action: AUDIT_ACTION.IMAGE_DUPLICATE_DETECTED,
+          extraNewValue: { duplicateOfImageId: duplicate.id, ...sizeMismatch },
+        })
+      }
+
+      const [{ count }] = await manager.execute<{ count: string }>(
+        `select count(*)::int as count from trading_card_image
+         where trading_card_variant_id = ? and status = ? and deleted_at is null`,
+        [variantId, IMAGE_STATUS.READY]
+      )
+      const sortOrder = Number(count)
+      await manager.execute(
+        `update trading_card_image set status = ?, staging_object_key = null, final_object_key = ?,
+         confirmed_mime_type = ?, confirmed_byte_size = ?, width = ?, height = ?, sha256_hash = ?,
+         sort_order = ?, updated_at = now() where id = ?`,
+        [
+          IMAGE_STATUS.READY, finalObjectKey, result.mimeType, result.byteSize, result.width, result.height,
+          result.sha256, sortOrder, input.id,
+        ]
+      )
+      await this.writeAudit(manager, {
+        actor: input.actor, source: input.source, reason: input.reason,
+        entityType: AUDIT_ENTITY_TYPE.CARD_IMAGE, entityId: input.id, action: AUDIT_ACTION.IMAGE_UPLOAD_CONFIRMED,
+        oldValue: { status: locked.status },
+        newValue: {
+          status: IMAGE_STATUS.READY, finalObjectKey, confirmedMimeType: result.mimeType,
+          confirmedByteSize: result.byteSize, width: result.width, height: result.height, sortOrder, ...sizeMismatch,
+        },
       })
       const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_image where id = ?`, [input.id])
       return saved
