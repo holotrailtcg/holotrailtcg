@@ -1,5 +1,6 @@
 /**
- * Genuine static/framework paths that must bypass all middleware policy
+ * Genuine static/framework and site-metadata paths that must bypass all
+ * middleware policy
  * (coming-soon gating, country routing, newsletter token handling) —
  * matched narrowly by real file/directory name, never by extension alone,
  * since an extension-based check can also match application routes (e.g.
@@ -10,6 +11,8 @@
  */
 const STATIC_ASSET_PATTERNS = [
   /^\/favicon\.ico$/,
+  /^\/robots\.txt$/,
+  /^\/sitemap\.xml$/,
   /^\/opengraph-image\.jpg$/,
   /^\/twitter-image\.jpg$/,
   /^\/(?:brand|energy-icons|favicon_io|images|rarity-icons|variant-icons)\/.+$/,

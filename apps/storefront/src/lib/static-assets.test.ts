@@ -5,6 +5,8 @@ import { isStaticAssetPath } from "./static-assets"
 describe("isStaticAssetPath", () => {
   it.each([
     "/favicon.ico",
+    "/robots.txt",
+    "/sitemap.xml",
     "/opengraph-image.jpg",
     "/twitter-image.jpg",
     "/brand/holotrailtcg-full-logo.png",
@@ -19,6 +21,8 @@ describe("isStaticAssetPath", () => {
 
   it.each([
     "/gb/images/x.png",
+    "/gb/robots.txt",
+    "/gb/sitemap.xml",
     "/products/card.v2",
     "/gb/products/card.v2",
     "/images",

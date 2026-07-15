@@ -14,25 +14,73 @@ export type ComingSoonBenefit = {
 }
 
 export const comingSoonContent = {
-  /** Small status label near the logo. */
-  status: "Coming soon",
+  /** Clear page headline describing the planned shop. */
+  heroHeadline: "A better way to buy Pokémon singles is on the way",
 
-  /** Placeholder hero headline (temporary). */
-  heroHeadline: "A specialist home for collectable trading cards",
-
-  /** Placeholder supporting copy (temporary). */
+  /** Supporting copy for collectors in the UK. */
   heroSupporting:
-    "We are building a calm, careful place to browse and buy single cards, with honest condition grading and secure UK dispatch. Join the list to be the first to know when the doors open.",
+    "We’re building a straightforward UK shop for collectors who care about card condition. Expect carefully checked singles, clear grading and secure UK delivery.",
 
   /** Short intro above the benefit list. */
-  benefitsIntro: "Subscribers will receive:",
+  benefitsIntro: "Join the list and we’ll send you:",
 
   /** What subscribers receive. Keep factual — no urgency or scarcity. */
   benefits: [
-    { key: "launch", text: "Launch notifications" },
-    { key: "stock", text: "Stock updates" },
-    { key: "discount", text: "10% off their first purchase" },
+    { key: "launch", text: "A note when the shop opens" },
+    { key: "stock", text: "Useful stock updates" },
+    { key: "discount", text: "10% off your first order" },
   ] as ComingSoonBenefit[],
+
+  building: {
+    heading: "What we’re building",
+    items: [
+      {
+        key: "checked-singles",
+        heading: "Carefully checked singles",
+        body: "Every card will be checked before it’s listed, with its condition explained clearly.",
+      },
+      {
+        key: "clear-condition",
+        heading: "Clear card condition",
+        body: "You’ll know what to expect before you buy, with honest grading and useful photos where they matter.",
+      },
+      {
+        key: "secure-delivery",
+        heading: "Secure UK delivery",
+        body: "Your cards will be packed with care and sent securely from the UK.",
+      },
+    ],
+  },
+
+  faq: {
+    heading: "A few things you might be wondering",
+    items: [
+      {
+        key: "stock",
+        question: "What will Holo Trail sell?",
+        answer:
+          "We’ll focus on genuine Pokémon single cards for collectors in the UK. We’ll share more about sets and stock as we get closer to opening.",
+      },
+      {
+        key: "opening",
+        question: "When will the shop open?",
+        answer:
+          "We don’t have a date to share just yet. Join the list and we’ll let you know when everything’s ready.",
+      },
+      {
+        key: "delivery",
+        question: "Where will you deliver?",
+        answer:
+          "We’ll start with UK delivery. Full delivery options and prices will be available when the shop opens.",
+      },
+      {
+        key: "email",
+        question: "What will you email me about?",
+        answer:
+          "We’ll email you about the launch and useful stock updates. You can unsubscribe whenever you like.",
+      },
+    ],
+  },
 
   /** Form section heading and helper copy. */
   form: {
@@ -67,6 +115,9 @@ export const comingSoonContent = {
     lead: "We take your privacy seriously.",
     linkLabel: "Read our privacy notice",
   },
+
+  trademarkDisclaimer:
+    "Pokémon and Pokémon character names are trademarks of Nintendo. Holo Trail TCG is an independent retailer and is not affiliated with or endorsed by Nintendo, Creatures Inc., GAME FREAK inc. or The Pokémon Company.",
 } as const
 
 export type ComingSoonContent = typeof comingSoonContent

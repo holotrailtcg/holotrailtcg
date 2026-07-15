@@ -90,16 +90,16 @@ describe("country-code middleware routing", () => {
     async (action) => {
       const token = "opaque-test-token"
       const res = await middleware(
-        request(`/newsletter/${action}?token=${token}`),
+        request(`/newsletter/${action}?token=${token}`)
       )
       const location = res.headers.get("location") ?? ""
       expect(location).toContain(
         `/gb/newsletter/${action}?result=${
           action === "confirm" ? "confirmed" : "unsubscribed"
-        }`,
+        }`
       )
       expect(location).not.toContain(token)
-    },
+    }
   )
 
   it.each(["confirm", "unsubscribe"])(
@@ -107,30 +107,30 @@ describe("country-code middleware routing", () => {
     async (action) => {
       const token = "opaque-test-token"
       const res = await middleware(
-        request(`/gb/newsletter/${action}?token=${token}`),
+        request(`/gb/newsletter/${action}?token=${token}`)
       )
       expect(isRedirect(res)).toBe(true)
       const location = res.headers.get("location") ?? ""
       expect(location).toContain(
         `/gb/newsletter/${action}?result=${
           action === "confirm" ? "confirmed" : "unsubscribed"
-        }`,
+        }`
       )
       expect(location).not.toContain(token)
       expect(res.headers.get("cache-control")).toBe("no-store")
       expect(res.headers.get("referrer-policy")).toBe("no-referrer")
-    },
+    }
   )
 
   it.each(["confirm", "unsubscribe"])(
     "serves a clean /gb/newsletter/%s result without another redirect",
     async (action) => {
       const res = await middleware(
-        request(`/gb/newsletter/${action}?result=invalid`),
+        request(`/gb/newsletter/${action}?result=invalid`)
       )
       expect(isRedirect(res)).toBe(false)
       expect(isPassThrough(res)).toBe(true)
-    },
+    }
   )
 
   it("resolves coming-soon -> privacy navigation to a real country route", async () => {
@@ -236,7 +236,7 @@ describe("coming-soon route gating", () => {
       const res = await middleware(request(path))
       expect(isRedirect(res)).toBe(true)
       expect(res.headers.get("location")).toBe(`${ORIGIN}/gb/coming-soon`)
-    },
+    }
   )
 
   it.each([
@@ -253,7 +253,7 @@ describe("coming-soon route gating", () => {
       const res = await middleware(request(path))
       expect(isRedirect(res)).toBe(false)
       expect(isPassThrough(res)).toBe(true)
-    },
+    }
   )
 
   it.each([
@@ -274,6 +274,8 @@ describe("coming-soon route gating", () => {
 
   it.each([
     "/favicon.ico",
+    "/robots.txt",
+    "/sitemap.xml",
     "/opengraph-image.jpg",
     "/twitter-image.jpg",
     "/images/akin-cakiner-9cIkK-hLD9k-unsplash.jpg",
@@ -284,6 +286,16 @@ describe("coming-soon route gating", () => {
     expect(isRedirect(res)).toBe(false)
     expect(isPassThrough(res)).toBe(true)
   })
+
+  it.each(["/robots.txt", "/sitemap.xml"])(
+    "serves the site metadata path %s without country redirecting it",
+    async (path) => {
+      process.env.COMING_SOON_MODE = "true"
+      const res = await middleware(request(path))
+      expect(isRedirect(res)).toBe(false)
+      expect(isPassThrough(res)).toBe(true)
+    }
+  )
 
   it("gates /gb/images/x.png because it is not a real asset route (it's an application path under the country prefix; real assets are never country-prefixed)", async () => {
     process.env.COMING_SOON_MODE = "true"
@@ -316,7 +328,7 @@ describe("coming-soon route gating", () => {
   it("leaves a newsletter confirm result page with a trailing slash accessible when enabled", async () => {
     process.env.COMING_SOON_MODE = "true"
     const res = await middleware(
-      request("/gb/newsletter/confirm/?result=confirmed"),
+      request("/gb/newsletter/confirm/?result=confirmed")
     )
     expect(isRedirect(res)).toBe(false)
     expect(isPassThrough(res)).toBe(true)
@@ -338,7 +350,9 @@ describe("coming-soon route gating", () => {
 
   it("leaves a newsletter confirm result page accessible when enabled", async () => {
     process.env.COMING_SOON_MODE = "true"
-    const res = await middleware(request("/gb/newsletter/confirm?result=confirmed"))
+    const res = await middleware(
+      request("/gb/newsletter/confirm?result=confirmed")
+    )
     expect(isRedirect(res)).toBe(false)
     expect(isPassThrough(res)).toBe(true)
   })
@@ -346,7 +360,7 @@ describe("coming-soon route gating", () => {
   it("leaves a newsletter unsubscribe result page accessible when enabled", async () => {
     process.env.COMING_SOON_MODE = "true"
     const res = await middleware(
-      request("/gb/newsletter/unsubscribe?result=unsubscribed"),
+      request("/gb/newsletter/unsubscribe?result=unsubscribed")
     )
     expect(isRedirect(res)).toBe(false)
     expect(isPassThrough(res)).toBe(true)
@@ -355,7 +369,7 @@ describe("coming-soon route gating", () => {
   it("does not gate a Next.js internal asset path", async () => {
     process.env.COMING_SOON_MODE = "true"
     const res = await middleware(
-      request("/_next/image?url=%2Fgb%2Fimages%2Fx.png&w=640&q=75"),
+      request("/_next/image?url=%2Fgb%2Fimages%2Fx.png&w=640&q=75")
     )
     expect(isRedirect(res)).toBe(false)
     expect(isPassThrough(res)).toBe(true)
@@ -363,9 +377,7 @@ describe("coming-soon route gating", () => {
 
   it("does not gate a Next.js internal static chunk path", async () => {
     process.env.COMING_SOON_MODE = "true"
-    const res = await middleware(
-      request("/_next/static/chunks/main.js"),
-    )
+    const res = await middleware(request("/_next/static/chunks/main.js"))
     expect(isRedirect(res)).toBe(false)
     expect(isPassThrough(res)).toBe(true)
   })
@@ -385,7 +397,7 @@ describe("coming-soon route gating", () => {
       const res = await middleware(request("/gb/store"))
       expect(isRedirect(res)).toBe(true)
       expect(res.headers.get("location")).toBe(`${ORIGIN}/gb/coming-soon`)
-    },
+    }
   )
 
   it("gates the store when COMING_SOON_MODE is unset (fail closed)", async () => {

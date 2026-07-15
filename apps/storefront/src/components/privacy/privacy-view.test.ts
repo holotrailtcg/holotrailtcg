@@ -26,4 +26,36 @@ describe("PrivacyView locale-aware links", () => {
     expect(html).toContain('href="/dk/coming-soon"')
     expect(html).not.toContain('href="/gb/coming-soon"')
   })
+
+  it("renders the implemented mailing-list facts and no placeholder wording", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PrivacyView, { countryCode: "gb" })
+    )
+
+    expect(html).toContain("Privacy notice")
+    expect(html).toContain("Last updated: 15 July 2026")
+    expect(html).toContain("What we collect")
+    expect(html).toContain("Why we use it and our lawful bases")
+    expect(html).toContain("Marketing and withdrawing consent")
+    expect(html).toContain("Cookies and local storage")
+    expect(html).toContain("Transfers outside the UK")
+    expect(html).toContain("Google reCAPTCHA")
+    expect(html).toContain("Resend")
+    expect(html).toContain("Your data protection rights")
+    expect(html).toContain("Complain to the ICO")
+    expect(html).not.toMatch(/placeholder|being prepared/i)
+  })
+
+  it("provides direct privacy, provider and regulator contact routes", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PrivacyView, { countryCode: "gb" })
+    )
+
+    expect(html).toContain("https://www.facebook.com/holotrailtcg/about/")
+    expect(html).toContain("https://www.instagram.com/holotrailtcg/")
+    expect(html).not.toContain("mailto:")
+    expect(html).toContain("https://policies.google.com/privacy")
+    expect(html).toContain("https://resend.com/legal/privacy-policy")
+    expect(html).toContain("https://ico.org.uk/make-a-complaint/")
+  })
 })

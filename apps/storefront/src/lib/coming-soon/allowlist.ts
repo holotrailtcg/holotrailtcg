@@ -11,6 +11,7 @@
  */
 const ALLOWLIST = [
   /^\/coming-soon\/?$/,
+  /^\/coming-soon\/opengraph-image\/?$/,
   /^\/privacy\/?$/,
   /^\/newsletter\/confirm\/?$/,
   /^\/newsletter\/unsubscribe\/?$/,

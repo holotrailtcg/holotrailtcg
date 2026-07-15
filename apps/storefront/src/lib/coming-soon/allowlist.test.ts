@@ -3,16 +3,22 @@ import { describe, expect, it } from "vitest"
 import { isAllowlistedDuringComingSoon } from "./allowlist"
 
 describe("isAllowlistedDuringComingSoon", () => {
-  it.each(["/coming-soon", "/privacy", "/newsletter/confirm", "/newsletter/unsubscribe"])(
-    "allows %s",
-    (path) => {
-      expect(isAllowlistedDuringComingSoon(path)).toBe(true)
-    },
-  )
-
-  it.each(["/coming-soon/", "/privacy/"])("allows a trailing slash on %s", (path) => {
+  it.each([
+    "/coming-soon",
+    "/coming-soon/opengraph-image",
+    "/privacy",
+    "/newsletter/confirm",
+    "/newsletter/unsubscribe",
+  ])("allows %s", (path) => {
     expect(isAllowlistedDuringComingSoon(path)).toBe(true)
   })
+
+  it.each(["/coming-soon/", "/privacy/"])(
+    "allows a trailing slash on %s",
+    (path) => {
+      expect(isAllowlistedDuringComingSoon(path)).toBe(true)
+    }
+  )
 
   it.each([
     "/",
@@ -27,6 +33,7 @@ describe("isAllowlistedDuringComingSoon", () => {
     "/order/order_123/confirmed",
     "/verify-account",
     "/coming-soon-extra",
+    "/coming-soon/opengraph-image/extra",
     "/newsletter",
     "/newsletter/confirm/extra",
     "/does-not-exist",

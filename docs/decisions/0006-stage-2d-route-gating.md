@@ -93,11 +93,12 @@ any other route.
 - Medusa backend, Admin, and the Store API are not gated — only the
   storefront's page routes. Per the brief, backend/Admin gating is
   explicitly out of scope for Stage 2D.
-- `apps/storefront/next-sitemap.js` is orphaned (not an installed
-  dependency, not wired into any build script) and generates no
-  robots.txt/sitemap.xml today. It is left untouched — nothing is currently
-  exposed through it, so there is nothing for the gate to protect against
-  here. Newsletter confirm/unsubscribe pages already set
+- The orphaned `apps/storefront/next-sitemap.js` did not generate public
+  metadata and has since been replaced by native App Router `robots.ts` and
+  `sitemap.ts` routes. These exact machine-readable paths bypass the page gate
+  and country redirect, while their contents respect `COMING_SOON_MODE` and
+  expose only the public launch URL during the gated period. Newsletter
+  confirm/unsubscribe pages already set
   `robots: { index: false, follow: false }` in their page metadata; no
   change was needed there either.
 
@@ -111,9 +112,8 @@ any other route.
   normal 404. This is consistent with "the unfinished store must not be
   publicly accessible" and avoids the maintenance burden CLAUDE.md and the
   brief both flagged.
-- If a future stage adds a sitemap/robots implementation, it should be
-  reviewed against `COMING_SOON_MODE` at that time — flagged here, not
-  solved now, since no such implementation exists yet.
+- The native sitemap remains mode-aware: it advertises only the coming-soon
+  route while gated and switches to the storefront root after launch.
 
 ## Amendment (2026-07-13)
 

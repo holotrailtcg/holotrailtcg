@@ -47,6 +47,7 @@ read by `next build`; they are required on the future Medusa runtime instead.
 | `NEWSLETTER_TRUSTED_IP_HEADER` | Backend / config | Backend `.env`; backend template | Unset while proxy trust is off | Test-only header | No | Never | Required only when proxy trust is enabled |
 | `NEXT_PUBLIC_RECAPTCHA_SITE_KEY` | Storefront / public | Storefront `.env.local`; storefront template | Required to exercise submission; unrelated dev pages may render without it | Explicit fake/injected boundary | Yes | Required in both | Never |
 | `NEXT_PUBLIC_MEDUSA_BACKEND_URL` | Storefront / public | Storefront `.env.local`; storefront template | Required | Explicit test boundary | Yes | Required in both | Never |
+| `NEXT_PUBLIC_BASE_URL` | Storefront / public | Storefront `.env.local`; storefront template | Optional local HTTP origin; defaults to `http://localhost:8000` | Explicit test boundary | Yes | Required; real public HTTPS origin | Never |
 
 `NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY` is also required by both storefront
 development and production builds because all Medusa Store API requests use it.
@@ -74,6 +75,7 @@ It is public, but should still be scoped through Medusa sales-channel controls.
 | `NEWSLETTER_TRUSTED_IP_HEADER` | blank while disabled | Required when proxy trust is true; one named single-IP header only | Header name may be logged, never its value | Change only with hosting topology |
 | `NEXT_PUBLIC_RECAPTCHA_SITE_KEY` | blank placeholder | Missing in development leaves pages available but submission fails closed; missing in production stops the build | Public value may be visible; generated tokens must never be logged | Rotate as a pair with the backend secret/key registration |
 | `NEXT_PUBLIC_MEDUSA_BACKEND_URL` | `http://localhost:9000` | Required by the adapter/result API and production storefront configuration | Origin is public; token-bearing fetch URLs must not be logged | Change with backend public origin |
+| `NEXT_PUBLIC_BASE_URL` | `http://localhost:8000` | Bare HTTP(S) origin; trailing slash is normalised away; production rejects missing, malformed, HTTP, localhost and Vercel preview values | Public origin only | Change with the canonical public domain |
 
 All required backend newsletter readers are lazy: the Medusa process can boot
 without provider configuration, but `POST /store/newsletter/subscribe` cannot
@@ -142,7 +144,7 @@ reaches the browser bundle.
 
 | Value | Behaviour |
 | --- | --- |
-| Exact string `"true"` | Coming-soon mode is enabled: only `/coming-soon`, `/privacy`, `/newsletter/confirm` and `/newsletter/unsubscribe` (each country-prefixed) are reachable; every other storefront route redirects (307) to the country-aware coming-soon page. |
+| Exact string `"true"` | Coming-soon mode is enabled: only `/coming-soon`, `/privacy`, `/newsletter/confirm` and `/newsletter/unsubscribe` (each country-prefixed) are reachable; site metadata endpoints `/robots.txt` and `/sitemap.xml` bypass the gate; every other storefront route redirects (307) to the country-aware coming-soon page. |
 | Exact string `"false"` | Coming-soon mode is disabled: the full Medusa DTC storefront routes normally. |
 | Missing, empty, or any other value (e.g. `"TRUE"`, `"1"`) | Fails closed — treated the same as `"true"`. The unfinished store must never be exposed by an unset or mistyped variable. |
 

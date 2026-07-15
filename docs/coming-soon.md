@@ -96,11 +96,14 @@ The `CookieConsent` component:
 
 This cookie system has **not** been legally reviewed.
 
-## Privacy placeholder
+## Mailing-list privacy notice
 
-`/privacy` uses the design system, states clearly that the full privacy notice
-is being prepared, invents no legal terms and claims no compliance, and links
-back to the coming-soon page.
+`/privacy` now documents the newsletter data and lifecycle implemented by the
+backend, including consent, confirmation, unsubscribe, reCAPTCHA, rate limiting
+and Resend delivery. It remains `noindex` and is excluded from the launch
+sitemap until the controller's verified legal/postal identity and an approved
+subscriber-retention schedule are supplied. Those publication blockers are
+recorded in `src/content/privacy.ts` rather than being guessed.
 
 ## Custom 404
 
@@ -127,7 +130,9 @@ the storefront is reachable:
 - `apps/storefront/src/lib/coming-soon/allowlist.ts` —
   `isAllowlistedDuringComingSoon` lists the only routes that remain reachable
   while gated: `/coming-soon`, `/privacy`, `/newsletter/confirm`,
-  `/newsletter/unsubscribe`. This is an allowlist, not a blocklist of store
+  `/newsletter/unsubscribe`. Site metadata endpoints (`/robots.txt` and
+  `/sitemap.xml`) bypass country routing and gating through the narrowly scoped
+  static/public-path policy. This is an allowlist, not a blocklist of store
   routes, so new commerce routes added later are gated automatically.
 - `apps/storefront/src/middleware.ts` redirects any non-allowlisted path to
   `/{country}/coming-soon` (one hop, no query string carried over) before any

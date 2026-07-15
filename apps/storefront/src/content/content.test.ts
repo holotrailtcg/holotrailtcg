@@ -4,14 +4,17 @@ import { comingSoonContent } from "./coming-soon"
 import { socialLinks } from "./social"
 
 describe("comingSoonContent", () => {
-  it("uses a coming-soon status and no launch date", () => {
-    expect(comingSoonContent.status).toBe("Coming soon")
+  it("does not promise a launch date", () => {
+    expect(comingSoonContent.heroHeadline).toContain("on the way")
+    expect(JSON.stringify(comingSoonContent)).not.toMatch(
+      /\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}\b/i
+    )
   })
 
   it("lists the three subscriber benefits including the 10% offer", () => {
     const texts = comingSoonContent.benefits.map((b) => b.text.toLowerCase())
     expect(comingSoonContent.benefits).toHaveLength(3)
-    expect(texts.some((t) => t.includes("launch"))).toBe(true)
+    expect(texts.some((t) => t.includes("shop opens"))).toBe(true)
     expect(texts.some((t) => t.includes("stock"))).toBe(true)
     expect(texts.some((t) => t.includes("10%"))).toBe(true)
   })

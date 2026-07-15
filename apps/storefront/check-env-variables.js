@@ -1,4 +1,4 @@
-const c = require("ansi-colors");
+const c = require("ansi-colors")
 
 const requiredEnvs = [
   {
@@ -13,36 +13,42 @@ const requiredEnvs = [
       "Add the public reCAPTCHA v3 site key for the storefront hostname.",
     productionOnly: true,
   },
-];
+  {
+    key: "NEXT_PUBLIC_BASE_URL",
+    description:
+      "Set the real public HTTPS storefront origin used for canonical metadata.",
+    productionOnly: true,
+  },
+]
 
 function checkEnvVariables() {
   const missingEnvs = requiredEnvs.filter(function (env) {
     return (
       !process.env[env.key] &&
       (!env.productionOnly || process.env.NODE_ENV === "production")
-    );
-  });
+    )
+  })
 
   if (missingEnvs.length > 0) {
     console.error(
       c.red.bold("\n🚫 Error: Missing required environment variables\n")
-    );
+    )
 
     missingEnvs.forEach(function (env) {
-      console.error(c.yellow(`  ${c.bold(env.key)}`));
+      console.error(c.yellow(`  ${c.bold(env.key)}`))
       if (env.description) {
-        console.error(c.dim(`    ${env.description}\n`));
+        console.error(c.dim(`    ${env.description}\n`))
       }
-    });
+    })
 
     console.error(
       c.yellow(
         "\nPlease set these variables in your .env file or environment before starting the application.\n"
       )
-    );
+    )
 
-    process.exit(1);
+    process.exit(1)
   }
 }
 
-module.exports = checkEnvVariables;
+module.exports = checkEnvVariables

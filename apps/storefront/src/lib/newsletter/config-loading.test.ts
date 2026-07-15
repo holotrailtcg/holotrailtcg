@@ -13,12 +13,16 @@ function runConfigCheck({
     NODE_ENV: nodeEnv,
     NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY: "test-publishable-key",
     NEXT_PUBLIC_RECAPTCHA_SITE_KEY: siteKey ?? "",
+    NEXT_PUBLIC_BASE_URL:
+      nodeEnv === "production"
+        ? "https://www.holotrailtcg.example"
+        : "http://localhost:8000",
   }
 
   return spawnSync(
     process.execPath,
     ["-e", 'require("./check-env-variables")()'],
-    { cwd: process.cwd(), env, encoding: "utf8" },
+    { cwd: process.cwd(), env, encoding: "utf8" }
   )
 }
 
@@ -30,8 +34,7 @@ describe("storefront newsletter configuration loading", () => {
   it("requires the public reCAPTCHA site key for production builds", () => {
     expect(runConfigCheck({ nodeEnv: "production" }).status).toBe(1)
     expect(
-      runConfigCheck({ nodeEnv: "production", siteKey: "test-site-key" })
-        .status,
+      runConfigCheck({ nodeEnv: "production", siteKey: "test-site-key" }).status
     ).toBe(0)
   })
 
