@@ -44,10 +44,15 @@ archived `CardImage` row.
 One accepted trade-off follows from keeping every R2 network call outside
 the DB transaction: the final re-encoded bytes are written to R2 (via
 `putObject`) *before* the transaction that checks for a per-variant
-duplicate. On the rare occasion a true duplicate is found, the just-written
-final-key object is orphaned (the row transitions to `DUPLICATE`, which
-never references a `final_object_key`). This is harmless and consistent with
-the "no synchronous cleanup" principle above.
+duplicate and commits the `READY` transition. On the rare occasion a true
+duplicate is found, or the transaction fails for any other reason after
+`putObject` has already succeeded (see "Failure handling and retry
+semantics" below), the just-written final-key object is orphaned (the row
+never references it — a `DUPLICATE` row has no `final_object_key`, and a
+rolled-back attempt stays `PENDING`, also without one). This is harmless and
+consistent with the "no synchronous cleanup" principle above — orphaned
+staging *and* final objects are both left in place, and cleaning either up
+is deferred to the same future background job.
 
 ## Confirmation pipeline in detail
 
@@ -55,9 +60,10 @@ Implemented in `src/modules/trading-cards/images/image-processing.ts`
 (`processCardImageUpload`) and orchestrated by
 `TradingCardsModuleService.confirmPendingCardImage`:
 
-1. Fetch the object's bytes from R2 (`GetObject`). A missing object is not a
-   lifecycle transition — the browser may simply not have finished
-   uploading yet, and the Admin can retry the confirm call.
+1. Fetch the object's bytes from R2 (`GetObject`), bounded — see "Bounded
+   reads from R2" below. A missing object is not a lifecycle transition —
+   the browser may simply not have finished uploading yet, and the Admin
+   can retry the confirm call.
 2. Reject a zero-byte object, or one larger than the configured limit.
 3. **Magic-byte validation**: `sharp(bytes).metadata()` sniffs the format
    directly from the file's bytes via libvips — never from any
@@ -89,6 +95,85 @@ Implemented in `src/modules/trading-cards/images/image-processing.ts`
    ever trusts the fetched bytes — but both values are always recorded on
    the confirmation's audit entry (`declaredByteSize`/`actualByteSize`) for
    later troubleshooting.
+
+## Bounded reads from R2
+
+`R2ImageStorageClient.getObject` (`src/modules/trading-cards/images/r2-client.ts`)
+never buffers an unbounded amount of data before enforcing
+`MAX_CARD_IMAGE_BYTE_SIZE`:
+
+1. **`ContentLength` pre-check**: if R2 reports a `ContentLength` and it
+   already exceeds `MAX_CARD_IMAGE_BYTE_SIZE`, the request is rejected
+   immediately — the response stream is destroyed without reading a single
+   byte.
+2. **Bounded streaming read** (`readBoundedStream`): the response body is
+   read chunk by chunk, not via a single unbounded `transformToByteArray()`
+   call. The running total is checked after every chunk; the moment it
+   exceeds `MAX_CARD_IMAGE_BYTE_SIZE` (i.e. at `MAX_CARD_IMAGE_BYTE_SIZE + 1`
+   bytes), the stream is destroyed and reading stops — the object is never
+   fully buffered in memory. This is the path that actually protects
+   against a missing or understated `ContentLength`; the pre-check above is
+   only a cheap fast path.
+
+Both paths raise a stable, generic `MedusaError` ("The stored object exceeds
+the maximum allowed size") — never a raw AWS SDK error message, stack trace,
+or request ID. Any other stream or SDK failure (a dropped connection,
+malformed response, etc.) is likewise wrapped into a stable generic error
+("The stored object could not be read from storage" /
+"The confirmed image could not be stored" / "An upload URL could not be
+generated" for `getObject`/`putObject`/`createPresignedPutUrl`
+respectively). `confirmPendingCardImage` still separately checks
+`fetched.byteSize` against `MAX_CARD_IMAGE_BYTE_SIZE` as defence in depth —
+the client-level bound and the service-level check are independent layers,
+not a substitute for one another.
+
+## Failure handling and retry semantics
+
+Every R2 call in the upload/confirm flow runs **outside** any database
+transaction (see "Confirmation pipeline in detail" above), so a failure at
+any of these points has a specific, intentional effect:
+
+- **Presigning fails** (`beginCardImageUpload`, after the `PENDING` row is
+  already committed): the route returns a safe error; the row stays
+  `PENDING` with its staging key intact. This is the same "left to expire
+  normally" behaviour as any other abandoned upload — no compensating
+  delete, no automatic retry of the presign call. A caller may simply
+  retry `beginCardImageUpload` for a fresh attempt, or let the existing row
+  expire.
+- **`getObject` fails** (missing object, or a wrapped storage/stream
+  error): the row stays `PENDING`, untouched — no final metadata and no
+  confirmation audit are written. The confirm call is safe to retry once
+  the underlying condition clears (for example, once the browser's upload
+  actually finishes).
+- **`putObject` fails**: the row stays `PENDING`, untouched, for the same
+  reason — the re-encoded bytes were never durably stored, so nothing about
+  the row's confirmed state should change. The confirm call is safe to
+  retry; the original staging object was never modified by a failed
+  `putObject` call.
+- **The database fails after `putObject` has already succeeded, before the
+  `READY` transaction commits** (including the audit write inside that same
+  transaction failing): the entire transaction — including the `READY` row
+  update, if it had already executed before the failing statement — rolls
+  back atomically. The row stays `PENDING`; no `READY` metadata, no
+  confirmation audit, and no sort-order change for the row or its siblings
+  survive. **The final R2 object that `putObject` already wrote is left in
+  place — it is now orphaned**, exactly like an abandoned staging object;
+  cleaning it up is the same future, separately protected background job
+  referenced throughout this document, not something this stage performs
+  synchronously.
+- **Expiry is detected inside the final locked transaction** (the upload
+  window lapsed while the object was being fetched, processed, or written
+  to R2): the `EXPIRED` transition and its audit entry are **committed** in
+  that same transaction — the transaction returns a structured outcome
+  rather than throwing, so persisting `EXPIRED` is never rolled back by the
+  public error that follows. The error itself (`"This upload window has
+  expired"`) is only thrown after the transaction has committed. A repeated
+  confirm call on an already-`EXPIRED` row returns the same stable error
+  without writing a second transition or audit entry.
+
+None of the above ever leaves a row silently stuck in an inconsistent state
+between `PENDING` and `READY` — every path either fully commits a terminal
+transition or fully rolls back to the unmodified `PENDING` row.
 
 ## Renamed-file handling
 
@@ -164,5 +249,10 @@ placed in `apps/storefront/.env.local` or behind a `NEXT_PUBLIC_` prefix.
   `CardImage` row.
 - Resizing, cropping, and marketplace-specific image derivatives; thumbnails.
 - Admin image pages and storefront image display.
-- Background cleanup of abandoned or superseded staging objects.
-- A background expiry sweep — expiry is currently confirm-time-lazy only.
+- Background cleanup of abandoned or superseded staging objects, and of any
+  final object orphaned by a duplicate detection or a post-`putObject`
+  failure (see "Failure handling and retry semantics" above) — no
+  synchronous or background cleanup of either exists in this stage.
+- A background expiry sweep — expiry is currently confirm-time-lazy only
+  (though whenever it *is* detected, the `EXPIRED` transition itself always
+  commits durably; see "Failure handling and retry semantics").
