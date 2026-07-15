@@ -91,6 +91,39 @@ const CardImage = model
         `(${columns.status} = 'ARCHIVED' and ${columns.archived_at} is not null and ${columns.archived_by} is not null) or ` +
         `(${columns.status} <> 'ARCHIVED' and ${columns.archived_at} is null and ${columns.archived_by} is null)`,
     },
+    {
+      // Enforces which of staging_object_key/final_object_key/the confirmed
+      // metadata columns must be null vs non-null for each lifecycle status:
+      // - PENDING: only a staging key exists; no confirmed metadata yet.
+      // - READY/ARCHIVED: the confirmation step has completed, so only a
+      //   final key exists and every confirmed metadata field is present
+      //   (ARCHIVED rows keep their READY-time metadata; archived_at/
+      //   archived_by are covered separately by the archived-consistency
+      //   check above).
+      // - DUPLICATE/REJECTED/EXPIRED: terminal non-active outcomes of the
+      //   confirmation step that never reached READY, so neither key nor any
+      //   confirmed metadata field is retained.
+      name: "CK_trading_card_image_lifecycle_keys",
+      expression: (columns) =>
+        `case ${columns.status}
+           when 'PENDING' then
+             ${columns.staging_object_key} is not null and ${columns.final_object_key} is null and
+             ${columns.confirmed_mime_type} is null and ${columns.confirmed_byte_size} is null and
+             ${columns.width} is null and ${columns.height} is null and ${columns.sha256_hash} is null
+           when 'READY' then
+             ${columns.staging_object_key} is null and ${columns.final_object_key} is not null and
+             ${columns.confirmed_mime_type} is not null and ${columns.confirmed_byte_size} is not null and
+             ${columns.width} is not null and ${columns.height} is not null and ${columns.sha256_hash} is not null
+           when 'ARCHIVED' then
+             ${columns.staging_object_key} is null and ${columns.final_object_key} is not null and
+             ${columns.confirmed_mime_type} is not null and ${columns.confirmed_byte_size} is not null and
+             ${columns.width} is not null and ${columns.height} is not null and ${columns.sha256_hash} is not null
+           else
+             ${columns.staging_object_key} is null and ${columns.final_object_key} is null and
+             ${columns.confirmed_mime_type} is null and ${columns.confirmed_byte_size} is null and
+             ${columns.width} is null and ${columns.height} is null and ${columns.sha256_hash} is null
+         end`,
+    },
   ])
 
 export default CardImage

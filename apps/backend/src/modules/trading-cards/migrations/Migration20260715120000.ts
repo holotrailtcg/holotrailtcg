@@ -41,6 +41,26 @@ export class Migration20260715120000 extends Migration {
       constraint "CK_trading_card_image_archived_consistency" check (
         (status = 'ARCHIVED' and archived_at is not null and archived_by is not null) or
         (status <> 'ARCHIVED' and archived_at is null and archived_by is null)
+      ),
+      constraint "CK_trading_card_image_lifecycle_keys" check (
+        case status
+          when 'PENDING' then
+            staging_object_key is not null and final_object_key is null and
+            confirmed_mime_type is null and confirmed_byte_size is null and
+            width is null and height is null and sha256_hash is null
+          when 'READY' then
+            staging_object_key is null and final_object_key is not null and
+            confirmed_mime_type is not null and confirmed_byte_size is not null and
+            width is not null and height is not null and sha256_hash is not null
+          when 'ARCHIVED' then
+            staging_object_key is null and final_object_key is not null and
+            confirmed_mime_type is not null and confirmed_byte_size is not null and
+            width is not null and height is not null and sha256_hash is not null
+          else
+            staging_object_key is null and final_object_key is null and
+            confirmed_mime_type is null and confirmed_byte_size is null and
+            width is null and height is null and sha256_hash is null
+        end
       )
     );`)
 
