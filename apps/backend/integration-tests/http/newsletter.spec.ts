@@ -744,3 +744,253 @@ describe("newsletter subscribe response consistency", () => {
     expect(await genuineRes.json()).toEqual(await honeypotRes.json())
   })
 })
+
+describe("TCGdex Admin review API", () => {
+  if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required for HTTP integration tests")
+  const adminToken = generateJwtToken({
+    actor_id: "user_tcgdex_admin_http_test",
+    actor_type: "user",
+    auth_identity_id: "auth_tcgdex_admin_http_test",
+  }, { secret: process.env.JWT_SECRET, expiresIn: 3600 })
+
+  const uniqueMarker = (label: string) =>
+    `${label}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`
+
+  const getAdmin = (path: string, authenticated = true) => fetch(`${app.baseUrl}${path}`, {
+    headers: authenticated ? { authorization: `Bearer ${adminToken}` } : {},
+  })
+
+  async function createCardFixture(input: {
+    marker: string
+    cardName?: string
+    setName?: string
+    cardNumber?: string
+  }) {
+    const cards = app.container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
+    const set = await cards.createCardSets({
+      game: "POKEMON",
+      language: "EN",
+      display_name: input.setName ?? `Admin review set ${input.marker}`,
+      provider_set_code: `admin-${input.marker}`,
+    })
+    const cardNumber = input.cardNumber ?? "001/100"
+    const card = await cards.createTradingCards({
+      card_set_id: set.id,
+      name: input.cardName ?? `Admin review card ${input.marker}`,
+      search_name: (input.cardName ?? `Admin review card ${input.marker}`).toLowerCase(),
+      card_number: cardNumber,
+      card_number_normalised: cardNumber.toLowerCase(),
+      origin: "MANUAL",
+    })
+    return { cards, set, card }
+  }
+
+  async function createReview(input: {
+    marker: string
+    cardName?: string
+    setName?: string
+    cardNumber?: string
+    status?: "PENDING" | "APPROVED" | "REJECTED" | "APPLIED"
+  }) {
+    const fixture = await createCardFixture(input)
+    const providerMarker = input.marker.replace(/[^A-Za-z0-9_-]/gu, "-")
+    const proposal = await fixture.cards.recordTcgdexMatchResult({
+      actor: "tcgdex-admin-http-test",
+      source: "TCGDEX",
+      tradingCardId: fixture.card.id,
+      result: {
+        code: "MATCHED",
+        source: "AUTOMATIC",
+        enrichment: {
+          provider: "TCGDEX",
+          providerCardId: `provider-card-${providerMarker}`,
+          providerSetId: `provider-set-${providerMarker}`,
+          name: `Normalised ${input.cardName ?? input.marker}`,
+          localId: "001",
+          category: "Pokemon",
+          referenceArtworkUrl: "https://assets.tcgdex.net/example/card/high.webp",
+          illustrator: "Test Illustrator",
+          providerRarity: "Common",
+          rarityCandidate: { status: "MAPPED", providerValue: "Common", rarity: "COMMON", iconKey: "common" },
+          pokedexNumbers: [25],
+          types: ["Lightning"],
+          variants: { normal: true, reverse: true, holo: false, firstEdition: false },
+        },
+      },
+    })
+    if (typeof proposal.id !== "string") throw new Error("Expected a persisted proposal ID")
+    const context = { actor: "tcgdex-admin-http-test", source: "TCGDEX" as const, proposalId: proposal.id }
+    if (input.status === "APPROVED" || input.status === "APPLIED") {
+      await fixture.cards.approveEnrichmentProposal(context)
+    } else if (input.status === "REJECTED") {
+      await fixture.cards.rejectEnrichmentProposal(context)
+    }
+    if (input.status === "APPLIED") await fixture.cards.applyApprovedEnrichmentProposal(context)
+    return { ...fixture, proposal }
+  }
+
+  async function createAttempt(input: {
+    marker: string
+    outcome: "NO_MATCH" | "PROVIDER_ERROR" | "IDENTITY_MISMATCH"
+  }) {
+    const fixture = await createCardFixture({ marker: input.marker, cardName: `Attempt card ${input.marker}` })
+    const result = input.outcome === "NO_MATCH"
+      ? { code: "NO_MATCH", source: "AUTOMATIC", reason: "NOT_FOUND" } as const
+      : input.outcome === "PROVIDER_ERROR"
+        ? { code: "PROVIDER_ERROR", source: "AUTOMATIC", providerCode: "TIMEOUT", attemptCount: 1 } as const
+        : {
+            code: "IDENTITY_MISMATCH", source: "AUTOMATIC",
+            expected: { localId: "001" },
+            actual: { localId: "999", setId: `actual-${input.marker}` },
+          } as const
+    const attempt = await fixture.cards.recordTcgdexMatchResult({
+      actor: "tcgdex-admin-http-test",
+      source: "TCGDEX",
+      tradingCardId: fixture.card.id,
+      result,
+    })
+    return { ...fixture, attempt }
+  }
+
+  it("requires Admin authentication for every route", async () => {
+    const responses = await Promise.all([
+      getAdmin("/admin/tcgdex/reviews", false),
+      getAdmin("/admin/tcgdex/reviews/tcep_missing", false),
+      getAdmin("/admin/tcgdex/attempts", false),
+    ])
+    expect(responses.map((response) => response.status)).toEqual([401, 401, 401])
+  })
+
+  it("returns an empty review page with stable pagination fields", async () => {
+    const marker = uniqueMarker("empty")
+    const response = await getAdmin(`/admin/tcgdex/reviews?q=${encodeURIComponent(marker)}`)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ reviews: [], count: 0, limit: 20, offset: 0 })
+  })
+
+  it("paginates persisted review proposals", async () => {
+    const marker = uniqueMarker("page")
+    await Promise.all(["one", "two", "three"].map((suffix) => createReview({
+      marker: `${marker}-${suffix}`,
+      cardName: `${marker} card ${suffix}`,
+    })))
+    const response = await getAdmin(`/admin/tcgdex/reviews?q=${encodeURIComponent(marker)}&limit=1&offset=1`)
+    expect(response.status).toBe(200)
+    const body = await response.json()
+    expect(body).toMatchObject({ count: 3, limit: 1, offset: 1 })
+    expect(body.reviews).toHaveLength(1)
+  })
+
+  it("filters reviews by their current status", async () => {
+    const marker = uniqueMarker("status")
+    await createReview({ marker: `${marker}-pending`, cardName: `${marker} pending` })
+    const rejected = await createReview({ marker: `${marker}-rejected`, cardName: `${marker} rejected`, status: "REJECTED" })
+    const response = await getAdmin(`/admin/tcgdex/reviews?q=${encodeURIComponent(marker)}&status=REJECTED`)
+    expect(response.status).toBe(200)
+    const body = await response.json()
+    expect(body.count).toBe(1)
+    expect(body.reviews).toEqual([expect.objectContaining({ id: rejected.proposal.id, review_status: "REJECTED" })])
+  })
+
+  it("searches card, set, number, provider card ID, and provider set ID", async () => {
+    const marker = uniqueMarker("search")
+    const fixture = await createReview({
+      marker,
+      cardName: `Pikachu ${marker}`,
+      setName: `Search set ${marker}`,
+      cardNumber: `025/${marker.slice(-5)}`,
+    })
+    const terms = [
+      `Pikachu ${marker}`,
+      `Search set ${marker}`,
+      `025/${marker.slice(-5)}`,
+      `provider-card-${marker}`,
+      `provider-set-${marker}`,
+    ]
+    for (const term of terms) {
+      const response = await getAdmin(`/admin/tcgdex/reviews?q=${encodeURIComponent(term)}`)
+      expect(response.status).toBe(200)
+      expect((await response.json()).reviews).toEqual([
+        expect.objectContaining({ id: fixture.proposal.id }),
+      ])
+    }
+  })
+
+  it("returns a safe not-found response for a missing proposal", async () => {
+    const response = await getAdmin("/admin/tcgdex/reviews/tcep_missing")
+    expect(response.status).toBe(404)
+    const body = await response.json()
+    expect(JSON.stringify(body)).toContain("TCGdex review proposal not found.")
+  })
+
+  it("returns only safe, normalised single-review and audit fields", async () => {
+    const marker = uniqueMarker("single")
+    const fixture = await createReview({ marker, cardName: `Safe card ${marker}`, status: "APPROVED" })
+    const response = await getAdmin(`/admin/tcgdex/reviews/${fixture.proposal.id}`)
+    expect(response.status).toBe(200)
+    const body = await response.json()
+    expect(Object.keys(body)).toEqual(["review"])
+    expect(Object.keys(body.review).sort()).toEqual([
+      "audit_history", "card_set", "match_source", "proposal", "review_status",
+      "reviewer_id", "snapshot", "timestamps", "trading_card",
+    ])
+    expect(body.review).toMatchObject({
+      proposal: {
+        id: fixture.proposal.id,
+        provider: "TCGDEX",
+        provider_card_id: `provider-card-${marker}`,
+        provider_set_id: `provider-set-${marker}`,
+      },
+      trading_card: { id: fixture.card.id, name: `Safe card ${marker}`, card_number: "001/100" },
+      card_set: { id: fixture.set.id, display_name: `Admin review set ${marker}`, language: "EN" },
+      review_status: "APPROVED",
+      match_source: "AUTOMATIC",
+      snapshot: {
+        provider: "TCGDEX",
+        providerCardId: `provider-card-${marker}`,
+        providerSetId: `provider-set-${marker}`,
+        name: `Normalised Safe card ${marker}`,
+      },
+    })
+    expect(body.review.audit_history.length).toBeGreaterThanOrEqual(2)
+    expect(Object.keys(body.review.audit_history[0]).sort()).toEqual(["action", "actor", "created_at", "id", "source"])
+    const serialized = JSON.stringify(body)
+    expect(serialized).not.toMatch(/snapshot_fingerprint|diagnostic_fingerprint|old_value|new_value|deleted_at|raw_payload|rawPayload/)
+  })
+
+  it("filters safe non-match attempts and supports card search", async () => {
+    const marker = uniqueMarker("attempt")
+    await createAttempt({ marker: `${marker}-no-match`, outcome: "NO_MATCH" })
+    const providerError = await createAttempt({ marker: `${marker}-provider`, outcome: "PROVIDER_ERROR" })
+    const response = await getAdmin(
+      `/admin/tcgdex/attempts?q=${encodeURIComponent(marker)}&outcome=PROVIDER_ERROR`
+    )
+    expect(response.status).toBe(200)
+    const body = await response.json()
+    expect(body).toMatchObject({ count: 1, limit: 20, offset: 0 })
+    expect(body.attempts).toEqual([expect.objectContaining({
+      id: providerError.attempt.id,
+      outcome: "PROVIDER_ERROR",
+      safe_provider_error_code: "TIMEOUT",
+      trading_card: expect.objectContaining({
+        id: providerError.card.id,
+        name: `Attempt card ${marker}-provider`,
+      }),
+    })])
+    expect(JSON.stringify(body)).not.toMatch(/diagnostic_fingerprint|attemptCount|message|stack|raw/i)
+  })
+
+  it("returns simple safe text for invalid runtime input", async () => {
+    const response = await getAdmin("/admin/tcgdex/reviews?limit=not-a-number")
+    expect(response.status).toBe(400)
+    const serialized = JSON.stringify(await response.json())
+    expect(serialized).toContain("The request parameters are invalid.")
+    expect(serialized).not.toMatch(/Zod|invalid_type|NaN|stack|expected/i)
+  })
+
+  it("leaves the GB storefront newsletter route behaviour unchanged", async () => {
+    const response = await app.postSubscribe(validSubmission({ countryCode: "gb" }))
+    expect(response.status).toBe(202)
+    expect(await response.json()).toEqual(ACCEPTED_BODY)
+  })
+})

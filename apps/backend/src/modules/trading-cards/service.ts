@@ -16,6 +16,13 @@ import {
 } from "./types"
 import type { TcgDexMatchResult } from "./tcgdex/matching-types"
 import { auditContextSchema, canonicalSnapshot, diagnosticFingerprint, enrichmentSnapshotSchema, providerIdentifierSchema, snapshotFingerprint, tcgdexMatchResultSchema, tradingCardIdSchema } from "./tcgdex/persistence-validation"
+import {
+  listTcgdexAttempts,
+  listTcgdexReviews,
+  retrieveTcgdexReview,
+  type AttemptListQuery,
+  type ReviewListQuery,
+} from "./tcgdex/admin-review"
 
 interface TxManager {
   execute<T = Record<string, unknown>>(query: string, params?: unknown[]): Promise<T[]>
@@ -114,6 +121,18 @@ class TradingCardsModuleService extends MedusaService({
   deleteTcgDexEnrichmentAttempts = async (): Promise<never> => this.lifecycleMutationBlocked("Enrichment diagnostic deletion")
   softDeleteTcgDexEnrichmentAttempts = async (): Promise<never> => this.lifecycleMutationBlocked("Enrichment diagnostic deletion")
   restoreTcgDexEnrichmentAttempts = async (): Promise<never> => this.lifecycleMutationBlocked("Enrichment diagnostic restoration")
+
+  async listTcgdexAdminReviews(query: ReviewListQuery) {
+    return listTcgdexReviews(this.manager_, query)
+  }
+
+  async retrieveTcgdexAdminReview(proposalId: string) {
+    return retrieveTcgdexReview(this.manager_, proposalId)
+  }
+
+  async listTcgdexAdminAttempts(query: AttemptListQuery) {
+    return listTcgdexAttempts(this.manager_, query)
+  }
 
   updateCardAuditEntries = async (): Promise<never> => {
     throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Card audit entries are append-only")
