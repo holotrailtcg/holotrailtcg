@@ -14,8 +14,8 @@ import {
   type CardLanguage, type ConditionSource, type ExternalProvider, type RecordOrigin, type SpecialTreatment,
   EXTERNAL_REFERENCE_PROVENANCE, type ExternalReferenceProvenance,
 } from "./types"
-import { z } from "@medusajs/framework/zod"
-import type { CardEnrichmentData, TcgDexMatchResult } from "./tcgdex/matching-types"
+import type { TcgDexMatchResult } from "./tcgdex/matching-types"
+import { auditContextSchema, canonicalSnapshot, diagnosticFingerprint, enrichmentSnapshotSchema, providerIdentifierSchema, snapshotFingerprint, tcgdexMatchResultSchema, tradingCardIdSchema } from "./tcgdex/persistence-validation"
 
 interface TxManager {
   execute<T = Record<string, unknown>>(query: string, params?: unknown[]): Promise<T[]>
@@ -100,6 +100,21 @@ class TradingCardsModuleService extends MedusaService({
     this.manager_ = container.manager
   }
 
+  private lifecycleMutationBlocked = (name: string): never => {
+    throw new MedusaError(MedusaError.Types.NOT_ALLOWED, `${name} is owned by the TCGdex enrichment domain service`)
+  }
+
+  createTcgDexEnrichmentProposals = async (): Promise<never> => this.lifecycleMutationBlocked("Enrichment proposal creation")
+  updateTcgDexEnrichmentProposals = async (): Promise<never> => this.lifecycleMutationBlocked("Enrichment proposal updates")
+  deleteTcgDexEnrichmentProposals = async (): Promise<never> => this.lifecycleMutationBlocked("Enrichment proposal deletion")
+  softDeleteTcgDexEnrichmentProposals = async (): Promise<never> => this.lifecycleMutationBlocked("Enrichment proposal deletion")
+  restoreTcgDexEnrichmentProposals = async (): Promise<never> => this.lifecycleMutationBlocked("Enrichment proposal restoration")
+  createTcgDexEnrichmentAttempts = async (): Promise<never> => this.lifecycleMutationBlocked("Enrichment diagnostic creation")
+  updateTcgDexEnrichmentAttempts = async (): Promise<never> => this.lifecycleMutationBlocked("Enrichment diagnostic updates")
+  deleteTcgDexEnrichmentAttempts = async (): Promise<never> => this.lifecycleMutationBlocked("Enrichment diagnostic deletion")
+  softDeleteTcgDexEnrichmentAttempts = async (): Promise<never> => this.lifecycleMutationBlocked("Enrichment diagnostic deletion")
+  restoreTcgDexEnrichmentAttempts = async (): Promise<never> => this.lifecycleMutationBlocked("Enrichment diagnostic restoration")
+
   updateCardAuditEntries = async (): Promise<never> => {
     throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Card audit entries are append-only")
   }
@@ -165,49 +180,51 @@ class TradingCardsModuleService extends MedusaService({
   }
 
   async recordTrustedTcgdexCardReference(input: AuditContext & { tradingCardId: string; providerIdentifier: string; language?: CardLanguage | null }) {
-    const reference = await this.upsertExternalReference({ ...input, tradingCardId: input.tradingCardId, provider: "TCGDEX", providerIdentifier: input.providerIdentifier, provenance: EXTERNAL_REFERENCE_PROVENANCE.TRUSTED_MANUAL }) as Record<string, unknown>
-    await this.recordManualReferenceAudit(input, reference.id as string)
-    return reference
-  }
-
-  private async recordManualReferenceAudit(input: AuditContext, referenceId: string) {
-    await this.manager_.transactional(async (manager) => {
-      const [existing] = await manager.execute(`select id from trading_card_audit_entry where entity_id = ? and action = 'TCGDEX_MANUAL_REFERENCE_RECORDED' and deleted_at is null limit 1`, [referenceId])
-      if (!existing) await this.writeAudit(manager, { ...input, entityType: "EXTERNAL_CARD_REFERENCE", entityId: referenceId, action: "TCGDEX_MANUAL_REFERENCE_RECORDED", newValue: { referenceId, provider: "TCGDEX" } })
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason }); tradingCardIdSchema.parse(input.tradingCardId); providerIdentifierSchema.parse(input.providerIdentifier)
+    return this.manager_.transactional(async (manager) => {
+      const reference = await this.upsertExternalReferenceInTransaction(manager, { ...input, tradingCardId: input.tradingCardId, provider: "TCGDEX", providerIdentifier: input.providerIdentifier, provenance: EXTERNAL_REFERENCE_PROVENANCE.TRUSTED_MANUAL }) as Record<string, unknown>
+      await this.recordManualReferenceAudit(manager, input, reference.id as string)
+      return reference
     })
   }
 
-  async recordTrustedTcgdexSetReference(input: AuditContext & { cardSetId: string; providerIdentifier: string; language?: CardLanguage | null }) {
-    const reference = await this.upsertExternalReference({ ...input, tradingCardId: "", cardSetId: input.cardSetId, provider: "TCGDEX", providerIdentifier: `SET:${input.providerIdentifier}`, provenance: EXTERNAL_REFERENCE_PROVENANCE.TRUSTED_MANUAL }) as Record<string, unknown>
-    await this.recordManualReferenceAudit(input, reference.id as string)
-    return reference
+  private async recordManualReferenceAudit(manager: TxManager, input: AuditContext, referenceId: string) {
+    const [existing] = await manager.execute(`select id from trading_card_audit_entry where entity_id = ? and action = 'TCGDEX_MANUAL_REFERENCE_RECORDED' and deleted_at is null limit 1`, [referenceId])
+    if (!existing) await this.writeAudit(manager, { ...input, entityType: "EXTERNAL_CARD_REFERENCE", entityId: referenceId, action: "TCGDEX_MANUAL_REFERENCE_RECORDED", newValue: { referenceId, provider: "TCGDEX" } })
   }
 
-  private enrichmentSnapshotSchema = z.object({
-    provider: z.literal("TCGDEX"), providerCardId: z.string().min(1), providerSetId: z.string().min(1),
-    name: z.string().min(1), localId: z.string().min(1), category: z.string().min(1),
-    referenceArtworkUrl: z.string().url().optional(), illustrator: z.string().min(1).optional(), providerRarity: z.string().min(1).optional(),
-    rarityCandidate: z.union([z.object({ status: z.literal("MAPPED"), providerValue: z.string().min(1), rarity: z.string().min(1), iconKey: z.string().min(1) }), z.object({ status: z.literal("UNMAPPED"), providerValue: z.string().min(1) })]).optional(),
-    pokedexNumbers: z.array(z.number().int().positive()).optional(), types: z.array(z.string().min(1)).optional(),
-    variants: z.object({ normal: z.boolean(), reverse: z.boolean(), holo: z.boolean(), firstEdition: z.boolean() }),
-  })
-
-  private fingerprint(value: unknown): string { return JSON.stringify(value) }
+  async recordTrustedTcgdexSetReference(input: AuditContext & { cardSetId: string; providerIdentifier: string; language?: CardLanguage | null }) {
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason }); tradingCardIdSchema.parse(input.cardSetId); providerIdentifierSchema.parse(input.providerIdentifier)
+    return this.manager_.transactional(async (manager) => {
+      const reference = await this.upsertExternalReferenceInTransaction(manager, { ...input, tradingCardId: "", cardSetId: input.cardSetId, provider: "TCGDEX", providerIdentifier: `SET:${input.providerIdentifier}`, provenance: EXTERNAL_REFERENCE_PROVENANCE.TRUSTED_MANUAL }) as Record<string, unknown>
+      await this.recordManualReferenceAudit(manager, input, reference.id as string)
+      return reference
+    })
+  }
 
   async recordTcgdexMatchResult(input: AuditContext & { tradingCardId: string; result: TcgDexMatchResult }) {
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason }); tradingCardIdSchema.parse(input.tradingCardId)
     return this.manager_.transactional(async (manager) => {
-      const result = input.result
+      const result = tcgdexMatchResultSchema.parse(input.result) as TcgDexMatchResult
       if (result.code !== "MATCHED") {
         const diagnostic = result.code === "PROVIDER_ERROR" ? { code: result.code, providerCode: result.providerCode } : result
-        const fingerprint = this.fingerprint(diagnostic)
+        const fingerprint = diagnosticFingerprint(diagnostic)
         const [existing] = await manager.execute<Record<string, unknown>>(`select * from trading_card_tcgdex_enrichment_attempt where trading_card_id = ? and provider = ? and diagnostic_fingerprint = ? and deleted_at is null`, [input.tradingCardId, "TCGDEX", fingerprint])
         if (existing) return existing
         const id = generateEntityId(undefined, "tcea")
-        await manager.execute(`insert into trading_card_tcgdex_enrichment_attempt (id, trading_card_id, provider, match_source, match_outcome, provider_card_id, provider_set_id, safe_provider_error_code, diagnostic_fingerprint) values (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [id, input.tradingCardId, "TCGDEX", result.source, result.code, result.code === "IDENTITY_MISMATCH" ? result.actual.localId : null, result.code === "IDENTITY_MISMATCH" ? result.actual.setId : null, result.code === "PROVIDER_ERROR" ? result.providerCode : null, fingerprint])
+        try {
+          await manager.execute(`insert into trading_card_tcgdex_enrichment_attempt (id, trading_card_id, provider, match_source, match_outcome, provider_card_id, provider_set_id, safe_provider_error_code, diagnostic_fingerprint) values (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [id, input.tradingCardId, "TCGDEX", result.source, result.code, result.code === "IDENTITY_MISMATCH" ? result.actual.localId : null, result.code === "IDENTITY_MISMATCH" ? result.actual.setId : null, result.code === "PROVIDER_ERROR" ? result.providerCode : null, fingerprint])
+        } catch (error) {
+          const databaseError = error as { code?: string; constraint?: string }
+          if (databaseError.code !== "23505" || databaseError.constraint !== "IDX_tcgdex_attempt_diagnostic") throw error
+          const [concurrent] = await manager.execute<Record<string, unknown>>(`select * from trading_card_tcgdex_enrichment_attempt where trading_card_id = ? and provider = ? and diagnostic_fingerprint = ? and deleted_at is null`, [input.tradingCardId, "TCGDEX", fingerprint])
+          if (concurrent) return concurrent
+          throw error
+        }
         return (await manager.execute(`select * from trading_card_tcgdex_enrichment_attempt where id = ?`, [id]))[0]
       }
-      const snapshot = this.enrichmentSnapshotSchema.parse(result.enrichment)
-      const fingerprint = this.fingerprint(snapshot)
+      const snapshot = canonicalSnapshot(result.enrichment)
+      const fingerprint = snapshotFingerprint(snapshot)
       await manager.execute(`select id from trading_card where id = ? and deleted_at is null for update`, [input.tradingCardId])
       const [same] = await manager.execute<Record<string, unknown>>(`select * from trading_card_tcgdex_enrichment_proposal where trading_card_id = ? and provider = ? and snapshot_fingerprint = ? and deleted_at is null`, [input.tradingCardId, "TCGDEX", fingerprint])
       if (same) return same
@@ -225,6 +242,7 @@ class TradingCardsModuleService extends MedusaService({
   }
 
   private async transitionEnrichment(input: AuditContext & { proposalId: string; target: "APPROVED" | "REJECTED" }) {
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason }); tradingCardIdSchema.parse(input.proposalId)
     return this.manager_.transactional(async (manager) => {
       const [proposal] = await manager.execute<Record<string, unknown>>(`select * from trading_card_tcgdex_enrichment_proposal where id = ? and deleted_at is null for update`, [input.proposalId])
       if (!proposal) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Enrichment proposal not found")
@@ -240,12 +258,13 @@ class TradingCardsModuleService extends MedusaService({
   async rejectEnrichmentProposal(input: AuditContext & { proposalId: string }) { return this.transitionEnrichment({ ...input, target: "REJECTED" }) }
 
   async applyApprovedEnrichmentProposal(input: AuditContext & { proposalId: string }) {
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason }); tradingCardIdSchema.parse(input.proposalId)
     return this.manager_.transactional(async (manager) => {
       const [proposal] = await manager.execute<Record<string, unknown>>(`select * from trading_card_tcgdex_enrichment_proposal where id = ? and deleted_at is null for update`, [input.proposalId])
       if (!proposal) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Enrichment proposal not found")
       if (proposal.review_status === "APPLIED") return proposal
       if (proposal.review_status !== "APPROVED") throw new MedusaError(MedusaError.Types.INVALID_DATA, "Only approved enrichment proposals can be applied")
-      const snapshot = this.enrichmentSnapshotSchema.parse(proposal.snapshot)
+      const snapshot = enrichmentSnapshotSchema.parse(proposal.snapshot)
       const [card] = await manager.execute<Record<string, unknown>>(`select * from trading_card where id = ? and deleted_at is null for update`, [proposal.trading_card_id])
       if (!card) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Trading card not found")
       const changedFields: string[] = []
@@ -254,8 +273,8 @@ class TradingCardsModuleService extends MedusaService({
       if (card.name !== snapshot.name) { assignments.push("name = ?", "search_name = ?"); values.push(snapshot.name, snapshot.name.toLocaleLowerCase()); changedFields.push("name") }
       if (snapshot.rarityCandidate?.status === "MAPPED" && (card.rarity !== snapshot.rarityCandidate.rarity || card.rarity_icon_key !== snapshot.rarityCandidate.iconKey)) { assignments.push("rarity = ?", "rarity_icon_key = ?", "rarity_raw = ?", "rarity_comparison = ?"); values.push(snapshot.rarityCandidate.rarity, snapshot.rarityCandidate.iconKey, snapshot.rarityCandidate.providerValue, snapshot.rarityCandidate.providerValue.trim().toLowerCase()); changedFields.push("rarity") }
       if (assignments.length) await manager.execute(`update trading_card set ${assignments.join(", ")}, origin = 'TCGDEX', updated_at = now() where id = ?`, [...values, card.id])
-      await this.upsertExternalReference({ actor: input.actor, source: input.source, tradingCardId: card.id as string, provider: "TCGDEX", providerIdentifier: snapshot.providerCardId, provenance: EXTERNAL_REFERENCE_PROVENANCE.AUTOMATIC })
-      await this.upsertExternalReference({ actor: input.actor, source: input.source, tradingCardId: "", cardSetId: card.card_set_id as string, provider: "TCGDEX", providerIdentifier: `SET:${snapshot.providerSetId}`, provenance: EXTERNAL_REFERENCE_PROVENANCE.AUTOMATIC })
+      await this.upsertExternalReferenceInTransaction(manager, { actor: input.actor, source: input.source, tradingCardId: card.id as string, provider: "TCGDEX", providerIdentifier: snapshot.providerCardId, provenance: EXTERNAL_REFERENCE_PROVENANCE.AUTOMATIC })
+      await this.upsertExternalReferenceInTransaction(manager, { actor: input.actor, source: input.source, tradingCardId: "", cardSetId: card.card_set_id as string, provider: "TCGDEX", providerIdentifier: `SET:${snapshot.providerSetId}`, provenance: EXTERNAL_REFERENCE_PROVENANCE.AUTOMATIC })
       await manager.execute(`update trading_card_tcgdex_enrichment_proposal set review_status = 'APPLIED', applied_at = now(), updated_at = now() where id = ?`, [input.proposalId])
       await this.writeAudit(manager, { ...input, entityType: "ENRICHMENT_PROPOSAL", entityId: input.proposalId, action: "TCGDEX_ENRICHMENT_APPLIED", newValue: { proposalId: input.proposalId, reviewStatus: "APPLIED", changedFields } })
       return (await manager.execute(`select * from trading_card_tcgdex_enrichment_proposal where id = ?`, [input.proposalId]))[0]
@@ -388,6 +407,14 @@ class TradingCardsModuleService extends MedusaService({
   }
 
   async upsertExternalReference(input: UpsertExternalReferenceInput) {
+    return this.manager_.transactional((manager) => this.upsertExternalReferenceInTransaction(manager, input))
+  }
+
+  private async upsertExternalReferenceInTransaction(manager: TxManager, input: UpsertExternalReferenceInput) {
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason }); providerIdentifierSchema.parse(input.providerIdentifier)
+    if (input.tradingCardId) tradingCardIdSchema.parse(input.tradingCardId)
+    if (input.cardSetId) tradingCardIdSchema.parse(input.cardSetId)
+    if (input.tradingCardVariantId) tradingCardIdSchema.parse(input.tradingCardVariantId)
     if (input.rawPayloadNote !== undefined && input.rawPayloadNote !== null) {
       if (typeof input.rawPayloadNote !== "string") {
         throw new MedusaError(MedusaError.Types.INVALID_DATA, "External reference note must be a string")
@@ -399,7 +426,6 @@ class TradingCardsModuleService extends MedusaService({
         )
       }
     }
-    return this.manager_.transactional(async (manager) => {
       // A transaction-scoped PostgreSQL lock serialises this logical key across
       // backend processes without weakening the active-row unique index.
       await manager.execute(
@@ -427,6 +453,8 @@ class TradingCardsModuleService extends MedusaService({
       }
       if (current?.provenance === EXTERNAL_REFERENCE_PROVENANCE.TRUSTED_MANUAL && next.provenance !== EXTERNAL_REFERENCE_PROVENANCE.TRUSTED_MANUAL &&
         current.trading_card_id === next.trading_card_id && (current.card_set_id ?? null) === next.card_set_id) return current
+      if (current?.provenance === EXTERNAL_REFERENCE_PROVENANCE.TRUSTED_MANUAL && next.provenance === EXTERNAL_REFERENCE_PROVENANCE.TRUSTED_MANUAL &&
+        current.trading_card_id === next.trading_card_id && (current.card_set_id ?? null) === next.card_set_id) return current
       if (current?.provenance === EXTERNAL_REFERENCE_PROVENANCE.TRUSTED_MANUAL && next.provenance !== EXTERNAL_REFERENCE_PROVENANCE.TRUSTED_MANUAL) {
         throw new MedusaError(MedusaError.Types.INVALID_DATA, "Trusted manual external reference cannot be overwritten automatically")
       }
@@ -439,8 +467,9 @@ class TradingCardsModuleService extends MedusaService({
           provider: current.provider,
           provider_identifier: current.provider_identifier,
           language: current.language ?? null,
-          region: current.region ?? null, provenance: current.provenance ?? EXTERNAL_REFERENCE_PROVENANCE.AUTOMATIC,
+          region: current.region ?? null,
           raw_payload_note: current.raw_payload_note ?? null,
+          provenance: current.provenance ?? EXTERNAL_REFERENCE_PROVENANCE.AUTOMATIC,
         }
         if (JSON.stringify(currentComparable) === JSON.stringify(next)) return current
         if (!input.referenceId || input.referenceId !== current.id || !input.expectedVersion) {
@@ -482,7 +511,6 @@ class TradingCardsModuleService extends MedusaService({
         `select *, xmin::text as version from trading_card_external_reference where id = ? and deleted_at is null`, [id]
       )
       return saved
-    })
   }
 
   async removeExternalReference(input: AuditContext & { id: string }) {
