@@ -18,13 +18,15 @@ card/provider/snapshot fingerprint and deduplicated diagnostic fingerprint
 protects concurrent workers; expected diagnostic unique races return the
 existing row.
 
-Application reparses the stored snapshot and uses an explicit allowlist. In
-the current Stage 3 model that allowlist is card name/search name and mapped
-rarity. Illustrator, artwork, Pokémon metadata, variants, and unmapped rarity
-remain diagnostic snapshot data because no corresponding Stage 3 descriptive
-columns exist or the rarity is not mapped. Condition, language, finish,
-treatment, SKU, stock, costs, prices, price locks, photographs, publication
-state, and manual references are not touched.
+Application reparses the stored snapshot and uses an explicit allowlist of
+`name`, `search_name`, `rarity`, `rarity_icon_key`, `rarity_raw`, and
+`rarity_comparison`. TCGdex enrichment never changes the card's existing
+`origin`; provenance remains represented by the enrichment proposal, TCGdex
+external references, and audit events. Illustrator, artwork, Pokémon metadata,
+variants, and unmapped rarity remain diagnostic snapshot data because no
+corresponding Stage 3 descriptive columns exist or the rarity is not mapped.
+Condition, language, finish, treatment, SKU, stock, costs, prices, price
+locks, photographs, publication state, and manual references are not touched.
 
 Application, automatic references, proposal status and application audit are
 one transaction. Reference conflicts or audit failures roll back the complete
@@ -89,8 +91,16 @@ enrichment application (`applyApprovedEnrichmentProposal`) both call this same
 helper on the mapped rarity's raw provider value, so the same raw rarity text
 written through either path produces byte-identical `rarity_comparison`
 values. Neither path invents its own normalisation. `rarity_raw` itself is
-stored as the (schema-trimmed) provider value; only `rarity_comparison` is
-additionally NFC-normalised.
+stored as the validated provider value exactly as accepted, including case,
+outer whitespace, and decomposed Unicode. Validation does not trim or
+otherwise normalise it. Mapping may trim and compare case-insensitively
+internally, but the original provider value is retained. Only
+`rarity_comparison` is additionally NFC-normalised.
+
+The parity integration test executes the real Stage 3
+`createTradingCardForProductWorkflow`, passes the raw rarity through its normal
+input, does not seed `rarity_comparison`, and compares the stored Stage 3 and
+Stage 4A.3 comparison values.
 
 ## Migration rollback
 

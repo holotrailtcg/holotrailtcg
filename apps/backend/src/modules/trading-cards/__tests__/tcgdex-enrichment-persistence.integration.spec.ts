@@ -1,8 +1,13 @@
 import { MedusaApp } from "@medusajs/framework/modules-sdk"
-import { ContainerRegistrationKeys, createPgConnection } from "@medusajs/framework/utils"
+import { asValue } from "@medusajs/framework/awilix"
+import { ContainerRegistrationKeys, createPgConnection, Modules } from "@medusajs/framework/utils"
+import type { IProductModuleService } from "@medusajs/framework/types"
 import { TRADING_CARDS_MODULE } from "../index"
 import { Migration20260714150000 } from "../migrations/Migration20260714150000"
 import { rarityComparisonForm } from "../rarity/normalise-rarity"
+import { createTradingCardForProductWorkflow } from "../../../workflows/trading-cards/create-trading-card-for-product"
+import "../../../links/trading-card-product"
+import "../../../links/trading-card-variant-product-variant"
 
 let pgConnection: ReturnType<typeof createPgConnection>
 let medusaApp: Awaited<ReturnType<typeof MedusaApp>>
@@ -15,8 +20,13 @@ beforeAll(async () => {
   await migration.up()
   for (const query of migration.getQueries()) await pgConnection.raw(String(query))
   migration.reset()
-  medusaApp = await MedusaApp({ modulesConfig: { [TRADING_CARDS_MODULE]: { resolve: "./src/modules/trading-cards" } }, injectedDependencies: { [ContainerRegistrationKeys.PG_CONNECTION]: pgConnection }, cwd: process.cwd() })
+  medusaApp = await MedusaApp({ modulesConfig: {
+    [TRADING_CARDS_MODULE]: { resolve: "./src/modules/trading-cards", definition: { key: TRADING_CARDS_MODULE, isQueryable: true } },
+    [Modules.PRODUCT]: { resolve: "@medusajs/medusa/product" },
+  }, injectedDependencies: { [ContainerRegistrationKeys.PG_CONNECTION]: pgConnection }, cwd: process.cwd() })
   await medusaApp.onApplicationStart()
+  if (!medusaApp.sharedContainer || !medusaApp.link) throw new Error("Expected Medusa link container")
+  medusaApp.sharedContainer.register("link", asValue(medusaApp.link))
   service = medusaApp.modules[TRADING_CARDS_MODULE]
 }, 60000)
 
@@ -43,9 +53,18 @@ function matched(name: string, rarity: "MAPPED" | "UNMAPPED" = "MAPPED") {
 }
 
 function matchedWithRarity(name: string, providerValue: string, rarity: string, iconKey: string) {
+  const providerName = name.replace(/[^A-Za-z0-9_-]/g, "-")
   return { code: "MATCHED", source: "AUTOMATIC", enrichment: {
-    provider: "TCGDEX", providerCardId: `sv1-${name}`, providerSetId: `sv1-${name}`, name, localId: "001", category: "Pokemon",
+    provider: "TCGDEX", providerCardId: `sv1-${providerName}`, providerSetId: `sv1-${providerName}`, name, localId: "001", category: "Pokemon",
     providerRarity: providerValue, rarityCandidate: { status: "MAPPED", providerValue, rarity, iconKey },
+    variants: { normal: true, reverse: false, holo: false, firstEdition: false },
+  } } as const
+}
+
+function matchedNameOnly(name: string) {
+  const providerName = name.replace(/[^A-Za-z0-9_-]/g, "-")
+  return { code: "MATCHED", source: "AUTOMATIC", enrichment: {
+    provider: "TCGDEX", providerCardId: `sv1-${providerName}`, providerSetId: `sv1-${providerName}`, name, localId: "001", category: "Pokemon",
     variants: { normal: true, reverse: false, holo: false, firstEdition: false },
   } } as const
 }
@@ -94,24 +113,34 @@ describe("Stage 4A.3 TCGdex enrichment persistence", () => {
     expect(set.id).toBe(applied.card_set_id)
   })
 
-  it("normalises rarity_comparison with the shared Stage 3 rule, matching Stage 3 creation for the same raw value", async () => {
+  it("matches rarity comparison between the real Stage 3 workflow and Stage 4A.3", async () => {
     const token = suffix()
-    // Surrounding whitespace plus a decomposed-Unicode "e" + combining acute
-    // accent, exactly like the existing rarityComparisonForm unit coverage —
-    // proves trimming, Unicode NFC normalisation, and case preservation all
-    // survive the enrichment-application write path, not just the helper
-    // itself in isolation.
-    const rawRarityValue = "  Illustratión  "
+    const rawRarityValue = "  iLluStrat" + "i" + "\u0301" + "n  "
     const expectedComparison = rarityComparisonForm(rawRarityValue)
-    expect(expectedComparison).toBe("Illustratión")
+    expect(rawRarityValue).not.toBe(rawRarityValue.normalize("NFC"))
+    expect(expectedComparison).toBe("iLluStratín")
 
-    const stage3Set = await service.createCardSets({ game: "POKEMON", language: "EN", display_name: `Set ${token}`, provider_set_code: `set3-${token}` })
-    const stage3Card = await service.createTradingCards({
-      card_set_id: stage3Set.id, name: `Stage3 ${token}`, search_name: `stage3 ${token}`,
-      card_number: "001", card_number_normalised: "001", origin: "MANUAL",
-      rarity: "ILLUSTRATION_RARE", rarity_icon_key: "illustration-rare",
-      rarity_raw: rawRarityValue, rarity_comparison: rarityComparisonForm(rawRarityValue),
+    const container = medusaApp.sharedContainer
+    if (!container) throw new Error("Expected Medusa shared container")
+    const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+    const product = await products.createProducts({
+      title: `Stage 3 parity ${token}`,
+      status: "draft",
+      variants: [{ title: "Near Mint", manage_inventory: false }],
     })
+    expect(product.variants?.[0]).toBeDefined()
+    const stage3Set = await service.createCardSets({ game: "POKEMON", language: "EN", display_name: `Set ${token}`, provider_set_code: `set3-${token}` })
+    const { result: workflowCard } = await createTradingCardForProductWorkflow(container).run({ input: {
+      productId: product.id,
+      card: {
+        card_set_id: stage3Set.id, name: `Stage3 ${token}`, search_name: `stage3 ${token}`,
+        card_number: "001", origin: "MANUAL", rarity: "ILLUSTRATION_RARE",
+        rarity_icon_key: "illustration-rare", rarity_raw: rawRarityValue,
+      },
+    } })
+    expect(workflowCard).toBeTruthy()
+    const stage3Card = await service.retrieveTradingCard(workflowCard.id)
+    expect(stage3Card.rarity_raw).toBe(rawRarityValue)
     expect(stage3Card.rarity_comparison).toBe(expectedComparison)
 
     const { card: enrichedCard } = await cardFixture()
@@ -125,8 +154,62 @@ describe("Stage 4A.3 TCGdex enrichment persistence", () => {
 
     expect(applied.rarity).toBe("ILLUSTRATION_RARE")
     expect(applied.rarity_icon_key).toBe("illustration-rare")
+    expect(applied.rarity_raw).toBe(rawRarityValue)
     expect(applied.rarity_comparison).toBe(expectedComparison)
     expect(applied.rarity_comparison).toBe(stage3Card.rarity_comparison)
+    expect(stage3Card.rarity_comparison).not.toBe("")
+    expect(applied.rarity_comparison).not.toBe("")
+    expect(applied.rarity_comparison).toBe(applied.rarity_comparison.trim())
+    expect(applied.rarity_comparison).toBe(applied.rarity_comparison.normalize("NFC"))
+    expect(applied.rarity_comparison).toBe("iLluStratín")
+    expect(applied.rarity_raw).toContain("  ")
+    expect(applied.rarity_raw).toContain("i\u0301")
+  })
+
+  it("preserves origin for name-only, mapped-rarity-only, and combined enrichment", async () => {
+    const nameOnly = await cardFixture()
+    const nameProposal = await service.recordTcgdexMatchResult({ ...context, tradingCardId: nameOnly.card.id, result: matchedNameOnly(`${suffix()}-name`) })
+    await service.approveEnrichmentProposal({ ...context, proposalId: nameProposal.id })
+    await service.applyApprovedEnrichmentProposal({ ...context, proposalId: nameProposal.id })
+    expect((await service.retrieveTradingCard(nameOnly.card.id)).origin).toBe("MANUAL")
+
+    const rarityOnly = await cardFixture()
+    const rarityValue = " cOmMoN "
+    const rarityProposal = await service.recordTcgdexMatchResult({ ...context, tradingCardId: rarityOnly.card.id, result: matchedWithRarity(rarityOnly.card.name, rarityValue, "COMMON", "common") })
+    await service.approveEnrichmentProposal({ ...context, proposalId: rarityProposal.id })
+    await service.applyApprovedEnrichmentProposal({ ...context, proposalId: rarityProposal.id })
+    expect((await service.retrieveTradingCard(rarityOnly.card.id)).origin).toBe("MANUAL")
+
+    const combined = await cardFixture()
+    const combinedProposal = await service.recordTcgdexMatchResult({ ...context, tradingCardId: combined.card.id, result: matchedWithRarity(`${suffix()}-combined`, rarityValue, "COMMON", "common") })
+    await service.approveEnrichmentProposal({ ...context, proposalId: combinedProposal.id })
+    await service.applyApprovedEnrichmentProposal({ ...context, proposalId: combinedProposal.id })
+    expect((await service.retrieveTradingCard(combined.card.id)).origin).toBe("MANUAL")
+  })
+
+  it("records exact allowlisted audit changes and an empty list for a no-op", async () => {
+    const { card } = await cardFixture()
+    const providerValue = " cOmMoN "
+    const proposal = await service.recordTcgdexMatchResult({ ...context, tradingCardId: card.id, result: matchedWithRarity(card.name, providerValue, "COMMON", "common") })
+    await service.approveEnrichmentProposal({ ...context, proposalId: proposal.id })
+    await service.applyApprovedEnrichmentProposal({ ...context, proposalId: proposal.id })
+    const audit = (await service.listCardAuditEntries({ entity_id: proposal.id })).find((entry: any) => entry.action === "TCGDEX_ENRICHMENT_APPLIED")
+    expect(audit.new_value.changedFields).toEqual(["rarity", "rarity_icon_key", "rarity_raw", "rarity_comparison"])
+    expect(audit.new_value.changedFields).not.toContain("origin")
+    expect(JSON.stringify(audit)).not.toContain("snapshot")
+
+    const noopFixture = await cardFixture()
+    const noop = await service.createTradingCards({
+      card_set_id: noopFixture.set.id, name: noopFixture.card.name, search_name: noopFixture.card.search_name,
+      card_number: "002", card_number_normalised: "002", origin: "MANUAL",
+      rarity: "COMMON", rarity_icon_key: "common", rarity_raw: providerValue,
+      rarity_comparison: rarityComparisonForm(providerValue),
+    })
+    const noopProposal = await service.recordTcgdexMatchResult({ ...context, tradingCardId: noop.id, result: matchedWithRarity(noop.name, providerValue, "COMMON", "common") })
+    await service.approveEnrichmentProposal({ ...context, proposalId: noopProposal.id })
+    await service.applyApprovedEnrichmentProposal({ ...context, proposalId: noopProposal.id })
+    const noopAudit = (await service.listCardAuditEntries({ entity_id: noopProposal.id })).find((entry: any) => entry.action === "TCGDEX_ENRICHMENT_APPLIED")
+    expect(noopAudit.new_value.changedFields).toEqual([])
   })
 
   it("leaves all local rarity fields unchanged when the mapped rarity candidate is unmapped", async () => {

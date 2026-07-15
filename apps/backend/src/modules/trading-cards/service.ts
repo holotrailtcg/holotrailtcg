@@ -270,9 +270,25 @@ class TradingCardsModuleService extends MedusaService({
       const changedFields: string[] = []
       const values: unknown[] = []
       const assignments: string[] = []
-      if (card.name !== snapshot.name) { assignments.push("name = ?", "search_name = ?"); values.push(snapshot.name, snapshot.name.toLocaleLowerCase()); changedFields.push("name") }
-      if (snapshot.rarityCandidate?.status === "MAPPED" && (card.rarity !== snapshot.rarityCandidate.rarity || card.rarity_icon_key !== snapshot.rarityCandidate.iconKey)) { assignments.push("rarity = ?", "rarity_icon_key = ?", "rarity_raw = ?", "rarity_comparison = ?"); values.push(snapshot.rarityCandidate.rarity, snapshot.rarityCandidate.iconKey, snapshot.rarityCandidate.providerValue, rarityComparisonForm(snapshot.rarityCandidate.providerValue)); changedFields.push("rarity") }
-      if (assignments.length) await manager.execute(`update trading_card set ${assignments.join(", ")}, origin = 'TCGDEX', updated_at = now() where id = ?`, [...values, card.id])
+      const searchName = snapshot.name.toLocaleLowerCase()
+      if (card.name !== snapshot.name) { assignments.push("name = ?"); values.push(snapshot.name); changedFields.push("name") }
+      if (card.search_name !== searchName) { assignments.push("search_name = ?"); values.push(searchName); changedFields.push("search_name") }
+      if (snapshot.rarityCandidate?.status === "MAPPED") {
+        const rarityFields = [
+          ["rarity", snapshot.rarityCandidate.rarity, card.rarity],
+          ["rarity_icon_key", snapshot.rarityCandidate.iconKey, card.rarity_icon_key],
+          ["rarity_raw", snapshot.rarityCandidate.providerValue, card.rarity_raw],
+          ["rarity_comparison", rarityComparisonForm(snapshot.rarityCandidate.providerValue), card.rarity_comparison],
+        ] as const
+        for (const [field, nextValue, currentValue] of rarityFields) {
+          if (currentValue !== nextValue) {
+            assignments.push(`${field} = ?`)
+            values.push(nextValue)
+            changedFields.push(field)
+          }
+        }
+      }
+      if (assignments.length) await manager.execute(`update trading_card set ${assignments.join(", ")}, updated_at = now() where id = ?`, [...values, card.id])
       await this.upsertExternalReferenceInTransaction(manager, { actor: input.actor, source: input.source, tradingCardId: card.id as string, provider: "TCGDEX", providerIdentifier: snapshot.providerCardId, provenance: EXTERNAL_REFERENCE_PROVENANCE.AUTOMATIC })
       await this.upsertExternalReferenceInTransaction(manager, { actor: input.actor, source: input.source, tradingCardId: "", cardSetId: card.card_set_id as string, provider: "TCGDEX", providerIdentifier: `SET:${snapshot.providerSetId}`, provenance: EXTERNAL_REFERENCE_PROVENANCE.AUTOMATIC })
       await manager.execute(`update trading_card_tcgdex_enrichment_proposal set review_status = 'APPLIED', applied_at = now(), updated_at = now() where id = ?`, [input.proposalId])

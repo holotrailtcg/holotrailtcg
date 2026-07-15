@@ -29,4 +29,16 @@ describe("TCGdex persistence validation", () => {
     expect(parsed).not.toHaveProperty("runtimeMessage")
     expect(() => tcgdexMatchResultSchema.parse({ code: "PROVIDER_ERROR", source: "AUTOMATIC", providerCode: "", attemptCount: 1 })).toThrow()
   })
+
+  it("preserves provider rarity text while validating safe non-empty values", () => {
+    const providerValue = "  cOmMoN "
+    const decomposed = "Illustrat" + "i" + "\u0301" + "n"
+    expect((canonicalSnapshot({ ...snapshot, rarityCandidate: { status: "MAPPED", providerValue, rarity: "COMMON", iconKey: "common" } }) as any).rarityCandidate.providerValue).toBe(providerValue)
+    expect((canonicalSnapshot({ ...snapshot, rarityCandidate: { status: "MAPPED", providerValue: decomposed, rarity: "COMMON", iconKey: "common" } }) as any).rarityCandidate.providerValue).toBe(decomposed)
+    for (const invalid of ["", "   ", "ok\u0001", "x".repeat(129)]) {
+      expect(() => canonicalSnapshot({ ...snapshot, rarityCandidate: { status: "MAPPED", providerValue: invalid, rarity: "COMMON", iconKey: "common" } })).toThrow()
+    }
+    expect(() => canonicalSnapshot({ ...snapshot, unexpected: "field" })).toThrow()
+    expect(() => canonicalSnapshot({ ...snapshot, rarityCandidate: { status: "MAPPED", providerValue: "Common", rarity: "COMMON", iconKey: "common", unexpected: true } })).toThrow()
+  })
 })

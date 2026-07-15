@@ -27,13 +27,21 @@ const boundedDiagnosticSchema = z.string().trim().min(1).max(MAX_DIAGNOSTIC_LENG
   "Invalid diagnostic value"
 )
 
+const providerRarityValueSchema = z.string().max(MAX_DIAGNOSTIC_LENGTH).refine(
+  (value) => value.trim().length > 0,
+  "Provider rarity must not be empty"
+).refine(
+  (value) => ![...value].some((character) => character.charCodeAt(0) < 0x20 || character.charCodeAt(0) === 0x7f),
+  "Provider rarity contains invalid characters"
+)
+
 export const enrichmentSnapshotSchema = z.object({
   provider: z.literal("TCGDEX"), providerCardId: providerIdentifierSchema, providerSetId: providerIdentifierSchema,
   name: z.string().trim().min(1).max(512), localId: boundedDiagnosticSchema, category: boundedDiagnosticSchema,
   referenceArtworkUrl: z.string().url().max(2048).optional(), illustrator: z.string().trim().min(1).max(256).optional(), providerRarity: z.string().trim().min(1).max(128).optional(),
   rarityCandidate: z.union([
-    z.object({ status: z.literal("MAPPED"), providerValue: boundedDiagnosticSchema, rarity: raritySchema, iconKey: iconKeySchema }),
-    z.object({ status: z.literal("UNMAPPED"), providerValue: boundedDiagnosticSchema }),
+    z.object({ status: z.literal("MAPPED"), providerValue: providerRarityValueSchema, rarity: raritySchema, iconKey: iconKeySchema }).strict(),
+    z.object({ status: z.literal("UNMAPPED"), providerValue: providerRarityValueSchema }).strict(),
   ]).optional(),
   pokedexNumbers: z.array(z.number().int().positive()).max(100).optional(), types: z.array(boundedDiagnosticSchema).max(32).optional(),
   variants: z.object({ normal: z.boolean(), reverse: z.boolean(), holo: z.boolean(), firstEdition: z.boolean() }),
