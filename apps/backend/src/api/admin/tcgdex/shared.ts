@@ -1,4 +1,4 @@
-import type { MedusaRequest } from "@medusajs/framework/http"
+import type { AuthenticatedMedusaRequest, MedusaRequest } from "@medusajs/framework/http"
 import { MedusaError } from "@medusajs/framework/utils"
 import type { z } from "@medusajs/framework/zod"
 import { TRADING_CARDS_MODULE } from "../../../modules/trading-cards"
@@ -6,6 +6,11 @@ import type TradingCardsModuleService from "../../../modules/trading-cards/servi
 
 export function tradingCardsService(req: MedusaRequest): TradingCardsModuleService {
   return req.scope.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
+}
+
+/** The authenticated Admin user's actor ID. Never accepted from the request body. */
+export function adminActor(req: AuthenticatedMedusaRequest): string {
+  return req.auth_context.actor_id
 }
 
 export function parseAdminInput<T>(schema: z.ZodType<T>, value: unknown): T {
@@ -24,6 +29,18 @@ export async function safeAdminRead<T>(read: () => Promise<T>): Promise<T> {
     throw new MedusaError(
       MedusaError.Types.UNEXPECTED_STATE,
       "The TCGdex review data could not be loaded."
+    )
+  }
+}
+
+export async function safeAdminWrite<T>(write: () => Promise<T>): Promise<T> {
+  try {
+    return await write()
+  } catch (error) {
+    if (error instanceof MedusaError) throw error
+    throw new MedusaError(
+      MedusaError.Types.UNEXPECTED_STATE,
+      "The TCGdex review action could not be completed."
     )
   }
 }

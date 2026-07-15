@@ -3,6 +3,19 @@ loadEnv("test", process.cwd());
 
 module.exports = {
   transform: {
+    // Admin component specs (`*.component.spec.tsx`) are the only files
+    // parsed with JSX enabled; every other file keeps the plain TypeScript
+    // parser so generic arrow functions like `<T>() => {}` are never
+    // misread as JSX.
+    "^.+\\.tsx$": [
+      "@swc/jest",
+      {
+        jsc: {
+          parser: { syntax: "typescript", tsx: true, decorators: true },
+          transform: { react: { runtime: "automatic" } },
+        },
+      },
+    ],
     "^.+\\.[jt]s$": [
       "@swc/jest",
       {
@@ -13,9 +26,12 @@ module.exports = {
     ],
   },
   testEnvironment: "node",
-  moduleFileExtensions: ["js", "ts", "json"],
+  moduleFileExtensions: ["js", "ts", "tsx", "json"],
+  moduleNameMapper: {
+    "\\.css$": "<rootDir>/integration-tests/style-mock.js",
+  },
   modulePathIgnorePatterns: ["dist/", "<rootDir>/.medusa/"],
-  setupFiles: ["./integration-tests/setup.js"],
+  setupFiles: ["./integration-tests/setup-text-encoding.js", "./integration-tests/setup.js"],
 };
 
 // Both of these trading-card specs bootstrap a real `MedusaApp` for the same
@@ -51,5 +67,11 @@ if (process.env.TEST_TYPE === "integration:http") {
     module.exports.testPathIgnorePatterns = ["/node_modules/", ...TRADING_CARDS_MEDUSA_APP_SPEC_PATTERNS];
   }
 } else if (process.env.TEST_TYPE === "unit") {
-  module.exports.testMatch = ["**/src/**/__tests__/**/*.unit.spec.[jt]s"];
+  // Admin component specs opt into jsdom per-file via a `@jest-environment
+  // jsdom` docblock (see review-actions and the review detail page specs);
+  // every other unit spec keeps the default "node" environment above.
+  module.exports.testMatch = [
+    "**/src/**/__tests__/**/*.unit.spec.[jt]s",
+    "**/src/admin/**/__tests__/**/*.component.spec.tsx",
+  ];
 }

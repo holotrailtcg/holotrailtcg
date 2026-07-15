@@ -4,7 +4,7 @@ import { tcgDexCardSchema } from "./schemas"
 import { normalizeTcgdexCard } from "./normalization"
 import { TCGDEX_MATCH_CODE, TCGDEX_MATCH_SOURCE, type TcgDexMatchInput, type TcgDexMatchResult } from "./matching-types"
 
-type TcgDexLookupDependency = {
+export type TcgDexLookupDependency = {
   getCardBySetAndLocalId(language: TcgDexLanguage, setId: string, localId: string): Promise<unknown>
   getCardById(language: TcgDexLanguage, cardId: string): Promise<unknown>
 }

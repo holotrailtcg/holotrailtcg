@@ -1,8 +1,10 @@
-import { Button, Container, Heading, Text, Tooltip } from "@medusajs/ui"
-import { useQuery } from "@tanstack/react-query"
+import { Button, Container, Heading, Text, Textarea, Tooltip, toast, usePrompt } from "@medusajs/ui"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { useState } from "react"
 import { Link, useParams } from "react-router-dom"
 import ReviewStatusBadge from "../../../../components/imports/review-status-badge"
-import type { ReviewDetailResponse } from "../../../../components/imports/types"
+import { MAX_REJECT_REASON_LENGTH, visibleReviewActions } from "../../../../components/imports/review-actions"
+import type { ReviewDetailResponse, RetryResponse } from "../../../../components/imports/types"
 import "../../../../styles/imports.css"
 
 async function fetchReview(proposalId: string): Promise<ReviewDetailResponse> {
@@ -15,15 +17,109 @@ async function fetchReview(proposalId: string): Promise<ReviewDetailResponse> {
   return result.json()
 }
 
+async function postAction<T>(url: string, body?: Record<string, unknown>): Promise<T> {
+  const result = await fetch(url, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  })
+  if (!result.ok) {
+    throw new Error("Request failed")
+  }
+  return result.json()
+}
+
+const RETRY_OUTCOME_MESSAGE: Record<string, string> = {
+  MATCHED: "TCGdex found a match. It is waiting for review.",
+  NO_MATCH: "TCGdex could not find this card.",
+  UNRESOLVED_SET: "TCGdex could not recognise this card's set.",
+  IDENTITY_MISMATCH: "TCGdex returned a different card to the one expected.",
+  INVALID_LOCAL_IDENTITY: "This card's details were not complete enough to check.",
+  PROVIDER_ERROR: "TCGdex could not be reached. Please try again later.",
+}
+
 const ImportsReviewDetailPage = () => {
   const params = useParams<{ proposalId: string }>()
   const proposalId = params.proposalId ?? ""
+  const queryClient = useQueryClient()
+  const prompt = usePrompt()
+  const [rejectReason, setRejectReason] = useState("")
 
   const query = useQuery({
     queryKey: ["tcgdex-review", proposalId],
     queryFn: () => fetchReview(proposalId),
     enabled: Boolean(proposalId),
   })
+
+  const refreshAfterAction = () => {
+    queryClient.invalidateQueries({ queryKey: ["tcgdex-review", proposalId] })
+    queryClient.invalidateQueries({ queryKey: ["tcgdex-reviews"] })
+    queryClient.invalidateQueries({ queryKey: ["tcgdex-attempts"] })
+  }
+
+  const approveMutation = useMutation({
+    mutationFn: () => postAction(`/admin/tcgdex/reviews/${encodeURIComponent(proposalId)}/approve`),
+    onSuccess: () => {
+      toast.success("Match approved")
+      refreshAfterAction()
+    },
+    onError: () => toast.error("This match could not be approved. Please try again."),
+  })
+
+  const rejectMutation = useMutation({
+    mutationFn: (reason: string) =>
+      postAction(`/admin/tcgdex/reviews/${encodeURIComponent(proposalId)}/reject`, reason ? { reason } : {}),
+    onSuccess: () => {
+      toast.success("Match rejected")
+      refreshAfterAction()
+    },
+    onError: () => toast.error("This match could not be rejected. Please try again."),
+  })
+
+  const applyMutation = useMutation({
+    mutationFn: () => postAction(`/admin/tcgdex/reviews/${encodeURIComponent(proposalId)}/apply`),
+    onSuccess: () => {
+      toast.success("Card details applied")
+      refreshAfterAction()
+    },
+    onError: () => toast.error("These card details could not be applied. Please try again."),
+  })
+
+  const retryMutation = useMutation({
+    mutationFn: () => {
+      const tradingCardId = query.data?.review.trading_card.id ?? ""
+      return postAction<RetryResponse>(`/admin/tcgdex/cards/${encodeURIComponent(tradingCardId)}/retry`)
+    },
+    onSuccess: (result) => {
+      toast.info(RETRY_OUTCOME_MESSAGE[result.outcome] ?? "TCGdex was checked again.")
+      refreshAfterAction()
+    },
+    onError: () => toast.error("TCGdex could not be reached. Please try again."),
+  })
+
+  const handleReject = async () => {
+    const confirmed = await prompt({
+      title: "Reject this match?",
+      description: "This card will need to be matched again before it can be applied.",
+      confirmText: "Reject",
+      cancelText: "Cancel",
+      variant: "danger",
+    })
+    if (confirmed) rejectMutation.mutate(rejectReason.trim())
+  }
+
+  const handleApply = async () => {
+    const confirmed = await prompt({
+      title: "Apply these card details?",
+      description: "This copies the matched TCGdex details onto the Holo Trail card.",
+      confirmText: "Apply",
+      cancelText: "Cancel",
+    })
+    if (confirmed) applyMutation.mutate()
+  }
+
+  const actions = query.data ? visibleReviewActions(query.data.review.review_status) : null
 
   return (
     <div className="ht-imports flex flex-col gap-6">
@@ -140,18 +236,63 @@ const ImportsReviewDetailPage = () => {
             )}
           </Container>
 
-          <Container className="flex items-center gap-3 p-6">
-            <Tooltip content="Not available yet">
-              <Button variant="primary" disabled>
+          <Container className="flex flex-wrap items-center gap-3 p-6">
+            {actions?.approve && (
+              <Button
+                variant="primary"
+                isLoading={approveMutation.isPending}
+                onClick={() => approveMutation.mutate()}
+              >
                 Approve
               </Button>
-            </Tooltip>
-            <Tooltip content="Not available yet">
-              <Button variant="danger" disabled>
+            )}
+            {actions?.reject && (
+              <Button
+                variant="danger"
+                isLoading={rejectMutation.isPending}
+                onClick={handleReject}
+              >
                 Reject
+              </Button>
+            )}
+            {actions?.apply && (
+              <Button
+                variant="primary"
+                isLoading={applyMutation.isPending}
+                onClick={handleApply}
+              >
+                Apply
+              </Button>
+            )}
+            {actions?.retry && (
+              <Button
+                variant="secondary"
+                isLoading={retryMutation.isPending}
+                onClick={() => retryMutation.mutate()}
+              >
+                Try TCGdex again
+              </Button>
+            )}
+            <Tooltip content="Not connected">
+              <Button variant="secondary" disabled>
+                Ignore
               </Button>
             </Tooltip>
           </Container>
+
+          {actions?.reject && (
+            <Container className="flex flex-col gap-2 p-6">
+              <Text size="small" weight="plus">
+                Reason for rejecting (optional)
+              </Text>
+              <Textarea
+                value={rejectReason}
+                onChange={(event) => setRejectReason(event.target.value.slice(0, MAX_REJECT_REASON_LENGTH))}
+                placeholder="Why doesn't this match look right?"
+                maxLength={MAX_REJECT_REASON_LENGTH}
+              />
+            </Container>
+          )}
         </>
       )}
     </div>

@@ -7,7 +7,8 @@ import {
   NEWSLETTER_RECAPTCHA_VERIFIER_KEY,
   NEWSLETTER_CONFIRMATION_EMAIL_SENDER_KEY,
 } from "../../../src/api/store/newsletter/shared/dependencies"
-import { FakeRecaptchaVerifier, FakeConfirmationEmailSender } from "./fakes"
+import { TCGDEX_ADMIN_CLIENT_KEY } from "../../../src/api/admin/tcgdex/dependencies"
+import { FakeRecaptchaVerifier, FakeConfirmationEmailSender, FakeTcgDexClient } from "./fakes"
 
 /**
  * HTTP integration test bootstrap for the public newsletter routes
@@ -31,14 +32,14 @@ import { FakeRecaptchaVerifier, FakeConfirmationEmailSender } from "./fakes"
  * introduced; the suite reuses the already-guarded, already-migrated test
  * database exactly as the module-test suite does.
  *
- * Fake reCAPTCHA/Resend adapters are registered directly into the root
- * container immediately after boot, before any request is made, using the
- * exact registration keys `src/api/store/newsletter/shared/dependencies.ts`
- * resolves through — this is the "register a fake under the same key
- * before the lazy production registration ever runs" mechanism that
- * module documents. No `NODE_ENV` branch, magic header or magic token
- * makes this reachable in production; it is wired up only here, in the
- * test bootstrap.
+ * Fake reCAPTCHA/Resend/TCGdex adapters are registered directly into the
+ * root container immediately after boot, before any request is made, using
+ * the exact registration keys `src/api/store/newsletter/shared/dependencies.ts`
+ * and `src/api/admin/tcgdex/dependencies.ts` resolve through — this is the
+ * "register a fake under the same key before the lazy production
+ * registration ever runs" mechanism those modules document. No `NODE_ENV`
+ * branch, magic header or magic token makes this reachable in production;
+ * it is wired up only here, in the test bootstrap.
  */
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -79,6 +80,7 @@ export interface NewsletterHttpTestApp {
   baseUrl: string
   recaptcha: FakeRecaptchaVerifier
   emailSender: FakeConfirmationEmailSender
+  tcgdexClient: FakeTcgDexClient
   container: MedusaContainer
   close: () => Promise<void>
   /** POST /store/newsletter/subscribe with an optional client-address override header. */
@@ -148,8 +150,10 @@ export async function bootstrapNewsletterHttpTestApp(): Promise<NewsletterHttpTe
 
   const recaptcha = new FakeRecaptchaVerifier()
   const emailSender = new FakeConfirmationEmailSender()
+  const tcgdexClient = new FakeTcgDexClient()
   container.register(NEWSLETTER_RECAPTCHA_VERIFIER_KEY, asValue(recaptcha))
   container.register(NEWSLETTER_CONFIRMATION_EMAIL_SENDER_KEY, asValue(emailSender))
+  container.register(TCGDEX_ADMIN_CLIENT_KEY, asValue(tcgdexClient))
 
   const publishableApiKey = await createTestPublishableApiKey(container)
 
@@ -166,6 +170,7 @@ export async function bootstrapNewsletterHttpTestApp(): Promise<NewsletterHttpTe
     baseUrl,
     recaptcha,
     emailSender,
+    tcgdexClient,
     container,
     close: async () => {
       await publishableApiKey.remove()
