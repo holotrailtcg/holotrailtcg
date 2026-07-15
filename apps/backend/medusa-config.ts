@@ -1,6 +1,12 @@
 import { loadEnv, defineConfig } from '@medusajs/framework/utils'
+import { resolveR2Config } from './src/modules/trading-cards/images/r2-config'
 
 loadEnv(process.env.NODE_ENV || 'development', process.cwd())
+
+// Disabled by default: local Medusa file behaviour is preserved unless
+// R2_IMAGES_ENABLED is the exact string "true", and resolveR2Config fails
+// closed (throws) rather than booting with a partially configured provider.
+const r2Config = resolveR2Config(process.env)
 
 module.exports = defineConfig({
   projectConfig: {
@@ -28,5 +34,33 @@ module.exports = defineConfig({
     {
       resolve: "./src/modules/trading-cards",
     },
+    // Only overrides Medusa's default local file provider when Stage 4B.1
+    // R2 configuration is enabled and fully valid; otherwise local file
+    // behaviour is untouched (no module override registered at all).
+    ...(r2Config.enabled
+      ? [
+          {
+            resolve: "@medusajs/medusa/file",
+            options: {
+              providers: [
+                {
+                  resolve: "@medusajs/medusa/file-s3",
+                  id: "r2",
+                  options: {
+                    fileUrl: r2Config.publicBaseUrl,
+                    accessKeyId: r2Config.accessKeyId,
+                    secretAccessKey: r2Config.secretAccessKey,
+                    region: r2Config.region,
+                    bucket: r2Config.bucketName,
+                    endpoint: r2Config.endpoint,
+                    cacheControl: r2Config.cacheControl,
+                    acl: r2Config.acl,
+                  },
+                },
+              ],
+            },
+          },
+        ]
+      : []),
   ],
 })
