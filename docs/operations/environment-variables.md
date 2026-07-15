@@ -152,6 +152,47 @@ No new dependency, secret, or backend change is introduced by this
 variable — see `docs/decisions/0006-stage-2d-route-gating.md` for the full
 design rationale (allowlist policy, fail-closed default).
 
+## Stage 4B.1 Cloudflare R2 card-image storage
+
+Backend-only; never a storefront file, never `NEXT_PUBLIC_`. Disabled by
+default — `R2_IMAGES_ENABLED` must be the exact string `"true"` to enable it,
+so a missing or mistyped value always keeps local Medusa file behaviour
+rather than silently turning on real network calls. `resolveR2Config`
+(`apps/backend/src/modules/trading-cards/images/r2-config.ts`) is read once
+by `medusa-config.ts` at boot; when enabled, every other value below is
+required and validated, and configuration errors never include a secret
+value.
+
+| Variable | Owner / class | Local file and committed template | Required when enabled | Validation |
+| --- | --- | --- | --- | --- |
+| `R2_IMAGES_ENABLED` | Backend / config | Backend `.env`; backend template | Always set; default `false` | Only exact `"true"` enables; anything else disables |
+| `R2_ACCOUNT_ID` | Backend / config | Backend `.env`; backend template | Yes | 32-character hex Cloudflare account ID; must match the endpoint's account segment |
+| `R2_ACCESS_KEY_ID` | Backend / secret | Backend `.env`; backend template | Yes | Non-empty; never logged |
+| `R2_SECRET_ACCESS_KEY` | Backend / secret | Backend `.env`; backend template | Yes | Non-empty; never logged |
+| `R2_BUCKET_NAME` | Backend / config | Backend `.env`; backend template | Yes | Valid S3-style bucket name; the listing-image bucket only |
+| `R2_S3_ENDPOINT` | Backend / config | Backend `.env`; backend template | Yes | Bare `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com`, or the jurisdiction-specific `eu.`/`fedramp.` variant; no credentials, query, fragment, or path |
+| `R2_PUBLIC_BASE_URL` | Backend / config | Backend `.env`; backend template | Yes | Bare https origin; no credentials, query, fragment, or path; used only to derive public image URLs, never stored per-row |
+
+Getting the R2 credentials:
+
+1. Open the Cloudflare Dashboard.
+2. Open R2 Object Storage.
+3. Create or select the listing-image bucket.
+4. Open "Manage R2 API tokens".
+5. Create an "Object Read & Write" token restricted only to that bucket.
+6. Copy the Access Key ID and Secret Access Key when Cloudflare shows them.
+7. Save local values only in `apps/backend/.env`.
+8. Put `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` only in `apps/backend/.env`.
+9. Never place them in `apps/storefront/.env.local`.
+10. Never use a `NEXT_PUBLIC_` prefix.
+11. Never commit `apps/backend/.env`.
+12. Never paste the secret into chat.
+13. Production values go in the future Medusa hosting provider's secret
+    environment settings, not Vercel storefront settings.
+
+No automated test may call real R2. Config-reader tests pass explicit fake
+environment objects; `.env.test` keeps `R2_IMAGES_ENABLED=false`.
+
 ## Test database safety
 
 Before any automated database-backed test or reviewed migration command, load

@@ -7,13 +7,15 @@ import CardAuditEntry from "./models/card-audit-entry"
 import RarityMapping from "./models/rarity-mapping"
 import TcgDexEnrichmentProposal from "./models/tcgdex-enrichment-proposal"
 import TcgDexEnrichmentAttempt from "./models/tcgdex-enrichment-attempt"
+import CardImage from "./models/card-image"
 import { cardNumberForms } from "./identity/card-number"
 import { rarityComparisonForm } from "./rarity/normalise-rarity"
 import {
   AUDIT_ACTION, AUDIT_ENTITY_TYPE, type CardCondition, type CardFinish,
   type CardLanguage, type ConditionSource, type ExternalProvider, type RecordOrigin, type SpecialTreatment,
-  EXTERNAL_REFERENCE_PROVENANCE, type ExternalReferenceProvenance,
+  EXTERNAL_REFERENCE_PROVENANCE, type ExternalReferenceProvenance, IMAGE_STATUS,
 } from "./types"
+import { generateStagingObjectKey, sanitiseOriginalFilename, derivePublicImageUrl } from "./images/object-keys"
 import type { TcgDexMatchInput, TcgDexMatchResult } from "./tcgdex/matching-types"
 import type { TcgDexLookupDependency } from "./tcgdex/matching"
 import { matchTcgdexCard } from "./tcgdex/matching"
@@ -73,6 +75,25 @@ export interface UpsertExternalReferenceInput extends AuditContext {
 
 export const EXTERNAL_REFERENCE_NOTE_MAX_LENGTH = 500
 
+export interface CreatePendingCardImageInput extends AuditContext {
+  tradingCardVariantId: string
+  uploadedBy: string
+  originalFilename: string
+  declaredMimeType: string
+  declaredByteSize: number
+  uploadExpiresAt?: Date | string | null
+}
+
+export interface ReorderReadyCardImagesInput extends AuditContext {
+  tradingCardVariantId: string
+  orderedImageIds: string[]
+}
+
+export interface ArchiveCardImageInput extends AuditContext {
+  id: string
+  adminId: string
+}
+
 interface PriceLockState {
   price_locked: boolean
   price_locked_at: Date | string | null
@@ -100,7 +121,7 @@ const externalReferenceAuditState = (value: Record<string, unknown>) => ({
 
 class TradingCardsModuleService extends MedusaService({
   CardSet, TradingCard, TradingCardVariant, ExternalCardReference, CardAuditEntry, RarityMapping,
-  TcgDexEnrichmentProposal, TcgDexEnrichmentAttempt,
+  TcgDexEnrichmentProposal, TcgDexEnrichmentAttempt, CardImage,
 }) {
   protected manager_: EntityManager
 
@@ -124,6 +145,20 @@ class TradingCardsModuleService extends MedusaService({
   deleteTcgDexEnrichmentAttempts = async (): Promise<never> => this.lifecycleMutationBlocked("Enrichment diagnostic deletion")
   softDeleteTcgDexEnrichmentAttempts = async (): Promise<never> => this.lifecycleMutationBlocked("Enrichment diagnostic deletion")
   restoreTcgDexEnrichmentAttempts = async (): Promise<never> => this.lifecycleMutationBlocked("Enrichment diagnostic restoration")
+
+  // CardImage rows may only be mutated through the explicit domain methods
+  // below (createPendingCardImage/reorderReadyCardImages/archiveCardImage/
+  // restoreCardImage), which lock the owning variant row and keep READY
+  // sort order contiguous. The generated bulk mutation methods would let a
+  // caller bypass that locking and the lifecycle-key CHECK constraint's
+  // implicit workflow entirely, so every one of them is blocked here; only
+  // the generated read methods (listCardImages/retrieveCardImage/etc.)
+  // remain usable.
+  createCardImages = async (): Promise<never> => this.lifecycleMutationBlocked("Card image creation")
+  updateCardImages = async (): Promise<never> => this.lifecycleMutationBlocked("Card image updates")
+  deleteCardImages = async (): Promise<never> => this.lifecycleMutationBlocked("Card image deletion")
+  softDeleteCardImages = async (): Promise<never> => this.lifecycleMutationBlocked("Card image deletion")
+  restoreCardImages = async (): Promise<never> => this.lifecycleMutationBlocked("Card image restoration")
 
   async listTcgdexAdminReviews(query: ReviewListQuery) {
     return listTcgdexReviews(this.manager_, query)
@@ -614,6 +649,211 @@ class TradingCardsModuleService extends MedusaService({
         ...input, entityType: AUDIT_ENTITY_TYPE.EXTERNAL_CARD_REFERENCE, entityId: input.id,
         action: AUDIT_ACTION.EXTERNAL_REFERENCE_REMOVED, oldValue: externalReferenceAuditState(current),
       })
+    })
+  }
+
+  /**
+   * Locks the owning trading-card variant row for the duration of the
+   * caller's transaction. Every `CardImage` mutation below locks its
+   * variant first (in this same order) so concurrent image mutations on the
+   * same variant serialise instead of racing on sort-order bookkeeping.
+   */
+  private async lockCardImageVariant(manager: TxManager, id: string) {
+    const [variant] = await manager.execute<Record<string, unknown>>(
+      `select id from trading_card_variant where id = ? and deleted_at is null for update`, [id]
+    )
+    if (!variant) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Trading card variant not found")
+    return variant
+  }
+
+  async assertCardImageVariantOwnership(input: { imageVariantId: string; expectedVariantId: string }): Promise<void> {
+    if (input.imageVariantId !== input.expectedVariantId) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "Card image does not belong to the expected trading-card variant"
+      )
+    }
+  }
+
+  async deriveCardImagePublicUrl(input: { publicBaseUrl: string; objectKey: string }): Promise<string> {
+    return derivePublicImageUrl(input.publicBaseUrl, input.objectKey)
+  }
+
+  async listCardImagesForVariant(input: { tradingCardVariantId: string; includeArchived?: boolean }) {
+    const query = input.includeArchived
+      ? `select * from trading_card_image where trading_card_variant_id = ? and deleted_at is null order by sort_order asc`
+      : `select * from trading_card_image where trading_card_variant_id = ? and status <> 'ARCHIVED' and deleted_at is null order by sort_order asc`
+    return this.manager_.execute<Record<string, unknown>>(query, [input.tradingCardVariantId])
+  }
+
+  async createPendingCardImage(input: CreatePendingCardImageInput) {
+    if (!Number.isInteger(input.declaredByteSize) || input.declaredByteSize <= 0) {
+      throw new MedusaError(MedusaError.Types.INVALID_DATA, "declaredByteSize must be a positive integer")
+    }
+    return this.manager_.transactional(async (manager) => {
+      await this.lockCardImageVariant(manager, input.tradingCardVariantId)
+      const [{ count }] = await manager.execute<{ count: string }>(
+        `select count(*)::int as count from trading_card_image
+         where trading_card_variant_id = ? and status = ? and deleted_at is null`,
+        [input.tradingCardVariantId, IMAGE_STATUS.READY]
+      )
+      const sortOrder = Number(count)
+      const id = generateEntityId(undefined, "tcimg")
+      const stagingObjectKey = generateStagingObjectKey({
+        variantId: input.tradingCardVariantId, imageId: id, mimeType: input.declaredMimeType,
+      })
+      const originalFilename = sanitiseOriginalFilename(input.originalFilename)
+      await manager.execute(
+        `insert into trading_card_image
+         (id, trading_card_variant_id, status, staging_object_key, original_filename,
+          declared_mime_type, declared_byte_size, sort_order, uploaded_by, upload_expires_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id, input.tradingCardVariantId, IMAGE_STATUS.PENDING, stagingObjectKey, originalFilename,
+          input.declaredMimeType, input.declaredByteSize, sortOrder, input.uploadedBy, input.uploadExpiresAt ?? null,
+        ]
+      )
+      await this.writeAudit(manager, {
+        ...input, entityType: AUDIT_ENTITY_TYPE.CARD_IMAGE, entityId: id,
+        action: AUDIT_ACTION.IMAGE_UPLOAD_REQUESTED,
+        newValue: {
+          tradingCardVariantId: input.tradingCardVariantId, declaredMimeType: input.declaredMimeType,
+          declaredByteSize: input.declaredByteSize, sortOrder, stagingObjectKey,
+        },
+      })
+      const [saved] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_image where id = ? and deleted_at is null`, [id]
+      )
+      return saved
+    })
+  }
+
+  async reorderReadyCardImages(input: ReorderReadyCardImagesInput) {
+    return this.manager_.transactional(async (manager) => {
+      await this.lockCardImageVariant(manager, input.tradingCardVariantId)
+      const current = await manager.execute<Record<string, unknown>>(
+        `select id, trading_card_variant_id, sort_order from trading_card_image
+         where trading_card_variant_id = ? and status = ? and deleted_at is null
+         order by sort_order asc for update`,
+        [input.tradingCardVariantId, IMAGE_STATUS.READY]
+      )
+      const currentIds = current.map((row) => row.id as string)
+      const requestedIds = input.orderedImageIds
+      const isExactRearrangement =
+        requestedIds.length === currentIds.length &&
+        new Set(requestedIds).size === requestedIds.length &&
+        currentIds.every((id) => requestedIds.includes(id))
+      if (!isExactRearrangement) {
+        throw new MedusaError(
+          MedusaError.Types.INVALID_DATA,
+          "Reorder must include exactly the current ready images for this variant, each exactly once"
+        )
+      }
+      for (const row of current) {
+        await this.assertCardImageVariantOwnership({
+          imageVariantId: row.trading_card_variant_id as string, expectedVariantId: input.tradingCardVariantId,
+        })
+      }
+      const oldOrder = current.map((row) => row.id as string)
+      // Two-phase update: land every row on a disjoint high placeholder first so a
+      // mid-transaction swap never collides with the unique active-sort-order index.
+      for (let index = 0; index < requestedIds.length; index++) {
+        await manager.execute(`update trading_card_image set sort_order = ?, updated_at = now() where id = ?`, [
+          requestedIds.length + index, requestedIds[index],
+        ])
+      }
+      for (let index = 0; index < requestedIds.length; index++) {
+        await manager.execute(`update trading_card_image set sort_order = ?, updated_at = now() where id = ?`, [
+          index, requestedIds[index],
+        ])
+      }
+      await this.writeAudit(manager, {
+        ...input, entityType: AUDIT_ENTITY_TYPE.CARD_IMAGE, entityId: input.tradingCardVariantId,
+        action: AUDIT_ACTION.IMAGE_REORDERED, oldValue: { order: oldOrder }, newValue: { order: requestedIds },
+      })
+      return manager.execute<Record<string, unknown>>(
+        `select * from trading_card_image where trading_card_variant_id = ? and status = ? and deleted_at is null order by sort_order asc`,
+        [input.tradingCardVariantId, IMAGE_STATUS.READY]
+      )
+    })
+  }
+
+  async archiveCardImage(input: ArchiveCardImageInput) {
+    return this.manager_.transactional(async (manager) => {
+      const [target] = await manager.execute<Record<string, unknown>>(
+        `select trading_card_variant_id from trading_card_image where id = ? and deleted_at is null`, [input.id]
+      )
+      if (!target) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Card image not found")
+      await this.lockCardImageVariant(manager, target.trading_card_variant_id as string)
+      const [current] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_image where id = ? and deleted_at is null for update`, [input.id]
+      )
+      if (!current) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Card image not found")
+      if (current.status === IMAGE_STATUS.ARCHIVED) return current
+      if (current.status !== IMAGE_STATUS.READY) {
+        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Only a ready image can be archived")
+      }
+      const siblings = await manager.execute<Record<string, unknown>>(
+        `select id, sort_order from trading_card_image
+         where trading_card_variant_id = ? and status = ? and deleted_at is null
+         order by sort_order asc for update`,
+        [current.trading_card_variant_id, IMAGE_STATUS.READY]
+      )
+      await manager.execute(
+        `update trading_card_image set status = ?, archived_at = now(), archived_by = ?, updated_at = now() where id = ?`,
+        [IMAGE_STATUS.ARCHIVED, input.adminId, input.id]
+      )
+      const remaining = siblings.filter((row) => row.id !== input.id)
+      for (let index = 0; index < remaining.length; index++) {
+        if (remaining[index].sort_order !== index) {
+          await manager.execute(`update trading_card_image set sort_order = ?, updated_at = now() where id = ?`, [
+            index, remaining[index].id,
+          ])
+        }
+      }
+      await this.writeAudit(manager, {
+        ...input, entityType: AUDIT_ENTITY_TYPE.CARD_IMAGE, entityId: input.id,
+        action: AUDIT_ACTION.IMAGE_ARCHIVED,
+        oldValue: { status: current.status, sortOrder: current.sort_order },
+        newValue: { status: IMAGE_STATUS.ARCHIVED, archivedBy: input.adminId },
+      })
+      const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_image where id = ?`, [input.id])
+      return saved
+    })
+  }
+
+  async restoreCardImage(input: AuditContext & { id: string }) {
+    return this.manager_.transactional(async (manager) => {
+      const [target] = await manager.execute<Record<string, unknown>>(
+        `select trading_card_variant_id from trading_card_image where id = ? and deleted_at is null`, [input.id]
+      )
+      if (!target) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Card image not found")
+      await this.lockCardImageVariant(manager, target.trading_card_variant_id as string)
+      const [current] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_image where id = ? and deleted_at is null for update`, [input.id]
+      )
+      if (!current) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Card image not found")
+      if (current.status !== IMAGE_STATUS.ARCHIVED) {
+        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Only an archived image can be restored")
+      }
+      const [{ count }] = await manager.execute<{ count: string }>(
+        `select count(*)::int as count from trading_card_image
+         where trading_card_variant_id = ? and status = ? and deleted_at is null`,
+        [current.trading_card_variant_id, IMAGE_STATUS.READY]
+      )
+      const sortOrder = Number(count)
+      await manager.execute(
+        `update trading_card_image set status = ?, archived_at = null, archived_by = null, sort_order = ?, updated_at = now() where id = ?`,
+        [IMAGE_STATUS.READY, sortOrder, input.id]
+      )
+      await this.writeAudit(manager, {
+        ...input, entityType: AUDIT_ENTITY_TYPE.CARD_IMAGE, entityId: input.id,
+        action: AUDIT_ACTION.IMAGE_RESTORED,
+        oldValue: { status: current.status },
+        newValue: { status: IMAGE_STATUS.READY, sortOrder },
+      })
+      const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_image where id = ?`, [input.id])
+      return saved
     })
   }
 }

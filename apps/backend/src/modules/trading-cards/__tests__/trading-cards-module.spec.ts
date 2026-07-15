@@ -4,12 +4,14 @@ import { TRADING_CARDS_MODULE } from "../index"
 import { canonicalIdentityKey, variantIdentityKey } from "../identity/identity-key"
 import { VERIFIED_DUPLICATE_EEVEE_ROWS } from "../__fixtures__/pulse-rows"
 import { EXTERNAL_REFERENCE_NOTE_MAX_LENGTH } from "../service"
+import { Migration20260715120000 } from "../migrations/Migration20260715120000"
 
 let pgConnection: ReturnType<typeof createPgConnection>
 let medusaApp: Awaited<ReturnType<typeof MedusaApp>>
 let service: any
 
 const suffix = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 9)}`
+const rows = (result: any): any[] => Array.isArray(result) ? result : result.rows
 
 beforeAll(async () => {
   pgConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
@@ -400,5 +402,395 @@ describe("grouped identity and link guarantees", () => {
     ])
     expect(rightRace.map(({ status }) => status).sort()).toEqual(["fulfilled", "rejected"])
     await pgConnection.raw(`delete from ${table} where id like ?`, [`link_${marker}_%`])
+  })
+})
+
+describe("card image domain", () => {
+  // Stage 4A.3's own migration spec exercises Migration20260714150000's
+  // up() in isolation, which unconditionally redefines the shared
+  // CK_trading_card_audit_entity_type/CK_trading_card_audit_action checks
+  // from its own hardcoded (pre-image) list. When both migration specs run
+  // in the same `test:integration:modules` session, that reapplication can
+  // land after this file's own audit-widening migration and undo it. Guard
+  // against that ordering by re-applying this migration's up() once before
+  // any card-image test runs; it is idempotent (verified by
+  // card-image-migration.integration.spec.ts) so this is always safe.
+  beforeAll(async () => {
+    const migration = new Migration20260715120000(undefined as never, undefined as never)
+    await migration.up()
+    for (const query of migration.getQueries()) await pgConnection.raw(String(query))
+    migration.reset()
+  })
+
+  const pendingInput = (variantId: string, overrides: Record<string, unknown> = {}) => ({
+    tradingCardVariantId: variantId, uploadedBy: "admin_test", originalFilename: "card.jpg",
+    declaredMimeType: "image/jpeg", declaredByteSize: 1_048_576,
+    actor: "admin_test", source: "MANUAL", ...overrides,
+  })
+
+  const fakeSha256 = () => `${suffix()}${suffix()}`.toLowerCase().replace(/[^a-f0-9]/g, "0").padEnd(64, "0").slice(0, 64)
+
+  async function createReadyImage(variantId: string, sortOrder: number) {
+    const pending = await service.createPendingCardImage(pendingInput(variantId))
+    await pgConnection.raw(
+      `update trading_card_image
+       set status = 'READY', sort_order = ?, staging_object_key = null,
+           final_object_key = ?, confirmed_mime_type = 'image/jpeg', confirmed_byte_size = 1048576,
+           width = 800, height = 1120, sha256_hash = ?
+       where id = ?`,
+      [sortOrder, `card-images/${variantId}/${pending.id}/${suffix()}.jpg`, fakeSha256(), pending.id]
+    )
+    return service.retrieveCardImage(pending.id)
+  }
+
+  it("belongs to the exact trading-card variant it depicts", async () => {
+    const { variant } = await createVariant()
+    const image = await service.createPendingCardImage(pendingInput(variant.id))
+    expect(image.trading_card_variant_id).toBe(variant.id)
+    expect(image.status).toBe("PENDING")
+    expect(image.staging_object_key).toContain(`card-images/${variant.id}/`)
+    expect(image.final_object_key).toBeNull()
+    expect(image.focal_x).toBe(0.5)
+    expect(image.focal_y).toBe(0.5)
+  })
+
+  it("rejects cross-variant and cross-card ownership mismatches", async () => {
+    await expect(service.assertCardImageVariantOwnership({
+      imageVariantId: "tcvar_a", expectedVariantId: "tcvar_b",
+    })).rejects.toThrow("expected trading-card variant")
+    await expect(service.assertCardImageVariantOwnership({
+      imageVariantId: "tcvar_a", expectedVariantId: "tcvar_a",
+    })).resolves.toBeUndefined()
+  })
+
+  it("remains reusable after unrelated stock/state changes elsewhere", async () => {
+    const { variant } = await createVariant()
+    const image = await createReadyImage(variant.id, 0)
+    // Simulate an unrelated stock/state change on the variant itself; the
+    // image row is untouched by it and stays listed for the variant.
+    await service.updateVariantCondition({
+      id: variant.id, condition: "DAMAGED", conditionSource: "EXPLICIT", actor: "t", source: "MANUAL",
+    })
+    const images = await service.listCardImagesForVariant({ tradingCardVariantId: variant.id })
+    expect(images.map((row: any) => row.id)).toContain(image.id)
+  })
+
+  it("enforces contiguous, unique sort order among ready images with sort order zero primary", async () => {
+    const { variant } = await createVariant()
+    const first = await createReadyImage(variant.id, 0)
+    const second = await createReadyImage(variant.id, 1)
+    const images = await service.listCardImagesForVariant({ tradingCardVariantId: variant.id })
+    expect(images.map((row: any) => row.id)).toEqual([first.id, second.id])
+    expect(images[0].sort_order).toBe(0)
+  })
+
+  it("rejects a duplicate ready sort order at the database boundary", async () => {
+    const { variant } = await createVariant()
+    await createReadyImage(variant.id, 0)
+    const pending = await service.createPendingCardImage(pendingInput(variant.id))
+    await expect(pgConnection.raw(
+      `update trading_card_image
+       set status = 'READY', sort_order = 0, staging_object_key = null,
+           final_object_key = ?, confirmed_mime_type = 'image/jpeg', confirmed_byte_size = 1048576,
+           width = 800, height = 1120, sha256_hash = ?
+       where id = ?`,
+      [`card-images/${variant.id}/${pending.id}/${suffix()}.jpg`, fakeSha256(), pending.id]
+    )).rejects.toThrow(/IDX_trading_card_image_ready_sort_order|duplicate key/i)
+  })
+
+  it("bounds focal values between 0 and 1 at the database boundary", async () => {
+    const { variant } = await createVariant()
+    const image = await service.createPendingCardImage(pendingInput(variant.id))
+    await expect(pgConnection.raw(
+      `update trading_card_image set focal_x = 1.5 where id = ?`, [image.id]
+    )).rejects.toThrow(/CK_trading_card_image_focal_bounds|check constraint/i)
+    await expect(pgConnection.raw(
+      `update trading_card_image set focal_y = -0.1 where id = ?`, [image.id]
+    )).rejects.toThrow(/CK_trading_card_image_focal_bounds|check constraint/i)
+  })
+
+  it("reorders exactly the current ready set and rejects a partial or foreign list", async () => {
+    const { variant } = await createVariant()
+    const first = await createReadyImage(variant.id, 0)
+    const second = await createReadyImage(variant.id, 1)
+    const third = await createReadyImage(variant.id, 2)
+
+    await expect(service.reorderReadyCardImages({
+      tradingCardVariantId: variant.id, orderedImageIds: [first.id, second.id], actor: "t", source: "MANUAL",
+    })).rejects.toThrow("exactly the current ready images")
+    await expect(service.reorderReadyCardImages({
+      tradingCardVariantId: variant.id, orderedImageIds: [first.id, second.id, "tcimg_not_real"], actor: "t", source: "MANUAL",
+    })).rejects.toThrow("exactly the current ready images")
+
+    const reordered = await service.reorderReadyCardImages({
+      tradingCardVariantId: variant.id, orderedImageIds: [third.id, first.id, second.id], actor: "t", source: "MANUAL",
+    })
+    expect(reordered.map((row: any) => row.id)).toEqual([third.id, first.id, second.id])
+    expect(reordered.map((row: any) => row.sort_order)).toEqual([0, 1, 2])
+
+    const audits = await service.listCardAuditEntries({ entity_id: variant.id, action: "IMAGE_REORDERED" })
+    expect(audits).toHaveLength(1)
+    expect(audits[0].new_value).toEqual({ order: [third.id, first.id, second.id] })
+  })
+
+  it("archives a ready image, excludes it from active results, and compacts remaining order", async () => {
+    const { variant } = await createVariant()
+    const first = await createReadyImage(variant.id, 0)
+    const second = await createReadyImage(variant.id, 1)
+
+    const archived = await service.archiveCardImage({
+      id: first.id, adminId: "admin_archiver", actor: "admin_archiver", source: "MANUAL",
+    })
+    expect(archived.status).toBe("ARCHIVED")
+    expect(archived.archived_by).toBe("admin_archiver")
+    expect(archived.archived_at).not.toBeNull()
+
+    const active = await service.listCardImagesForVariant({ tradingCardVariantId: variant.id })
+    expect(active.map((row: any) => row.id)).toEqual([second.id])
+    expect(active[0].sort_order).toBe(0)
+
+    const withArchived = await service.listCardImagesForVariant({ tradingCardVariantId: variant.id, includeArchived: true })
+    expect(withArchived.map((row: any) => row.id).sort()).toEqual([first.id, second.id].sort())
+  })
+
+  it("is idempotent when archiving an already-archived image and rejects archiving a non-ready image", async () => {
+    const { variant } = await createVariant()
+    const image = await createReadyImage(variant.id, 0)
+    const context = { adminId: "admin_test", actor: "admin_test", source: "MANUAL" }
+    const first = await service.archiveCardImage({ id: image.id, ...context })
+    const second = await service.archiveCardImage({ id: image.id, ...context })
+    expect(second.status).toBe("ARCHIVED")
+    expect(second.archived_at).toEqual(first.archived_at)
+
+    const pending = await service.createPendingCardImage(pendingInput(variant.id))
+    await expect(service.archiveCardImage({ id: pending.id, ...context })).rejects.toThrow("Only a ready image can be archived")
+  })
+
+  it("restores an archived image to the end of the ready order and rejects restoring a non-archived image", async () => {
+    const { variant } = await createVariant()
+    const first = await createReadyImage(variant.id, 0)
+    const second = await createReadyImage(variant.id, 1)
+    await service.archiveCardImage({ id: first.id, adminId: "admin_test", actor: "admin_test", source: "MANUAL" })
+
+    const restored = await service.restoreCardImage({ id: first.id, actor: "admin_test", source: "MANUAL" })
+    expect(restored.status).toBe("READY")
+    expect(restored.archived_at).toBeNull()
+    expect(restored.archived_by).toBeNull()
+    expect(restored.sort_order).toBe(1)
+
+    const active = await service.listCardImagesForVariant({ tradingCardVariantId: variant.id })
+    expect(active.map((row: any) => row.id)).toEqual([second.id, first.id])
+
+    await expect(service.restoreCardImage({
+      id: second.id, actor: "admin_test", source: "MANUAL",
+    })).rejects.toThrow("Only an archived image can be restored")
+  })
+
+  it("never automatically deletes or purges a card image", async () => {
+    const { variant } = await createVariant()
+    const image = await createReadyImage(variant.id, 0)
+    await service.archiveCardImage({ id: image.id, adminId: "admin_test", actor: "admin_test", source: "MANUAL" })
+    const row = await service.retrieveCardImage(image.id)
+    expect(row.deleted_at).toBeNull()
+  })
+
+  it("records safe, bounded audit data for image lifecycle events", async () => {
+    const { variant } = await createVariant()
+    const image = await service.createPendingCardImage(pendingInput(variant.id))
+    const audits = await service.listCardAuditEntries({ entity_id: image.id })
+    expect(audits).toHaveLength(1)
+    expect(audits[0].action).toBe("IMAGE_UPLOAD_REQUESTED")
+    const serialised = JSON.stringify(audits[0])
+    expect(serialised).not.toMatch(/presigned|accessKeyId|secretAccessKey|Authorization/i)
+    expect(serialised.length).toBeLessThan(2000)
+  })
+
+  it("derives a public URL from a base URL and object key without a stored credential", async () => {
+    const url = await service.deriveCardImagePublicUrl({
+      publicBaseUrl: "https://images.example.com", objectKey: "card-images/tcvar_1/tcimg_1/abc.jpg",
+    })
+    expect(url).toBe("https://images.example.com/card-images/tcvar_1/tcimg_1/abc.jpg")
+  })
+
+  it("archives the middle image of three and compacts the remainder", async () => {
+    const { variant } = await createVariant()
+    const first = await createReadyImage(variant.id, 0)
+    const second = await createReadyImage(variant.id, 1)
+    const third = await createReadyImage(variant.id, 2)
+
+    await service.archiveCardImage({ id: second.id, adminId: "admin_test", actor: "admin_test", source: "MANUAL" })
+
+    const active = await service.listCardImagesForVariant({ tradingCardVariantId: variant.id })
+    expect(active.map((row: any) => row.id)).toEqual([first.id, third.id])
+    expect(active.map((row: any) => row.sort_order)).toEqual([0, 1])
+  })
+
+  describe("generic CardImage mutations are blocked", () => {
+    it("rejects createCardImages, updateCardImages, deleteCardImages, softDeleteCardImages, restoreCardImages with NOT_ALLOWED", async () => {
+      await expect(service.createCardImages()).rejects.toMatchObject({ type: "not_allowed" })
+      await expect(service.updateCardImages()).rejects.toMatchObject({ type: "not_allowed" })
+      await expect(service.deleteCardImages()).rejects.toMatchObject({ type: "not_allowed" })
+      await expect(service.softDeleteCardImages()).rejects.toMatchObject({ type: "not_allowed" })
+      await expect(service.restoreCardImages()).rejects.toMatchObject({ type: "not_allowed" })
+    })
+
+    it("leaves the trading_card_image table untouched by blocked create/update/delete attempts", async () => {
+      const { variant } = await createVariant()
+      const image = await createReadyImage(variant.id, 0)
+      const before = rows(await pgConnection.raw(`select * from trading_card_image where id = ?`, [image.id]))[0]
+      const beforeCount = rows(await pgConnection.raw(`select count(*)::int as count from trading_card_image`))[0].count
+
+      await expect(service.createCardImages({
+        trading_card_variant_id: variant.id, status: "READY",
+      })).rejects.toThrow()
+      await expect(service.updateCardImages({ id: image.id, sort_order: 99 })).rejects.toThrow()
+      await expect(service.deleteCardImages(image.id)).rejects.toThrow()
+      await expect(service.softDeleteCardImages(image.id)).rejects.toThrow()
+
+      const after = rows(await pgConnection.raw(`select * from trading_card_image where id = ?`, [image.id]))[0]
+      const afterCount = rows(await pgConnection.raw(`select count(*)::int as count from trading_card_image`))[0].count
+      expect(after).toEqual(before)
+      expect(afterCount).toBe(beforeCount)
+    })
+
+    it("cannot be used to reassign a card image to a different variant", async () => {
+      const { variant } = await createVariant()
+      const { variant: otherVariant } = await createVariant()
+      const image = await createReadyImage(variant.id, 0)
+
+      await expect(service.updateCardImages({
+        id: image.id, trading_card_variant_id: otherVariant.id,
+      })).rejects.toThrow()
+
+      const row = await service.retrieveCardImage(image.id)
+      expect(row.trading_card_variant_id).toBe(variant.id)
+    })
+  })
+
+  describe("assertCardImageVariantOwnership with real persisted data", () => {
+    it("accepts same-variant access and rejects both a sibling variant and a variant under a different card", async () => {
+      const { card: cardA } = await createCard()
+      const variantA1Id = suffix()
+      const variantA1 = await service.createTradingCardVariants({
+        trading_card_id: cardA.id, condition: "NEAR_MINT", condition_source: "DEFAULTED",
+        finish: "HOLO", finish_confirmed: true, special_treatment: "NONE", special_treatment_confirmed: true,
+        sku: `OWN-A1-${variantA1Id.toUpperCase()}`, origin: "PULSE",
+      })
+      const variantA2Id = suffix()
+      const variantA2 = await service.createTradingCardVariants({
+        trading_card_id: cardA.id, condition: "LIGHTLY_PLAYED", condition_source: "DEFAULTED",
+        finish: "HOLO", finish_confirmed: true, special_treatment: "NONE", special_treatment_confirmed: true,
+        sku: `OWN-A2-${variantA2Id.toUpperCase()}`, origin: "PULSE",
+      })
+      const { card: cardB } = await createCard()
+      const variantBId = suffix()
+      const variantB = await service.createTradingCardVariants({
+        trading_card_id: cardB.id, condition: "NEAR_MINT", condition_source: "DEFAULTED",
+        finish: "HOLO", finish_confirmed: true, special_treatment: "NONE", special_treatment_confirmed: true,
+        sku: `OWN-B-${variantBId.toUpperCase()}`, origin: "PULSE",
+      })
+
+      const image = await service.createPendingCardImage(pendingInput(variantA1.id))
+
+      await expect(service.assertCardImageVariantOwnership({
+        imageVariantId: image.trading_card_variant_id, expectedVariantId: variantA1.id,
+      })).resolves.toBeUndefined()
+
+      await expect(service.assertCardImageVariantOwnership({
+        imageVariantId: image.trading_card_variant_id, expectedVariantId: variantA2.id,
+      })).rejects.toThrow("expected trading-card variant")
+
+      await expect(service.assertCardImageVariantOwnership({
+        imageVariantId: image.trading_card_variant_id, expectedVariantId: variantB.id,
+      })).rejects.toThrow("expected trading-card variant")
+    })
+  })
+
+  describe("contiguity under concurrency", () => {
+    async function readyOrders(variantId: string) {
+      const active = await service.listCardImagesForVariant({ tradingCardVariantId: variantId })
+      return active.map((row: any) => row.sort_order as number)
+    }
+
+    function expectContiguous(orders: number[], expectedLength: number) {
+      expect(orders).toHaveLength(expectedLength)
+      expect([...orders].sort((a, b) => a - b)).toEqual(Array.from({ length: expectedLength }, (_, i) => i))
+    }
+
+    it("keeps ready sort order contiguous under two concurrent full reorders of the same variant", async () => {
+      const { variant } = await createVariant()
+      const first = await createReadyImage(variant.id, 0)
+      const second = await createReadyImage(variant.id, 1)
+      const third = await createReadyImage(variant.id, 2)
+      const ids = [first.id, second.id, third.id]
+
+      await Promise.allSettled([
+        service.reorderReadyCardImages({
+          tradingCardVariantId: variant.id, orderedImageIds: [third.id, first.id, second.id], actor: "t", source: "MANUAL",
+        }),
+        service.reorderReadyCardImages({
+          tradingCardVariantId: variant.id, orderedImageIds: [second.id, third.id, first.id], actor: "t", source: "MANUAL",
+        }),
+      ])
+
+      const orders = await readyOrders(variant.id)
+      expectContiguous(orders, 3)
+      const active = await service.listCardImagesForVariant({ tradingCardVariantId: variant.id })
+      expect(active.map((row: any) => row.id).sort()).toEqual([...ids].sort())
+    })
+
+    it("keeps ready sort order contiguous when a reorder races an archive on the same variant", async () => {
+      const { variant } = await createVariant()
+      const first = await createReadyImage(variant.id, 0)
+      const second = await createReadyImage(variant.id, 1)
+      const third = await createReadyImage(variant.id, 2)
+
+      await Promise.allSettled([
+        service.reorderReadyCardImages({
+          tradingCardVariantId: variant.id, orderedImageIds: [third.id, first.id, second.id], actor: "t", source: "MANUAL",
+        }),
+        service.archiveCardImage({ id: second.id, adminId: "admin_test", actor: "admin_test", source: "MANUAL" }),
+      ])
+
+      const orders = await readyOrders(variant.id)
+      expect(orders.length === 2 || orders.length === 3).toBe(true)
+      expectContiguous(orders, orders.length)
+    })
+
+    it("keeps ready sort order contiguous when a restore races a reorder on the same variant", async () => {
+      const { variant } = await createVariant()
+      const first = await createReadyImage(variant.id, 0)
+      const second = await createReadyImage(variant.id, 1)
+      await service.archiveCardImage({ id: first.id, adminId: "admin_test", actor: "admin_test", source: "MANUAL" })
+
+      await Promise.allSettled([
+        service.restoreCardImage({ id: first.id, actor: "admin_test", source: "MANUAL" }),
+        service.reorderReadyCardImages({
+          tradingCardVariantId: variant.id, orderedImageIds: [second.id], actor: "t", source: "MANUAL",
+        }),
+      ])
+
+      const orders = await readyOrders(variant.id)
+      expect(orders.length === 1 || orders.length === 2).toBe(true)
+      expectContiguous(orders, orders.length)
+    })
+
+    it("assigns distinct contiguous sort orders to two concurrent restores on the same variant", async () => {
+      const { variant } = await createVariant()
+      const first = await createReadyImage(variant.id, 0)
+      const second = await createReadyImage(variant.id, 1)
+      await service.archiveCardImage({ id: first.id, adminId: "admin_test", actor: "admin_test", source: "MANUAL" })
+      await service.archiveCardImage({ id: second.id, adminId: "admin_test", actor: "admin_test", source: "MANUAL" })
+
+      const results = await Promise.all([
+        service.restoreCardImage({ id: first.id, actor: "admin_test", source: "MANUAL" }),
+        service.restoreCardImage({ id: second.id, actor: "admin_test", source: "MANUAL" }),
+      ])
+
+      const orders = results.map((row: any) => row.sort_order as number)
+      expect(new Set(orders).size).toBe(2)
+      const activeOrders = await readyOrders(variant.id)
+      expectContiguous(activeOrders, 2)
+    })
   })
 })
