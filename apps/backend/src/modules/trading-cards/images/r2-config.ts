@@ -49,8 +49,8 @@ const configSchema = z.object({
 
 const ACCOUNT_ID_PATTERN = /^[a-f0-9]{32}$/i
 const BUCKET_NAME_PATTERN = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/
-/** Cloudflare's default R2 S3 endpoint plus its documented jurisdiction-specific endpoints (EU, FIPS). */
-const ENDPOINT_HOST_PATTERN = /^([a-f0-9]{32})\.(eu\.|fips\.)?r2\.cloudflarestorage\.com$/i
+/** Cloudflare's default R2 S3 endpoint plus its documented jurisdiction-specific endpoints (EU, FedRAMP). */
+const ENDPOINT_HOST_PATTERN = /^([a-f0-9]{32})\.(eu\.|fedramp\.)?r2\.cloudflarestorage\.com$/i
 
 function assertBareHttpsOrigin(name: string, value: string): URL {
   let parsed: URL
@@ -72,6 +72,38 @@ function assertBareHttpsOrigin(name: string, value: string): URL {
     throw new MedusaError(MedusaError.Types.INVALID_DATA, `${name} must be a bare origin, without a path`)
   }
   return parsed
+}
+
+/**
+ * Exact snake_case option shape read by the real `@medusajs/medusa/file-s3`
+ * provider (`S3FileService`). There are no camelCase aliases in the actual
+ * provider implementation, so this pure function is the single place that
+ * builds the object handed to `defineConfig`'s file-provider `options` — it
+ * is unit-tested directly against a fake enabled config to prove the exact
+ * key names without booting Medusa or making a real R2 call.
+ */
+export interface R2FileProviderOptions {
+  file_url: string
+  access_key_id: string
+  secret_access_key: string
+  region: "auto"
+  bucket: string
+  endpoint: string
+  cache_control: string
+  acl: false
+}
+
+export function buildR2FileProviderOptions(config: R2EnabledConfig): R2FileProviderOptions {
+  return {
+    file_url: config.publicBaseUrl,
+    access_key_id: config.accessKeyId,
+    secret_access_key: config.secretAccessKey,
+    region: config.region,
+    bucket: config.bucketName,
+    endpoint: config.endpoint,
+    cache_control: config.cacheControl,
+    acl: config.acl,
+  }
 }
 
 export function resolveR2Config(env: R2Environment = process.env): ResolvedR2Config {
@@ -101,7 +133,7 @@ export function resolveR2Config(env: R2Environment = process.env): ResolvedR2Con
   if (!endpointMatch) {
     throw new MedusaError(
       MedusaError.Types.INVALID_DATA,
-      "R2_S3_ENDPOINT must be an account-scoped *.r2.cloudflarestorage.com endpoint, optionally jurisdiction-scoped (eu./fips.)"
+      "R2_S3_ENDPOINT must be an account-scoped *.r2.cloudflarestorage.com endpoint, optionally jurisdiction-scoped (eu./fedramp.)"
     )
   }
   if (endpointMatch[1].toLowerCase() !== parsed.R2_ACCOUNT_ID.toLowerCase()) {

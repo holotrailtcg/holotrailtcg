@@ -1,5 +1,5 @@
 import { loadEnv, defineConfig } from '@medusajs/framework/utils'
-import { resolveR2Config } from './src/modules/trading-cards/images/r2-config'
+import { resolveR2Config, buildR2FileProviderOptions } from './src/modules/trading-cards/images/r2-config'
 
 loadEnv(process.env.NODE_ENV || 'development', process.cwd())
 
@@ -46,16 +46,10 @@ module.exports = defineConfig({
                 {
                   resolve: "@medusajs/medusa/file-s3",
                   id: "r2",
-                  options: {
-                    fileUrl: r2Config.publicBaseUrl,
-                    accessKeyId: r2Config.accessKeyId,
-                    secretAccessKey: r2Config.secretAccessKey,
-                    region: r2Config.region,
-                    bucket: r2Config.bucketName,
-                    endpoint: r2Config.endpoint,
-                    cacheControl: r2Config.cacheControl,
-                    acl: r2Config.acl,
-                  },
+                  // Exact snake_case option names required by the real
+                  // S3FileService provider (see buildR2FileProviderOptions);
+                  // there are no camelCase aliases.
+                  options: buildR2FileProviderOptions(r2Config),
                 },
               ],
             },

@@ -1,4 +1,4 @@
-import { resolveR2Config } from "../r2-config"
+import { resolveR2Config, buildR2FileProviderOptions, type R2EnabledConfig } from "../r2-config"
 
 const FAKE_ACCOUNT_ID = "abcdef0123456789abcdef0123456789"
 
@@ -47,11 +47,29 @@ describe("resolveR2Config", () => {
     expect(config).toMatchObject({ enabled: true, endpoint: `https://${FAKE_ACCOUNT_ID}.eu.r2.cloudflarestorage.com` })
   })
 
-  it("accepts the FIPS jurisdiction-specific endpoint", () => {
+  it("accepts the FedRAMP jurisdiction-specific endpoint", () => {
     const config = resolveR2Config({
-      ...enabledEnv(), R2_S3_ENDPOINT: `https://${FAKE_ACCOUNT_ID}.fips.r2.cloudflarestorage.com`,
+      ...enabledEnv(), R2_S3_ENDPOINT: `https://${FAKE_ACCOUNT_ID}.fedramp.r2.cloudflarestorage.com`,
     })
-    expect(config).toMatchObject({ enabled: true, endpoint: `https://${FAKE_ACCOUNT_ID}.fips.r2.cloudflarestorage.com` })
+    expect(config).toMatchObject({ enabled: true, endpoint: `https://${FAKE_ACCOUNT_ID}.fedramp.r2.cloudflarestorage.com` })
+  })
+
+  it("rejects the FIPS endpoint, which R2 does not support", () => {
+    expect(() => resolveR2Config({
+      ...enabledEnv(), R2_S3_ENDPOINT: `https://${FAKE_ACCOUNT_ID}.fips.r2.cloudflarestorage.com`,
+    })).toThrow(/R2_S3_ENDPOINT/)
+  })
+
+  it("rejects a malformed hostname with an extra subdomain", () => {
+    expect(() => resolveR2Config({
+      ...enabledEnv(), R2_S3_ENDPOINT: `https://extra.${FAKE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    })).toThrow(/R2_S3_ENDPOINT/)
+  })
+
+  it("rejects a hostname missing the .r2.cloudflarestorage.com suffix", () => {
+    expect(() => resolveR2Config({
+      ...enabledEnv(), R2_S3_ENDPOINT: `https://${FAKE_ACCOUNT_ID}.cloudflarestorage.com`,
+    })).toThrow(/R2_S3_ENDPOINT/)
   })
 
   it.each([
@@ -121,5 +139,45 @@ describe("resolveR2Config", () => {
     } catch (error) {
       expect(String((error as Error).message)).not.toContain("super-secret-marker-should-not-leak")
     }
+  })
+})
+
+describe("buildR2FileProviderOptions", () => {
+  const fakeEnabledConfig: R2EnabledConfig = {
+    enabled: true,
+    accountId: FAKE_ACCOUNT_ID,
+    accessKeyId: "test-only-access-key-id",
+    secretAccessKey: "test-only-secret-access-key",
+    bucketName: "holo-trail-card-images-test",
+    endpoint: `https://${FAKE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    publicBaseUrl: "https://images.test.holotrailtcg.invalid",
+    region: "auto",
+    cacheControl: "public, max-age=31536000, immutable",
+    acl: false,
+  }
+
+  it("builds the exact snake_case option shape the real S3FileService provider reads", () => {
+    const options = buildR2FileProviderOptions(fakeEnabledConfig)
+    expect(options).toEqual({
+      file_url: "https://images.test.holotrailtcg.invalid",
+      access_key_id: "test-only-access-key-id",
+      secret_access_key: "test-only-secret-access-key",
+      region: "auto",
+      bucket: "holo-trail-card-images-test",
+      endpoint: `https://${FAKE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      cache_control: "public, max-age=31536000, immutable",
+      acl: false,
+    })
+  })
+
+  it("never produces camelCase option keys that the real provider would silently ignore", () => {
+    const options = buildR2FileProviderOptions(fakeEnabledConfig) as unknown as Record<string, unknown>
+    expect(options).not.toHaveProperty("fileUrl")
+    expect(options).not.toHaveProperty("accessKeyId")
+    expect(options).not.toHaveProperty("secretAccessKey")
+    expect(options).not.toHaveProperty("cacheControl")
+    expect(Object.keys(options).sort()).toEqual(
+      ["access_key_id", "acl", "bucket", "cache_control", "endpoint", "file_url", "region", "secret_access_key"].sort()
+    )
   })
 })
