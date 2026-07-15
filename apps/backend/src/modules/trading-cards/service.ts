@@ -1081,7 +1081,17 @@ class TradingCardsModuleService extends MedusaService({
       key: finalObjectKey, body: result.buffer, contentType: result.mimeType, contentLength: result.byteSize,
     })
 
-    return this.manager_.transactional(async (manager) => {
+    // The transaction below must never throw for an *expected* outcome
+    // (expiry) once it has already written that outcome's transition —
+    // a thrown error rolls back everything in the same transaction,
+    // including the EXPIRED write we just made. Instead it returns a
+    // structured outcome; the public error (if any) is thrown only after
+    // the transaction has committed, exactly like the pre-fetch expiry
+    // check above (via `performTerminalTransition`) already does.
+    const outcome = await this.manager_.transactional(async (manager): Promise<
+      | { kind: "EXPIRED" }
+      | { kind: "DUPLICATE" | "READY"; row: Record<string, unknown> }
+    > => {
       await this.lockCardImageVariant(manager, variantId)
       const [locked] = await manager.execute<Record<string, unknown>>(
         `select * from trading_card_image where id = ? and deleted_at is null for update`, [input.id]
@@ -1094,7 +1104,7 @@ class TradingCardsModuleService extends MedusaService({
           actor: input.actor, source: input.source, reason: input.reason,
           id: input.id, currentStatus: locked.status as string, target: "EXPIRED", action: AUDIT_ACTION.IMAGE_UPLOAD_EXPIRED,
         })
-        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This upload window has expired")
+        return { kind: "EXPIRED" }
       }
 
       const [duplicate] = await manager.execute<Record<string, unknown>>(
@@ -1104,11 +1114,12 @@ class TradingCardsModuleService extends MedusaService({
         [variantId, IMAGE_STATUS.READY, result.sha256]
       )
       if (duplicate) {
-        return this.transitionPendingCardImage(manager, {
+        const row = await this.transitionPendingCardImage(manager, {
           actor: input.actor, source: input.source, reason: input.reason,
           id: input.id, currentStatus: locked.status as string, target: "DUPLICATE", action: AUDIT_ACTION.IMAGE_DUPLICATE_DETECTED,
           extraNewValue: { duplicateOfImageId: duplicate.id, ...sizeMismatch },
         })
+        return { kind: "DUPLICATE", row: row as Record<string, unknown> }
       }
 
       const [{ count }] = await manager.execute<{ count: string }>(
@@ -1136,8 +1147,13 @@ class TradingCardsModuleService extends MedusaService({
         },
       })
       const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_image where id = ?`, [input.id])
-      return saved
+      return { kind: "READY", row: saved }
     })
+
+    if (outcome.kind === "EXPIRED") {
+      throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This upload window has expired")
+    }
+    return outcome.row
   }
 }
 
