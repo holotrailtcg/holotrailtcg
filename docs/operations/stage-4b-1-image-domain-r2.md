@@ -49,6 +49,25 @@ each exactly once. The service applies the new order in two phases (a
 disjoint high placeholder pass, then the final pass) so a mid-transaction swap
 can never collide with the unique active-sort-order index.
 
+**The database enforces uniqueness of `READY` sort order per variant; it does
+not enforce contiguity.** `IDX_trading_card_image_ready_sort_order` only
+prevents two `READY` images from sharing the same position — it does not stop
+a gapped sequence such as `0, 2, 3`. Contiguous `0..n-1` ordering is a service
+guarantee, not a database one: `reorderReadyCardImages` always replaces the
+full `READY` set, `archiveCardImage` compacts the remaining `READY` images
+back to `0..n-1`, and `restoreCardImage` appends at the current count. Every
+one of these methods calls `lockCardImageVariant` (`select ... for update` on
+the owning `trading_card_variant` row) before touching any `CardImage` row for
+that variant, so concurrent mutations on the same variant serialise instead of
+racing on sort-order bookkeeping. Callers cannot bypass this guarantee because
+the generic generated `CardImage` mutation methods
+(`createCardImages`/`updateCardImages`/`deleteCardImages`/`softDeleteCardImages`/`restoreCardImages`)
+are all blocked with `NOT_ALLOWED` (see "Generic mutations are blocked"
+below) — the four domain methods above are the only way to write a
+`CardImage` row, so contiguity cannot be broken from outside the service
+layer. No database trigger enforces contiguity, and none is planned; it is a
+deliberate service-layer guarantee backed by row locking.
+
 ## Archive and restore
 
 `archiveCardImage` is idempotent on an already-archived image (returns the
@@ -63,6 +82,48 @@ variant serialise instead of racing on sort-order bookkeeping.
 Archived images are never included in `listCardImagesForVariant` unless the
 caller explicitly asks for `includeArchived: true`.
 
+## Lifecycle and key/metadata constraints (database-enforced)
+
+The `CK_trading_card_image_lifecycle_keys` CHECK constraint on
+`trading_card_image` enforces, per `status`, which of
+`staging_object_key`/`final_object_key`/`confirmed_mime_type`/`confirmed_byte_size`/
+`width`/`height`/`sha256_hash` must be null vs non-null:
+
+- `PENDING`: `staging_object_key` set; `final_object_key` and every confirmed
+  metadata field null. No confirmation has happened yet.
+- `READY` and `ARCHIVED`: `staging_object_key` null; `final_object_key` and
+  every confirmed metadata field set. Both states represent an image that
+  completed the (not yet built) confirmation step; `ARCHIVED` retains its
+  `READY`-time metadata rather than clearing it, since archiving is always
+  reversible back to `READY`.
+- `DUPLICATE`, `REJECTED`, `EXPIRED`: terminal non-active outcomes of the
+  confirmation step that never reached `READY`, so neither object key nor any
+  confirmed metadata field is retained — both are null, by the same rule
+  applied uniformly to all three statuses.
+
+`CK_trading_card_image_archived_consistency` (unchanged from the original
+Stage 4B.1 migration) separately ties `archived_at`/`archived_by` presence to
+`status = 'ARCHIVED'`.
+
+Contiguity of `READY` sort order — "no active ready-order position" gaps — is
+not enforced at the CHECK-constraint level. That is unnecessary: the existing
+partial unique index `IDX_trading_card_image_ready_sort_order` is scoped to
+`status = 'READY'` only, so an `ARCHIVED` row is excluded from it by
+construction, and the service layer (see "Ordering and primary image" above)
+guarantees contiguity by construction.
+
+## Generic mutations are blocked
+
+`TradingCardsModuleService` blocks every generated bulk mutation method for
+`CardImage` — `createCardImages`, `updateCardImages`, `deleteCardImages`,
+`softDeleteCardImages`, and `restoreCardImages` — each throwing
+`MedusaError.Types.NOT_ALLOWED`. Generated read methods
+(`listCardImages`, `retrieveCardImage`, etc.) are untouched. The only
+legitimate ways to write a `CardImage` row are the explicit domain methods:
+`createPendingCardImage`, `reorderReadyCardImages`, `archiveCardImage`, and
+`restoreCardImage` (singular — distinct from the blocked generated
+`restoreCardImages`).
+
 ## R2 configuration
 
 `resolveR2Config` (`apps/backend/src/modules/trading-cards/images/r2-config.ts`)
@@ -72,9 +133,11 @@ enabled, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
 `R2_BUCKET_NAME`, `R2_S3_ENDPOINT`, and `R2_PUBLIC_BASE_URL` are all required;
 the endpoint and public URL must be bare HTTPS origins with no embedded
 credentials, and the endpoint's account-ID segment must match
-`R2_ACCOUNT_ID`. Cloudflare's default and jurisdiction-specific
-(`eu.`/`fips.`) R2 S3 endpoints are both accepted. Every failure message names
-only the offending variable, never a secret value.
+`R2_ACCOUNT_ID`. Cloudflare's standard, EU (`eu.`), and FedRAMP (`fedramp.`)
+R2 S3 endpoints are all accepted; the FIPS (`fips.`) endpoint is explicitly
+**not** supported (Cloudflare R2 has no FIPS jurisdiction) and is rejected.
+Every failure message names only the offending variable, never a secret
+value.
 
 `medusa-config.ts` calls `resolveR2Config` once at boot. When enabled, it
 registers the official `@medusajs/medusa/file-s3` provider (backed by
@@ -82,6 +145,16 @@ registers the official `@medusajs/medusa/file-s3` provider (backed by
 `region: "auto"`, `acl: false`, and a one-year immutable `cacheControl`. When
 disabled, no file-module override is registered at all, so Medusa's default
 local file behaviour is unchanged.
+
+The real `S3FileService` provider reads its options using exact snake_case
+keys (`file_url`, `access_key_id`, `secret_access_key`, `region`, `bucket`,
+`endpoint`, `cache_control`, `acl`) — there are no camelCase aliases, so a
+camelCase options object is silently ignored rather than rejected.
+`buildR2FileProviderOptions` (exported from `r2-config.ts`) is the single
+pure function that builds this exact snake_case shape from a resolved
+`R2EnabledConfig`; `medusa-config.ts` calls it directly, and it is
+unit-tested on its own so a future accidental camelCase regression fails a
+fast unit test rather than only failing silently against real R2.
 
 ## Credential storage
 
