@@ -170,7 +170,7 @@ value.
 | `R2_ACCESS_KEY_ID` | Backend / secret | Backend `.env`; backend template | Yes | Non-empty; never logged |
 | `R2_SECRET_ACCESS_KEY` | Backend / secret | Backend `.env`; backend template | Yes | Non-empty; never logged |
 | `R2_BUCKET_NAME` | Backend / config | Backend `.env`; backend template | Yes | Valid S3-style bucket name; the listing-image bucket only |
-| `R2_S3_ENDPOINT` | Backend / config | Backend `.env`; backend template | Yes | Bare `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com`, or the jurisdiction-specific `eu.`/`fips.` variant; no credentials, query, fragment, or path |
+| `R2_S3_ENDPOINT` | Backend / config | Backend `.env`; backend template | Yes | Bare `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com`, or the jurisdiction-specific `eu.`/`fedramp.` variant; no credentials, query, fragment, or path |
 | `R2_PUBLIC_BASE_URL` | Backend / config | Backend `.env`; backend template | Yes | Bare https origin; no credentials, query, fragment, or path; used only to derive public image URLs, never stored per-row |
 
 Getting the R2 credentials:
