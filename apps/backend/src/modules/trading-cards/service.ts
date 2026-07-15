@@ -146,6 +146,20 @@ class TradingCardsModuleService extends MedusaService({
   softDeleteTcgDexEnrichmentAttempts = async (): Promise<never> => this.lifecycleMutationBlocked("Enrichment diagnostic deletion")
   restoreTcgDexEnrichmentAttempts = async (): Promise<never> => this.lifecycleMutationBlocked("Enrichment diagnostic restoration")
 
+  // CardImage rows may only be mutated through the explicit domain methods
+  // below (createPendingCardImage/reorderReadyCardImages/archiveCardImage/
+  // restoreCardImage), which lock the owning variant row and keep READY
+  // sort order contiguous. The generated bulk mutation methods would let a
+  // caller bypass that locking and the lifecycle-key CHECK constraint's
+  // implicit workflow entirely, so every one of them is blocked here; only
+  // the generated read methods (listCardImages/retrieveCardImage/etc.)
+  // remain usable.
+  createCardImages = async (): Promise<never> => this.lifecycleMutationBlocked("Card image creation")
+  updateCardImages = async (): Promise<never> => this.lifecycleMutationBlocked("Card image updates")
+  deleteCardImages = async (): Promise<never> => this.lifecycleMutationBlocked("Card image deletion")
+  softDeleteCardImages = async (): Promise<never> => this.lifecycleMutationBlocked("Card image deletion")
+  restoreCardImages = async (): Promise<never> => this.lifecycleMutationBlocked("Card image restoration")
+
   async listTcgdexAdminReviews(query: ReviewListQuery) {
     return listTcgdexReviews(this.manager_, query)
   }
