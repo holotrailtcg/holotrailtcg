@@ -8,7 +8,8 @@ import {
   NEWSLETTER_CONFIRMATION_EMAIL_SENDER_KEY,
 } from "../../../src/api/store/newsletter/shared/dependencies"
 import { TCGDEX_ADMIN_CLIENT_KEY } from "../../../src/api/admin/tcgdex/dependencies"
-import { FakeRecaptchaVerifier, FakeConfirmationEmailSender, FakeTcgDexClient } from "./fakes"
+import { R2_IMAGE_STORAGE_CLIENT_KEY } from "../../../src/api/admin/trading-cards/dependencies"
+import { FakeRecaptchaVerifier, FakeConfirmationEmailSender, FakeTcgDexClient, FakeR2ImageStorageClient } from "./fakes"
 
 /**
  * HTTP integration test bootstrap for the public newsletter routes
@@ -81,6 +82,7 @@ export interface NewsletterHttpTestApp {
   recaptcha: FakeRecaptchaVerifier
   emailSender: FakeConfirmationEmailSender
   tcgdexClient: FakeTcgDexClient
+  r2ImageClient: FakeR2ImageStorageClient
   container: MedusaContainer
   close: () => Promise<void>
   /** POST /store/newsletter/subscribe with an optional client-address override header. */
@@ -89,6 +91,10 @@ export interface NewsletterHttpTestApp {
   getConfirm: (token: string, clientAddress?: string) => Promise<Response>
   /** GET /store/newsletter/unsubscribe?token=... */
   getUnsubscribe: (token: string, clientAddress?: string) => Promise<Response>
+  /** POST /admin/trading-cards/variants/:variantId/images/upload */
+  postBeginUpload: (variantId: string, body: unknown, authToken?: string) => Promise<Response>
+  /** POST /admin/trading-cards/images/:imageId/confirm */
+  postConfirmUpload: (imageId: string, authToken?: string) => Promise<Response>
 }
 
 /**
@@ -151,9 +157,11 @@ export async function bootstrapNewsletterHttpTestApp(): Promise<NewsletterHttpTe
   const recaptcha = new FakeRecaptchaVerifier()
   const emailSender = new FakeConfirmationEmailSender()
   const tcgdexClient = new FakeTcgDexClient()
+  const r2ImageClient = new FakeR2ImageStorageClient()
   container.register(NEWSLETTER_RECAPTCHA_VERIFIER_KEY, asValue(recaptcha))
   container.register(NEWSLETTER_CONFIRMATION_EMAIL_SENDER_KEY, asValue(emailSender))
   container.register(TCGDEX_ADMIN_CLIENT_KEY, asValue(tcgdexClient))
+  container.register(R2_IMAGE_STORAGE_CLIENT_KEY, asValue(r2ImageClient))
 
   const publishableApiKey = await createTestPublishableApiKey(container)
 
@@ -171,6 +179,7 @@ export async function bootstrapNewsletterHttpTestApp(): Promise<NewsletterHttpTe
     recaptcha,
     emailSender,
     tcgdexClient,
+    r2ImageClient,
     container,
     close: async () => {
       await publishableApiKey.remove()
@@ -192,6 +201,20 @@ export async function bootstrapNewsletterHttpTestApp(): Promise<NewsletterHttpTe
     getUnsubscribe: (token, clientAddress) =>
       fetch(`${baseUrl}/store/newsletter/unsubscribe?token=${encodeURIComponent(token)}`, {
         headers: withHeaders(clientAddress ?? nextTestClientAddress()),
+      }),
+    postBeginUpload: (variantId, body, authToken) =>
+      fetch(`${baseUrl}/admin/trading-cards/variants/${encodeURIComponent(variantId)}/images/upload`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify(body),
+      }),
+    postConfirmUpload: (imageId, authToken) =>
+      fetch(`${baseUrl}/admin/trading-cards/images/${encodeURIComponent(imageId)}/confirm`, {
+        method: "POST",
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
       }),
   }
 }
