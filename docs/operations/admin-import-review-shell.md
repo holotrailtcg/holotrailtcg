@@ -6,6 +6,11 @@ review API (see
 four-step import shell so the whole import journey is visible, even though
 two of the four steps are not connected yet.
 
+Stage 4A.4.3 connects the single-card review page's Approve, Reject, Apply
+and Retry actions to the write routes added in that same stage. See
+[Review actions](#review-actions) below; the rest of this document is
+unchanged from Stage 4A.4.2.
+
 ## Pages
 
 - `/app/imports` — overview of the four steps (Upload, Sync with TCGdex,
@@ -26,18 +31,56 @@ two of the four steps are not connected yet.
 Step 3 (assign card images) has no page yet — there is no image-assignment
 backend to connect it to.
 
+## Review actions
+
+The single-card review page (`/app/imports/review/:proposalId`) now offers
+Approve, Reject, Apply and Retry, gated by the proposal's current lifecycle
+status so the UI can never offer an action the backend would reject:
+
+| Status | Buttons shown |
+| --- | --- |
+| `PENDING` | Approve, Reject, Retry |
+| `APPROVED` | Apply, Retry |
+| `REJECTED` | Retry |
+| `APPLIED` | Retry |
+| `SUPERSEDED` | none |
+
+This mapping lives in `visibleReviewActions`
+(`src/admin/components/imports/review-actions.ts`), a pure function tested
+independently of rendering (`__tests__/review-actions.unit.spec.ts`) so the
+button rules stay correct even as the page around them changes.
+
+Reject and Apply ask for confirmation first, using Medusa UI's `usePrompt`
+("Reject this match?" / "Apply these card details?"). Reject also shows an
+optional, 300-character-bounded reason box, sent as `{ reason }` only when
+non-empty. Approve and Retry act immediately — Approve because rejecting is
+the safer default to protect, Retry because it never changes anything by
+itself (it only records what TCGdex currently says).
+
+Every action uses `@tanstack/react-query`'s `useMutation`. On success it
+shows a Medusa UI toast and invalidates the `tcgdex-review`,
+`tcgdex-reviews` and `tcgdex-attempts` query keys so the detail page, the
+review list and the attempts list all refresh. On failure it shows a short,
+static toast message (for example, "This match could not be rejected.
+Please try again.") — never the raw response body — and leaves the page
+exactly as it was.
+
+Retry's success toast reflects the outcome TCGdex actually returned (for
+example, "TCGdex could not find this card." for `NO_MATCH`), read from the
+retry route's `{ outcome, review | attempt }` response.
+
 ## What is honestly not connected
 
 - Step 1 (upload) and step 3 (assign images) are not built. The Admin pages
   say so; they do not collect input that goes nowhere.
-- The "Approve" and "Reject" buttons on the single-card review view are
-  shown disabled with a "Not available yet" tooltip. No write endpoint
-  exists yet (see the deferred work in
-  [tcgdex-admin-review-api.md](tcgdex-admin-review-api.md)), so these
-  buttons make no network call.
-- The "Not matched" (attempts) tab is read-only. There is no per-attempt
-  detail view, retry, or resolve action, matching the read-only attempts
-  API.
+- The "Ignore" button next to Approve/Reject/Apply/Retry is shown disabled
+  with a "Not connected" tooltip. There is no ignore route or service
+  method yet; the button makes no network call.
+- The "Not matched" (attempts) tab is still read-only — there is no
+  per-attempt detail view or resolve action, so a trading card that has
+  only ever produced attempts (never a matched proposal) has no Retry
+  button anywhere in this UI yet. Retry is reachable only from a review
+  detail page, which requires an existing proposal.
 
 ## Styling
 

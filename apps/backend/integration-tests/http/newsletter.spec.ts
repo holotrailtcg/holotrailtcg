@@ -4,6 +4,7 @@ import { NEWSLETTER_MODULE } from "../../src/modules/newsletter"
 import type NewsletterModuleService from "../../src/modules/newsletter/service"
 import { TRADING_CARDS_MODULE } from "../../src/modules/trading-cards"
 import type TradingCardsModuleService from "../../src/modules/trading-cards/service"
+import { TCGDEX_ERROR_CODE, TcgDexError } from "../../src/modules/trading-cards/tcgdex"
 import { createTradingCardForProductWorkflow } from "../../src/workflows/trading-cards/create-trading-card-for-product"
 import { createVariantForProductVariantWorkflow } from "../../src/workflows/trading-cards/create-variant-for-product-variant"
 import {
@@ -760,6 +761,26 @@ describe("TCGdex Admin review API", () => {
     headers: authenticated ? { authorization: `Bearer ${adminToken}` } : {},
   })
 
+  const postAdmin = (path: string, body?: unknown, authenticated = true) => fetch(`${app.baseUrl}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(authenticated ? { authorization: `Bearer ${adminToken}` } : {}),
+    },
+    body: JSON.stringify(body ?? {}),
+  })
+
+  function minimalTcgDexCard(input: { id: string; setId: string; localId: string; name?: string }) {
+    return {
+      category: "Pokemon",
+      id: input.id,
+      localId: input.localId,
+      name: input.name ?? "Fetched from TCGdex",
+      set: { id: input.setId, name: "Fetched set" },
+      variants: { normal: true, reverse: false, holo: false, firstEdition: false },
+    }
+  }
+
   async function createCardFixture(input: {
     marker: string
     cardName?: string
@@ -986,6 +1007,148 @@ describe("TCGdex Admin review API", () => {
     const serialized = JSON.stringify(await response.json())
     expect(serialized).toContain("The request parameters are invalid.")
     expect(serialized).not.toMatch(/Zod|invalid_type|NaN|stack|expected/i)
+  })
+
+  describe("review actions", () => {
+    it("requires Admin authentication for every write route", async () => {
+      const fixture = await createReview({ marker: uniqueMarker("auth") })
+      const responses = await Promise.all([
+        postAdmin(`/admin/tcgdex/reviews/${fixture.proposal.id}/approve`, undefined, false),
+        postAdmin(`/admin/tcgdex/reviews/${fixture.proposal.id}/reject`, undefined, false),
+        postAdmin(`/admin/tcgdex/reviews/${fixture.proposal.id}/apply`, undefined, false),
+        postAdmin(`/admin/tcgdex/cards/${fixture.card.id}/retry`, undefined, false),
+      ])
+      expect(responses.map((response) => response.status)).toEqual([401, 401, 401, 401])
+    })
+
+    it("approves a pending proposal, attributes the authenticated actor, and is idempotent", async () => {
+      const fixture = await createReview({ marker: uniqueMarker("approve") })
+      const response = await postAdmin(`/admin/tcgdex/reviews/${fixture.proposal.id}/approve`)
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      expect(body.review).toMatchObject({ review_status: "APPROVED", reviewer_id: "user_tcgdex_admin_http_test" })
+      expect(body.review.audit_history[0]).toMatchObject({
+        action: "TCGDEX_ENRICHMENT_APPROVED", actor: "user_tcgdex_admin_http_test",
+      })
+
+      const repeat = await postAdmin(`/admin/tcgdex/reviews/${fixture.proposal.id}/approve`)
+      expect(repeat.status).toBe(200)
+      expect((await repeat.json()).review.review_status).toBe("APPROVED")
+    })
+
+    it("rejects a pending proposal with a bounded reason", async () => {
+      const fixture = await createReview({ marker: uniqueMarker("reject") })
+      const response = await postAdmin(`/admin/tcgdex/reviews/${fixture.proposal.id}/reject`, { reason: "Wrong illustration" })
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      expect(body.review.review_status).toBe("REJECTED")
+    })
+
+    it("rejects an over-length reason with simple safe text", async () => {
+      const fixture = await createReview({ marker: uniqueMarker("reject-invalid") })
+      const response = await postAdmin(`/admin/tcgdex/reviews/${fixture.proposal.id}/reject`, { reason: "x".repeat(301) })
+      expect(response.status).toBe(400)
+      const serialized = JSON.stringify(await response.json())
+      expect(serialized).toContain("The request parameters are invalid.")
+      expect(serialized).not.toMatch(/Zod|invalid_type|stack/i)
+    })
+
+    it("applies an approved proposal, ignoring any browser-supplied enrichment data", async () => {
+      const fixture = await createReview({ marker: uniqueMarker("apply"), status: "APPROVED" })
+      const response = await postAdmin(`/admin/tcgdex/reviews/${fixture.proposal.id}/apply`, {
+        enrichment: { name: "Attacker-supplied name" }, name: "Attacker-supplied name",
+      })
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      expect(body.review.review_status).toBe("APPLIED")
+
+      const cards = app.container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
+      const [savedCard] = await cards.listTradingCards({ id: fixture.card.id })
+      expect(savedCard.name).toBe(body.review.snapshot.name)
+      expect(savedCard.name).not.toBe("Attacker-supplied name")
+    })
+
+    it("refuses to apply a proposal that is not approved", async () => {
+      const fixture = await createReview({ marker: uniqueMarker("apply-invalid") })
+      const response = await postAdmin(`/admin/tcgdex/reviews/${fixture.proposal.id}/apply`)
+      expect(response.status).toBe(400)
+    })
+
+    it("retries a trading card and persists a matched proposal using only trusted, database-held identity", async () => {
+      const marker = uniqueMarker("retry-match")
+      const fixture = await createCardFixture({ marker, cardNumber: "010/198" })
+      const callsBefore = app.tcgdexClient.calls.length
+      app.tcgdexClient.enqueue(minimalTcgDexCard({
+        id: `retry-card-${marker}`, setId: fixture.set.provider_set_code, localId: "010",
+        name: `Retried ${marker}`,
+      }))
+
+      const response = await postAdmin(`/admin/tcgdex/cards/${fixture.card.id}/retry`)
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      expect(body.outcome).toBe("MATCHED")
+      expect(body.review).toMatchObject({
+        review_status: "PENDING",
+        trading_card: expect.objectContaining({ id: fixture.card.id }),
+      })
+      expect(app.tcgdexClient.calls.slice(callsBefore)).toEqual([
+        expect.objectContaining({ operation: "getCardBySetAndLocalId", setId: fixture.set.provider_set_code, localId: "010/198" }),
+      ])
+      const serialized = JSON.stringify(body)
+      expect(serialized).not.toMatch(/snapshot_fingerprint|diagnostic_fingerprint|old_value|new_value|deleted_at/)
+    })
+
+    it("retries a trading card and persists a safe diagnostic attempt when TCGdex has no match", async () => {
+      const marker = uniqueMarker("retry-no-match")
+      const fixture = await createCardFixture({ marker, cardNumber: "011/198" })
+      app.tcgdexClient.enqueueError(new TcgDexError({ code: TCGDEX_ERROR_CODE.NOT_FOUND, operation: "get-card-by-set-and-local-id", message: "not found" }))
+
+      const response = await postAdmin(`/admin/tcgdex/cards/${fixture.card.id}/retry`)
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      expect(body.outcome).toBe("NO_MATCH")
+      expect(body.attempt).toMatchObject({ outcome: "NO_MATCH", trading_card: expect.objectContaining({ id: fixture.card.id }) })
+      const serialized = JSON.stringify(body)
+      expect(serialized).not.toMatch(/message|stack|diagnostic_fingerprint/i)
+    })
+
+    it("retries a trading card without a trusted set identity and records a safe diagnostic instead of guessing", async () => {
+      const marker = uniqueMarker("retry-no-set")
+      const cards = app.container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
+      // A whitespace-only `provider_set_code` trims to empty, so the matcher
+      // treats it as an invalid identity rather than guessing. The
+      // whitespace pattern is derived from `marker` (space/tab per
+      // character) so the DB's (game, language, provider_set_code) unique
+      // index never collides with another whitespace-only row left behind
+      // by an earlier run against this persistent test database.
+      const providerSetCode = [...marker].map((character, index) => ((character.charCodeAt(0) + index) % 2 === 0 ? " " : "\t")).join("")
+      const set = await cards.createCardSets({
+        game: "POKEMON", language: "EN", display_name: `No set code ${marker}`, provider_set_code: providerSetCode,
+      })
+      const card = await cards.createTradingCards({
+        card_set_id: set.id, name: `No set code card ${marker}`, search_name: "no set code",
+        card_number: "012/198", card_number_normalised: "012/198", origin: "MANUAL",
+      })
+      const callsBefore = app.tcgdexClient.calls.length
+
+      const response = await postAdmin(`/admin/tcgdex/cards/${card.id}/retry`)
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      expect(body.outcome).toBe("INVALID_LOCAL_IDENTITY")
+      expect(app.tcgdexClient.calls.length).toBe(callsBefore)
+    })
+
+    it("returns a safe not-found response for approve, reject, apply and retry on unknown IDs", async () => {
+      const responses = await Promise.all([
+        postAdmin("/admin/tcgdex/reviews/tcep_missing/approve"),
+        postAdmin("/admin/tcgdex/reviews/tcep_missing/reject"),
+        postAdmin("/admin/tcgdex/reviews/tcep_missing/apply"),
+        postAdmin("/admin/tcgdex/cards/tcard_missing/retry"),
+      ])
+      for (const response of responses) {
+        expect(response.status).toBe(404)
+      }
+    })
   })
 
   it("leaves the GB storefront newsletter route behaviour unchanged", async () => {

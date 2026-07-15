@@ -14,11 +14,14 @@ import {
   type CardLanguage, type ConditionSource, type ExternalProvider, type RecordOrigin, type SpecialTreatment,
   EXTERNAL_REFERENCE_PROVENANCE, type ExternalReferenceProvenance,
 } from "./types"
-import type { TcgDexMatchResult } from "./tcgdex/matching-types"
+import type { TcgDexMatchInput, TcgDexMatchResult } from "./tcgdex/matching-types"
+import type { TcgDexLookupDependency } from "./tcgdex/matching"
+import { matchTcgdexCard } from "./tcgdex/matching"
 import { auditContextSchema, canonicalSnapshot, diagnosticFingerprint, enrichmentSnapshotSchema, providerIdentifierSchema, snapshotFingerprint, tcgdexMatchResultSchema, tradingCardIdSchema } from "./tcgdex/persistence-validation"
 import {
   listTcgdexAttempts,
   listTcgdexReviews,
+  retrieveTcgdexAttempt,
   retrieveTcgdexReview,
   type AttemptListQuery,
   type ReviewListQuery,
@@ -132,6 +135,10 @@ class TradingCardsModuleService extends MedusaService({
 
   async listTcgdexAdminAttempts(query: AttemptListQuery) {
     return listTcgdexAttempts(this.manager_, query)
+  }
+
+  async retrieveTcgdexAdminAttempt(attemptId: string) {
+    return retrieveTcgdexAttempt(this.manager_, attemptId)
   }
 
   updateCardAuditEntries = async (): Promise<never> => {
@@ -258,6 +265,54 @@ class TradingCardsModuleService extends MedusaService({
       await this.writeAudit(manager, { ...input, entityType: "ENRICHMENT_PROPOSAL", entityId: id, action: "TCGDEX_ENRICHMENT_RECORDED", newValue: { proposalId: id, provider: "TCGDEX", providerCardId: snapshot.providerCardId, providerSetId: snapshot.providerSetId, matchSource: result.source, matchOutcome: "MATCHED", reviewStatus: "PENDING" } })
       return (await manager.execute<Record<string, unknown>>(`select * from trading_card_tcgdex_enrichment_proposal where id = ?`, [id]))[0]
     })
+  }
+
+  /**
+   * Re-runs the Stage 4A.2 matcher for a trading card using only trusted,
+   * database-held identity: a card-set TCGdex set code, plus any
+   * TRUSTED_MANUAL external reference recorded for the set or the card
+   * itself. Never accepts a provider identifier from the caller. The
+   * network call happens outside any transaction; the result is then
+   * persisted through the existing `recordTcgdexMatchResult` idempotency
+   * rules.
+   */
+  async retryTcgdexEnrichmentMatch(input: AuditContext & { tradingCardId: string; client: TcgDexLookupDependency }) {
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    tradingCardIdSchema.parse(input.tradingCardId)
+    const [card] = await this.manager_.execute<Record<string, unknown>>(
+      `select tc.id, tc.name, tc.card_number, tc.card_set_id, cs.language as set_language, cs.provider_set_code
+       from trading_card tc inner join trading_card_set cs on cs.id = tc.card_set_id and cs.deleted_at is null
+       where tc.id = ? and tc.deleted_at is null`,
+      [input.tradingCardId]
+    )
+    if (!card) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Trading card not found")
+    const [setReference] = await this.manager_.execute<Record<string, unknown>>(
+      `select provider_identifier from trading_card_external_reference
+       where card_set_id = ? and provider = 'TCGDEX' and provenance = 'TRUSTED_MANUAL'
+         and provider_identifier like 'SET:%' and deleted_at is null limit 1`,
+      [card.card_set_id]
+    )
+    const [cardReference] = await this.manager_.execute<Record<string, unknown>>(
+      `select provider_identifier from trading_card_external_reference
+       where trading_card_id = ? and provider = 'TCGDEX' and provenance = 'TRUSTED_MANUAL' and deleted_at is null limit 1`,
+      [input.tradingCardId]
+    )
+    const trustedSetId = setReference ? String(setReference.provider_identifier).slice(4) : String(card.provider_set_code)
+    const matchInput: TcgDexMatchInput = {
+      language: card.set_language as TcgDexMatchInput["language"],
+      setCode: String(card.provider_set_code),
+      cardNumber: card.card_number as string,
+      cardName: card.name as string,
+      setIdentity: { tcgdexSetId: trustedSetId },
+      ...(cardReference
+        ? { manualCardReference: { provider: "TCGDEX" as const, providerIdentifier: String(cardReference.provider_identifier) } }
+        : {}),
+    }
+    const result = await matchTcgdexCard(matchInput, input.client)
+    const record = await this.recordTcgdexMatchResult({
+      actor: input.actor, source: "TCGDEX", reason: input.reason, tradingCardId: input.tradingCardId, result,
+    })
+    return { code: result.code, id: record.id as string }
   }
 
   private async transitionEnrichment(input: AuditContext & { proposalId: string; target: "APPROVED" | "REJECTED" }) {

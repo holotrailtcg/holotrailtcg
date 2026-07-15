@@ -117,3 +117,17 @@ export interface ReviewDetail {
 export interface ReviewDetailResponse {
   review: ReviewDetail
 }
+
+export type RetryOutcome =
+  | "MATCHED"
+  | "NO_MATCH"
+  | "UNRESOLVED_SET"
+  | "IDENTITY_MISMATCH"
+  | "INVALID_LOCAL_IDENTITY"
+  | "PROVIDER_ERROR"
+
+export interface RetryResponse {
+  outcome: RetryOutcome
+  review?: ReviewDetail
+  attempt?: AttemptListItem
+}

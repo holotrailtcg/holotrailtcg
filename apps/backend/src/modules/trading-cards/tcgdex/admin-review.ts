@@ -41,9 +41,18 @@ export const attemptListQuerySchema = z.object({
 }).strict()
 
 export const proposalIdParamsSchema = z.object({ proposalId: tradingCardIdSchema }).strict()
+export const tradingCardIdParamsSchema = z.object({ tradingCardId: tradingCardIdSchema }).strict()
+
+export const MAX_REJECT_REASON_LENGTH = 300
+const rejectReasonSchema = z.string().trim().min(1).max(MAX_REJECT_REASON_LENGTH).refine(
+  (value) => ![...value].some((character) => character.charCodeAt(0) < 0x20 || character.charCodeAt(0) === 0x7f),
+  "Invalid reason"
+)
+export const rejectBodySchema = z.object({ reason: rejectReasonSchema.optional() }).strict()
 
 export type ReviewListQuery = z.infer<typeof reviewListQuerySchema>
 export type AttemptListQuery = z.infer<typeof attemptListQuerySchema>
+export type RejectBody = z.infer<typeof rejectBodySchema>
 
 interface QueryExecutor {
   execute<T = Record<string, unknown>>(query: string, params?: unknown[]): Promise<T[]>
@@ -240,34 +249,45 @@ const ATTEMPT_FROM = `from trading_card_tcgdex_enrichment_attempt a
   inner join trading_card c on c.id = a.trading_card_id and c.deleted_at is null
   inner join trading_card_set s on s.id = c.card_set_id and s.deleted_at is null`
 
+const ATTEMPT_COLUMNS = `a.id, a.trading_card_id, c.name as card_name, c.card_number,
+  s.id as card_set_id, s.display_name as set_name, s.provider_set_code, s.language,
+  a.match_outcome, a.match_source, a.provider_card_id, a.provider_set_id,
+  a.safe_provider_error_code, a.created_at, a.updated_at`
+
+function attemptListItem(row: z.infer<typeof attemptRowSchema>) {
+  return {
+    id: row.id,
+    ...identityFromRow(row),
+    outcome: row.match_outcome,
+    match_source: row.match_source,
+    provider_card_id: row.provider_card_id,
+    provider_set_id: row.provider_set_id,
+    safe_provider_error_code: row.safe_provider_error_code,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  }
+}
+
 export async function listTcgdexAttempts(executor: QueryExecutor, query: AttemptListQuery) {
   const conditions = attemptConditions(query)
   const [rows, countRows] = await Promise.all([
-    executor.execute(`select a.id, a.trading_card_id, c.name as card_name, c.card_number,
-      s.id as card_set_id, s.display_name as set_name, s.provider_set_code, s.language,
-      a.match_outcome, a.match_source, a.provider_card_id, a.provider_set_id,
-      a.safe_provider_error_code, a.created_at, a.updated_at
+    executor.execute(`select ${ATTEMPT_COLUMNS}
       ${ATTEMPT_FROM} where ${conditions.sql}
       order by a.created_at desc, a.id desc limit ? offset ?`, [...conditions.params, query.limit, query.offset]),
     executor.execute(`select count(*) as count ${ATTEMPT_FROM} where ${conditions.sql}`, conditions.params),
   ])
   return {
-    attempts: rows.map((value) => {
-      const row = parseStored(attemptRowSchema, value)
-      return {
-        id: row.id,
-        ...identityFromRow(row),
-        outcome: row.match_outcome,
-        match_source: row.match_source,
-        provider_card_id: row.provider_card_id,
-        provider_set_id: row.provider_set_id,
-        safe_provider_error_code: row.safe_provider_error_code,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-      }
-    }),
+    attempts: rows.map((value) => attemptListItem(parseStored(attemptRowSchema, value))),
     count: parseStored(countRowSchema, countRows[0]).count,
     limit: query.limit,
     offset: query.offset,
   }
+}
+
+/** Used internally by the retry action to shape a freshly recorded diagnostic attempt; not exposed as its own route. */
+export async function retrieveTcgdexAttempt(executor: QueryExecutor, attemptId: string) {
+  const rows = await executor.execute(`select ${ATTEMPT_COLUMNS}
+    ${ATTEMPT_FROM} where a.id = ? and a.provider = 'TCGDEX' and a.deleted_at is null`, [attemptId])
+  if (!rows[0]) throw new MedusaError(MedusaError.Types.NOT_FOUND, "TCGdex match attempt not found.")
+  return attemptListItem(parseStored(attemptRowSchema, rows[0]))
 }

@@ -32,5 +32,29 @@ export default defineMiddlewares({
       methods: ["GET"],
       middlewares: [redactNewsletterTokenQueryFromRequestLog],
     },
+    // Stage 4A.4.3 TCGdex Admin review actions: no route accepts enrichment
+    // data, only a proposal/card ID and (for reject) a short reason, so a
+    // small conservative body limit is enough without a dedicated schema
+    // middleware — each route already validates its own body with zod.
+    {
+      matcher: "/admin/tcgdex/reviews/*/approve",
+      methods: ["POST"],
+      bodyParser: { sizeLimit: "2kb" },
+    },
+    {
+      matcher: "/admin/tcgdex/reviews/*/reject",
+      methods: ["POST"],
+      bodyParser: { sizeLimit: "2kb" },
+    },
+    {
+      matcher: "/admin/tcgdex/reviews/*/apply",
+      methods: ["POST"],
+      bodyParser: { sizeLimit: "2kb" },
+    },
+    {
+      matcher: "/admin/tcgdex/cards/*/retry",
+      methods: ["POST"],
+      bodyParser: { sizeLimit: "2kb" },
+    },
   ],
 })

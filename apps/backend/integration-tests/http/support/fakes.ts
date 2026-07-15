@@ -8,6 +8,8 @@ import type {
   ConfirmationEmailSendOutcome,
   SendConfirmationEmailInput,
 } from "../../../src/modules/newsletter/resend/sender"
+import { TcgDexError, type TcgDexLookupDependency } from "../../../src/modules/trading-cards/tcgdex"
+import type { TcgDexCard, TcgDexLanguage } from "../../../src/modules/trading-cards/tcgdex/types"
 
 /**
  * Test-only fake reCAPTCHA verifier. Registered into the container before
@@ -52,5 +54,47 @@ export class FakeConfirmationEmailSender implements ConfirmationEmailSender {
       return { status: "SENT", providerMessageId: "fake-provider-message-id" }
     }
     return { status: this.mode }
+  }
+}
+
+type QueuedResult = { type: "card"; card: TcgDexCard } | { type: "error"; error: TcgDexError }
+
+/**
+ * Test-only fake TCGdex lookup client. Registered into the container before
+ * any HTTP request is made (`support/bootstrap.ts`), so the real
+ * `TcgDexClient` — and therefore any real network call to TCGdex — is never
+ * constructed during the HTTP integration test suite. Each retry test
+ * queues exactly the result it needs with `enqueue`/`enqueueError`.
+ */
+export class FakeTcgDexClient implements TcgDexLookupDependency {
+  private readonly queue: QueuedResult[] = []
+  public readonly calls: Array<{ operation: string; language: TcgDexLanguage; setId?: string; localId: string }> = []
+
+  enqueue(card: TcgDexCard): void {
+    this.queue.push({ type: "card", card })
+  }
+
+  enqueueError(error: TcgDexError): void {
+    this.queue.push({ type: "error", error })
+  }
+
+  private next(): QueuedResult {
+    const result = this.queue.shift()
+    if (!result) throw new Error("FakeTcgDexClient: no queued result for this call")
+    return result
+  }
+
+  async getCardBySetAndLocalId(language: TcgDexLanguage, setId: string, localId: string): Promise<TcgDexCard> {
+    this.calls.push({ operation: "getCardBySetAndLocalId", language, setId, localId })
+    const result = this.next()
+    if (result.type === "error") throw result.error
+    return result.card
+  }
+
+  async getCardById(language: TcgDexLanguage, cardId: string): Promise<TcgDexCard> {
+    this.calls.push({ operation: "getCardById", language, localId: cardId })
+    const result = this.next()
+    if (result.type === "error") throw result.error
+    return result.card
   }
 }
