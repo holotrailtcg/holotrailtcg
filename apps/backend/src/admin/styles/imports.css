@@ -1,0 +1,25 @@
+/*
+ * Scoped styling for the Imports pages only. Everything here is nested
+ * under .ht-imports so it never leaks into the rest of Medusa Admin.
+ *
+ * Square corners and the two accent colours mirror the storefront brand
+ * tokens defined in apps/storefront/src/styles/globals.css
+ * (--ht-radius, --ht-focus-ring, --ht-action-primary). This is a small,
+ * additive layer on top of Medusa UI, not a parallel design system.
+ */
+.ht-imports {
+  --ht-imports-focus-ring: #2563eb;
+  --ht-imports-action-primary: #2563eb;
+}
+
+.ht-imports table,
+.ht-imports button,
+.ht-imports [role="button"],
+.ht-imports input,
+.ht-imports .ht-imports-badge {
+  border-radius: 0 !important;
+}
+
+.ht-imports *:focus-visible {
+  outline-color: var(--ht-imports-focus-ring);
+}

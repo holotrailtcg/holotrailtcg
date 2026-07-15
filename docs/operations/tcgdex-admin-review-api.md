@@ -51,8 +51,11 @@ generic text `The TCGdex review data could not be loaded.`
 
 ## Deferred work
 
-Stage 4A.4.2 will build the Medusa Admin review pages against these contracts.
 Approval, rejection, application, manual matching and trusted-reference
 promotion routes remain deferred. This slice contains no Admin UI and no
 Pulse, R2, product, stock, inventory, pricing, eBay, Stripe, or storefront
 changes.
+
+Stage 4A.4.2 (see
+[admin-import-review-shell.md](admin-import-review-shell.md)) builds the
+Medusa Admin review pages against these contracts.
