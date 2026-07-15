@@ -10,6 +10,7 @@ let medusaApp: Awaited<ReturnType<typeof MedusaApp>>
 let service: any
 
 const suffix = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 9)}`
+const rows = (result: any): any[] => Array.isArray(result) ? result : result.rows
 
 beforeAll(async () => {
   pgConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
@@ -92,6 +93,11 @@ async function buildPngFixture(): Promise<Buffer> {
  */
 class FakeR2ImageStorageClient implements R2ImageStorageClient {
   private objects = new Map<string, Buffer>()
+  private presignFailure: Error | null = null
+  private getFailure: Error | null = null
+  private putFailure: Error | null = null
+  /** Runs once, synchronously, at the start of the next `putObject` call — used to simulate real-world timing (e.g. the upload window expiring mid-network-call) without waiting real time. */
+  private putSideEffect: (() => Promise<void> | void) | null = null
   public readonly presignCalls: Array<{ key: string; contentType: string; expiresInSeconds: number }> = []
   public readonly getCalls: string[] = []
   public readonly putCalls: Array<{ key: string; contentType: string; contentLength: number }> = []
@@ -100,8 +106,33 @@ class FakeR2ImageStorageClient implements R2ImageStorageClient {
     this.objects.set(key, bytes)
   }
 
+  /** The next `createPresignedPutUrl` call throws `error` instead of succeeding; consumed once. */
+  failNextPresignWith(error: Error) {
+    this.presignFailure = error
+  }
+
+  /** The next `getObject` call throws `error` instead of succeeding; consumed once. */
+  failNextGetWith(error: Error) {
+    this.getFailure = error
+  }
+
+  /** The next `putObject` call throws `error` instead of succeeding; consumed once. */
+  failNextPutWith(error: Error) {
+    this.putFailure = error
+  }
+
+  /** Runs `effect` once at the start of the next `putObject` call, before it succeeds or fails. */
+  onNextPut(effect: () => Promise<void> | void) {
+    this.putSideEffect = effect
+  }
+
   async createPresignedPutUrl(input: { key: string; contentType: string; expiresInSeconds: number }): Promise<PresignedUpload> {
     this.presignCalls.push(input)
+    if (this.presignFailure) {
+      const error = this.presignFailure
+      this.presignFailure = null
+      throw error
+    }
     return {
       uploadUrl: `https://fake-r2.invalid/${input.key}`,
       requiredHeaders: { "Content-Type": input.contentType },
@@ -111,6 +142,11 @@ class FakeR2ImageStorageClient implements R2ImageStorageClient {
 
   async getObject(key: string): Promise<FetchedObject> {
     this.getCalls.push(key)
+    if (this.getFailure) {
+      const error = this.getFailure
+      this.getFailure = null
+      throw error
+    }
     const bytes = this.objects.get(key)
     if (!bytes) {
       throw new MedusaError(MedusaError.Types.NOT_FOUND, "fake object not found")
@@ -119,7 +155,17 @@ class FakeR2ImageStorageClient implements R2ImageStorageClient {
   }
 
   async putObject(input: { key: string; body: Buffer; contentType: string; contentLength: number }): Promise<void> {
+    if (this.putSideEffect) {
+      const effect = this.putSideEffect
+      this.putSideEffect = null
+      await effect()
+    }
     this.putCalls.push({ key: input.key, contentType: input.contentType, contentLength: input.contentLength })
+    if (this.putFailure) {
+      const error = this.putFailure
+      this.putFailure = null
+      throw error
+    }
     this.objects.set(input.key, input.body)
   }
 }
@@ -371,5 +417,224 @@ describe("confirmPendingCardImage", () => {
 
     const final = await service.retrieveCardImage(image.id)
     expect(final.status).toBe("READY")
+  })
+})
+
+describe("confirmation rollback and failure paths", () => {
+  it("persists EXPIRED (not READY) and returns a stable expiry error when the upload window expires during the R2 write", async () => {
+    const { variant } = await createVariant()
+    const r2Client = new FakeR2ImageStorageClient()
+    const { image } = await service.beginCardImageUpload({ ...beginInput(variant.id), r2Client })
+    r2Client.seedObject(image.staging_object_key, await buildJpegFixture())
+
+    // Simulates real-world timing: the 15-minute window lapses while the
+    // re-encoded bytes are in flight to R2, not before it. This exercises
+    // the final locked transaction's own expiry re-check, not the earlier
+    // pre-fetch one.
+    r2Client.onNextPut(async () => {
+      await pgConnection.raw(
+        `update trading_card_image set upload_expires_at = now() - interval '1 minute' where id = ?`,
+        [image.id]
+      )
+    })
+
+    await expect(service.confirmPendingCardImage({
+      id: image.id, actor: "admin_test", source: "MANUAL", r2Client,
+    })).rejects.toThrow(/upload window has expired/)
+
+    const persisted = await service.retrieveCardImage(image.id)
+    expect(persisted.status).toBe("EXPIRED")
+    expect(persisted.staging_object_key).toBeNull()
+    expect(persisted.final_object_key).toBeNull()
+    expect(persisted.confirmed_mime_type).toBeNull()
+    expect(persisted.width).toBeNull()
+    expect(persisted.sha256_hash).toBeNull()
+
+    const audits = await pgConnection.raw(
+      `select action from trading_card_audit_entry where entity_id = ? order by created_at asc`, [image.id]
+    ).then(rows)
+    expect(audits.map((row: any) => row.action)).toEqual(["IMAGE_UPLOAD_REQUESTED", "IMAGE_UPLOAD_EXPIRED"])
+    expect(audits.some((row: any) => row.action === "IMAGE_UPLOAD_CONFIRMED")).toBe(false)
+
+    // Repeated confirmation returns the same safe expired result and never
+    // writes a second EXPIRED transition/audit.
+    await expect(service.confirmPendingCardImage({
+      id: image.id, actor: "admin_test", source: "MANUAL", r2Client,
+    })).rejects.toThrow(/This upload has expired/)
+    const auditsAfterRetry = await pgConnection.raw(
+      `select action from trading_card_audit_entry where entity_id = ?`, [image.id]
+    ).then(rows)
+    expect(auditsAfterRetry.map((row: any) => row.action)).toEqual(["IMAGE_UPLOAD_REQUESTED", "IMAGE_UPLOAD_EXPIRED"])
+  })
+
+  it("leaves the row PENDING and retryable when presigning fails, and it can still expire normally afterwards", async () => {
+    const { variant } = await createVariant()
+    const r2Client = new FakeR2ImageStorageClient()
+    r2Client.failNextPresignWith(new Error("simulated presign failure"))
+
+    await expect(service.beginCardImageUpload({ ...beginInput(variant.id), r2Client }))
+      .rejects.toThrow(/simulated presign failure/)
+
+    const [persisted] = await pgConnection.raw(
+      `select * from trading_card_image where trading_card_variant_id = ? order by created_at desc limit 1`,
+      [variant.id]
+    ).then(rows)
+    expect(persisted.status).toBe("PENDING")
+    expect(persisted.staging_object_key).not.toBeNull()
+
+    const audits = await pgConnection.raw(
+      `select action from trading_card_audit_entry where entity_id = ?`, [persisted.id]
+    ).then(rows)
+    expect(audits.map((row: any) => row.action)).toEqual(["IMAGE_UPLOAD_REQUESTED"])
+
+    // The route's contract for this failure is documented, intentional
+    // behaviour, not a bug: the PENDING row is simply left to expire via
+    // the normal EXPIRED path, exactly like any other abandoned upload.
+    await pgConnection.raw(
+      `update trading_card_image set upload_expires_at = now() - interval '1 minute' where id = ?`, [persisted.id]
+    )
+    await expect(service.confirmPendingCardImage({
+      id: persisted.id, actor: "admin_test", source: "MANUAL", r2Client,
+    })).rejects.toThrow(/upload window has expired/)
+    const expired = await service.retrieveCardImage(persisted.id)
+    expect(expired.status).toBe("EXPIRED")
+  })
+
+  it("leaves the row PENDING and retryable when getObject fails, with no final metadata or confirmation audit", async () => {
+    const { variant } = await createVariant()
+    const r2Client = new FakeR2ImageStorageClient()
+    const { image } = await service.beginCardImageUpload({ ...beginInput(variant.id), r2Client })
+    r2Client.seedObject(image.staging_object_key, await buildJpegFixture())
+    r2Client.failNextGetWith(new MedusaError(MedusaError.Types.UNEXPECTED_STATE, "simulated storage read failure"))
+
+    await expect(service.confirmPendingCardImage({
+      id: image.id, actor: "admin_test", source: "MANUAL", r2Client,
+    })).rejects.toThrow(/simulated storage read failure/)
+
+    const persisted = await service.retrieveCardImage(image.id)
+    expect(persisted.status).toBe("PENDING")
+    expect(persisted.final_object_key).toBeNull()
+    expect(persisted.confirmed_mime_type).toBeNull()
+
+    const audits = await pgConnection.raw(
+      `select action from trading_card_audit_entry where entity_id = ?`, [image.id]
+    ).then(rows)
+    expect(audits.map((row: any) => row.action)).toEqual(["IMAGE_UPLOAD_REQUESTED"])
+
+    // Retryable: the same staging object is still present, so a second
+    // confirm call (with the transient failure cleared) succeeds normally.
+    const confirmed = await service.confirmPendingCardImage({
+      id: image.id, actor: "admin_test", source: "MANUAL", r2Client,
+    })
+    expect(confirmed.status).toBe("READY")
+  })
+
+  it("leaves the row PENDING and retryable when putObject fails, with no final metadata or confirmation audit", async () => {
+    const { variant } = await createVariant()
+    const r2Client = new FakeR2ImageStorageClient()
+    const { image } = await service.beginCardImageUpload({ ...beginInput(variant.id), r2Client })
+    r2Client.seedObject(image.staging_object_key, await buildJpegFixture())
+    r2Client.failNextPutWith(new MedusaError(MedusaError.Types.UNEXPECTED_STATE, "simulated storage write failure"))
+
+    await expect(service.confirmPendingCardImage({
+      id: image.id, actor: "admin_test", source: "MANUAL", r2Client,
+    })).rejects.toThrow(/simulated storage write failure/)
+
+    const persisted = await service.retrieveCardImage(image.id)
+    expect(persisted.status).toBe("PENDING")
+    expect(persisted.final_object_key).toBeNull()
+    expect(persisted.confirmed_mime_type).toBeNull()
+    expect(persisted.sha256_hash).toBeNull()
+
+    const audits = await pgConnection.raw(
+      `select action from trading_card_audit_entry where entity_id = ?`, [image.id]
+    ).then(rows)
+    expect(audits.map((row: any) => row.action)).toEqual(["IMAGE_UPLOAD_REQUESTED"])
+
+    // Retryable: the still-staged object (never removed on a failed put)
+    // confirms normally once the store works again.
+    const confirmed = await service.confirmPendingCardImage({
+      id: image.id, actor: "admin_test", source: "MANUAL", r2Client,
+    })
+    expect(confirmed.status).toBe("READY")
+  })
+
+  it("rolls back the entire READY transition, including the already-applied row update, when the transaction fails after putObject has already succeeded — leaving the final R2 object orphaned", async () => {
+    const { variant } = await createVariant()
+    const r2Client = new FakeR2ImageStorageClient()
+
+    const siblingUpload = await service.beginCardImageUpload({ ...beginInput(variant.id), r2Client })
+    r2Client.seedObject(siblingUpload.image.staging_object_key, await buildJpegFixture(4, 4))
+    const sibling = await service.confirmPendingCardImage({
+      id: siblingUpload.image.id, actor: "admin_test", source: "MANUAL", r2Client,
+    })
+    expect(sibling.status).toBe("READY")
+    expect(sibling.sort_order).toBe(0)
+
+    const { image } = await service.beginCardImageUpload({ ...beginInput(variant.id), r2Client })
+    r2Client.seedObject(image.staging_object_key, await buildJpegFixture(6, 8))
+
+    // An invalid `source` is a deterministic way to fail the transaction's
+    // final `INSERT` (the DB-level enum CHECK constraint on
+    // trading_card_audit_entry.source) *after* the READY row UPDATE inside
+    // the same transaction has already run — proving the whole transaction,
+    // including that already-applied update, rolls back atomically.
+    await expect(service.confirmPendingCardImage({
+      id: image.id, actor: "admin_test", source: "BOGUS_SOURCE" as any, r2Client,
+    })).rejects.toThrow()
+
+    // The R2 write itself already completed before the transaction opened —
+    // this is the intended "final object may be orphaned" trade-off,
+    // documented as deferred cleanup, not a bug.
+    expect(r2Client.putCalls.some((call) => call.key.includes(image.id))).toBe(true)
+
+    const persisted = await service.retrieveCardImage(image.id)
+    expect(persisted.status).toBe("PENDING")
+    expect(persisted.final_object_key).toBeNull()
+    expect(persisted.confirmed_mime_type).toBeNull()
+    expect(persisted.sha256_hash).toBeNull()
+
+    const auditsForImage = await pgConnection.raw(
+      `select action from trading_card_audit_entry where entity_id = ?`, [image.id]
+    ).then(rows)
+    expect(auditsForImage.map((row: any) => row.action)).toEqual(["IMAGE_UPLOAD_REQUESTED"])
+
+    // Ordering is unaffected: the sibling's already-committed sort order
+    // was never touched by this failed attempt.
+    const siblingAfter = await service.retrieveCardImage(sibling.id)
+    expect(siblingAfter.sort_order).toBe(0)
+  })
+
+  it("rolls back the READY row update when the audit write fails, leaving no confirmation audit and no partial commit", async () => {
+    const { variant } = await createVariant()
+    const r2Client = new FakeR2ImageStorageClient()
+    const { image } = await service.beginCardImageUpload({ ...beginInput(variant.id), r2Client })
+    r2Client.seedObject(image.staging_object_key, await buildJpegFixture())
+    const pendingSortOrder = image.sort_order
+
+    await expect(service.confirmPendingCardImage({
+      id: image.id, actor: "admin_test", source: "BOGUS_SOURCE" as any, r2Client,
+    })).rejects.toThrow()
+
+    const persisted = await service.retrieveCardImage(image.id)
+    expect(persisted.status).toBe("PENDING")
+    expect(persisted.sort_order).toBe(pendingSortOrder)
+    expect(persisted.final_object_key).toBeNull()
+    expect(persisted.width).toBeNull()
+
+    const audits = await pgConnection.raw(
+      `select action from trading_card_audit_entry where entity_id = ?`, [image.id]
+    ).then(rows)
+    expect(audits.map((row: any) => row.action)).toEqual(["IMAGE_UPLOAD_REQUESTED"])
+    expect(audits.some((row: any) => row.action === "IMAGE_UPLOAD_CONFIRMED")).toBe(false)
+
+    // Retryable: confirming again with a valid source succeeds cleanly —
+    // proving the earlier failure left no partially-committed state behind.
+    r2Client.seedObject(image.staging_object_key, await buildJpegFixture())
+    const confirmed = await service.confirmPendingCardImage({
+      id: image.id, actor: "admin_test", source: "MANUAL", r2Client,
+    })
+    expect(confirmed.status).toBe("READY")
+    expect(confirmed.sort_order).toBe(0)
   })
 })
