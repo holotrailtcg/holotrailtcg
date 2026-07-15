@@ -192,11 +192,11 @@ stored separately, only for display, via `sanitiseOriginalFilename`.
 
 ## Deferred to a later stage
 
-- Upload confirmation: validating magic bytes, auto-orienting, stripping
-  metadata, re-encoding, hashing, and setting `confirmed_mime_type`,
-  `confirmed_byte_size`, `width`, `height`, and `sha256_hash`. This is Admin
-  Step 3 and is explicitly out of scope for Stage 4B.1.
-- Real presigned upload URLs and any other R2 network call.
+- Upload confirmation (validating magic bytes, auto-orienting, stripping
+  metadata, re-encoding, hashing, setting `confirmed_mime_type`,
+  `confirmed_byte_size`, `width`, `height`, and `sha256_hash`) and real
+  presigned upload URLs / any other R2 network call — addressed in Stage
+  4B.2, see `docs/operations/stage-4b-2-image-upload-confirmation.md`.
 - Permanent deletion of an archived `CardImage` row — a separately protected
   operation, not part of `archiveCardImage`.
 - Resizing, cropping, and marketplace-specific image derivatives.
