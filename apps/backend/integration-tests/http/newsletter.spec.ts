@@ -1318,3 +1318,199 @@ describe("Admin trading-card image upload/confirm", () => {
     }
   })
 })
+
+/**
+ * Stage 4B.3 Admin card-image list/detail/reorder/archive/restore/focal-point
+ * routes. Lives in this file for the same process-wide-module-registry
+ * reason documented above the Stage 4B.2 `describe` block.
+ */
+describe("Admin trading-card image list, detail and lifecycle actions", () => {
+  if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required for HTTP integration tests")
+  const adminToken = generateJwtToken({
+    actor_id: "user_card_image_assignment_http_test",
+    actor_type: "user",
+    auth_identity_id: "auth_card_image_assignment_http_test",
+  }, { secret: process.env.JWT_SECRET, expiresIn: 3600 })
+
+  const uniqueMarker = (label: string) =>
+    `${label}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`
+
+  let fixtureColorCounter = 0
+
+  /** Each call produces distinct bytes (and therefore a distinct SHA-256), so uploading several images to the same variant never collides with the per-variant duplicate check. */
+  function buildJpegFixture(): Promise<Buffer> {
+    fixtureColorCounter += 1
+    return sharp({
+      create: { width: 6, height: 8, channels: 3, background: { r: 200, g: 40, b: fixtureColorCounter % 256 } },
+    }).jpeg().toBuffer()
+  }
+
+  async function createVariantFixture(marker: string, overrides: Record<string, unknown> = {}) {
+    const cards = app.container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
+    const set = await cards.createCardSets({
+      game: "POKEMON", language: "EN", display_name: `Image Assignment set ${marker}`, provider_set_code: `imga-${marker}`,
+    })
+    const card = await cards.createTradingCards({
+      card_set_id: set.id, name: `Image Assignment card ${marker}`, search_name: `image assignment card ${marker}`,
+      card_number: "002/100", card_number_normalised: "002/100", origin: "MANUAL",
+    })
+    const variant = await cards.createTradingCardVariants({
+      trading_card_id: card.id, condition: "NEAR_MINT", condition_source: "DEFAULTED",
+      finish: "HOLO", finish_confirmed: true, special_treatment: "NONE", special_treatment_confirmed: true,
+      sku: `POKEMON-EN-IMGA-${marker.toUpperCase()}`, origin: "MANUAL", ...overrides,
+    })
+    return { cards, set, card, variant }
+  }
+
+  async function createReadyImage(variantId: string) {
+    const uploadResponse = await app.postBeginUpload(variantId, {
+      originalFilename: "card.jpg", declaredMimeType: "image/jpeg", declaredByteSize: 1_048_576,
+    }, adminToken)
+    const { imageId, objectKey } = await uploadResponse.json()
+    app.r2ImageClient.seedObject(objectKey, await buildJpegFixture())
+    const confirmResponse = await app.postConfirmUpload(imageId, adminToken)
+    return confirmResponse.json()
+  }
+
+  it("requires Admin authentication for every new route", async () => {
+    const { variant } = await createVariantFixture(uniqueMarker("auth"))
+    const responses = await Promise.all([
+      app.getNeedingImages({}),
+      app.getCardImages(variant.trading_card_id ?? "tcard_missing"),
+      app.postReorder(variant.id, { orderedImageIds: [] }),
+      app.postArchive("tcimg_missing"),
+      app.postRestore("tcimg_missing"),
+      app.postFocalPoint("tcimg_missing", { focalX: 0.5, focalY: 0.5 }),
+    ])
+    expect(responses.map((response) => response.status)).toEqual([401, 401, 401, 401, 401, 401])
+  })
+
+  describe("needing-images list", () => {
+    it("classifies a card as MISSING, PARTIAL or READY based on variant coverage", async () => {
+      const marker = uniqueMarker("classify")
+      const { card, variant } = await createVariantFixture(marker)
+
+      const missingListResponse = await app.getNeedingImages({ q: marker }, adminToken)
+      const missingList = await missingListResponse.json()
+      expect(missingList.cards).toEqual([expect.objectContaining({ trading_card_id: card.id, need_status: "MISSING" })])
+
+      await createReadyImage(variant.id)
+
+      const readyListResponse = await app.getNeedingImages({ q: marker }, adminToken)
+      const readyList = await readyListResponse.json()
+      expect(readyList.cards).toEqual([expect.objectContaining({ trading_card_id: card.id, need_status: "READY" })])
+    })
+
+    it("supports pagination fields and a status filter", async () => {
+      const marker = uniqueMarker("paginate")
+      await createVariantFixture(marker)
+
+      const response = await app.getNeedingImages({ q: marker, status: "MISSING", limit: "1" }, adminToken)
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      expect(body).toMatchObject({ limit: 1, offset: 0 })
+      expect(typeof body.count).toBe("number")
+    })
+  })
+
+  describe("card detail", () => {
+    it("splits ready and archived images and returns a 404 for an unknown card", async () => {
+      const marker = uniqueMarker("detail")
+      const { card, variant } = await createVariantFixture(marker)
+      const image = await createReadyImage(variant.id)
+      await app.postArchive(image.id, adminToken)
+      const secondImage = await createReadyImage(variant.id)
+
+      const response = await app.getCardImages(card.id, adminToken)
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      const variantGroup = body.variants.find((entry: { id: string }) => entry.id === variant.id)
+      expect(variantGroup.ready_images).toEqual([expect.objectContaining({ id: secondImage.id })])
+      expect(variantGroup.archived_images).toEqual([expect.objectContaining({ id: image.id })])
+      expect(body.tcgdex_reference_artwork_url).toBeNull()
+
+      const missingResponse = await app.getCardImages("tcard_missing", adminToken)
+      expect(missingResponse.status).toBe(404)
+    })
+  })
+
+  describe("reorder", () => {
+    it("reorders ready images and rejects a partial or foreign set", async () => {
+      const { variant } = await createVariantFixture(uniqueMarker("reorder"))
+      const first = await createReadyImage(variant.id)
+      const second = await createReadyImage(variant.id)
+
+      const response = await app.postReorder(variant.id, { orderedImageIds: [second.id, first.id] }, adminToken)
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      expect(body.images.map((image: { id: string }) => image.id)).toEqual([second.id, first.id])
+
+      const partialResponse = await app.postReorder(variant.id, { orderedImageIds: [second.id] }, adminToken)
+      expect(partialResponse.status).toBe(400)
+
+      const { variant: otherVariant } = await createVariantFixture(uniqueMarker("reorder-other"))
+      const foreignImage = await createReadyImage(otherVariant.id)
+      const foreignResponse = await app.postReorder(
+        variant.id, { orderedImageIds: [second.id, foreignImage.id] }, adminToken
+      )
+      expect(foreignResponse.status).toBe(400)
+    })
+  })
+
+  describe("archive and restore", () => {
+    it("archives a ready image, is idempotent, and rejects a non-ready image", async () => {
+      const { variant } = await createVariantFixture(uniqueMarker("archive"))
+      const image = await createReadyImage(variant.id)
+
+      const response = await app.postArchive(image.id, adminToken)
+      expect(response.status).toBe(200)
+      expect((await response.json()).status).toBe("ARCHIVED")
+
+      const idempotentResponse = await app.postArchive(image.id, adminToken)
+      expect(idempotentResponse.status).toBe(200)
+
+      const uploadResponse = await app.postBeginUpload(variant.id, {
+        originalFilename: "card.jpg", declaredMimeType: "image/jpeg", declaredByteSize: 1_048_576,
+      }, adminToken)
+      const { imageId } = await uploadResponse.json()
+      const pendingArchiveResponse = await app.postArchive(imageId, adminToken)
+      expect(pendingArchiveResponse.status).toBe(400)
+    })
+
+    it("restores an archived image to the end of the active order and rejects a non-archived image", async () => {
+      const { variant } = await createVariantFixture(uniqueMarker("restore"))
+      const image = await createReadyImage(variant.id)
+      await app.postArchive(image.id, adminToken)
+
+      const response = await app.postRestore(image.id, adminToken)
+      expect(response.status).toBe(200)
+      expect((await response.json()).status).toBe("READY")
+
+      const notArchivedResponse = await app.postRestore(image.id, adminToken)
+      expect(notArchivedResponse.status).toBe(400)
+    })
+  })
+
+  describe("focal point", () => {
+    it("updates the focal point on a ready image and rejects out-of-range or non-ready values", async () => {
+      const { variant } = await createVariantFixture(uniqueMarker("focal"))
+      const image = await createReadyImage(variant.id)
+
+      const response = await app.postFocalPoint(image.id, { focalX: 0.2, focalY: 0.8 }, adminToken)
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      expect(body.focalX).toBeCloseTo(0.2)
+      expect(body.focalY).toBeCloseTo(0.8)
+
+      const outOfRangeResponse = await app.postFocalPoint(image.id, { focalX: 1.5, focalY: 0.5 }, adminToken)
+      expect(outOfRangeResponse.status).toBe(400)
+
+      const uploadResponse = await app.postBeginUpload(variant.id, {
+        originalFilename: "card.jpg", declaredMimeType: "image/jpeg", declaredByteSize: 1_048_576,
+      }, adminToken)
+      const { imageId } = await uploadResponse.json()
+      const pendingResponse = await app.postFocalPoint(imageId, { focalX: 0.5, focalY: 0.5 }, adminToken)
+      expect(pendingResponse.status).toBe(400)
+    })
+  })
+})
