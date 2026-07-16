@@ -11,6 +11,11 @@ and Retry actions to the write routes added in that same stage. See
 [Review actions](#review-actions) below; the rest of this document is
 unchanged from Stage 4A.4.2.
 
+Stage 4B.3 connects step 3 (assign card images) — see
+[stage-4b-3-admin-image-assignment.md](stage-4b-3-admin-image-assignment.md)
+for the full write-up. The "Pages" and "What is honestly not connected"
+sections below have been updated accordingly.
+
 ## Pages
 
 - `/app/imports` — overview of the four steps (Upload, Sync with TCGdex,
@@ -27,9 +32,11 @@ unchanged from Stage 4A.4.2.
   /admin/tcgdex/reviews/:proposalId`. Shows a side-by-side comparison of the
   local trading card against the TCGdex snapshot, the TCGdex reference
   artwork, and the lifecycle audit history.
-
-Step 3 (assign card images) has no page yet — there is no image-assignment
-backend to connect it to.
+- `/app/imports/images` and `/app/imports/images/:tradingCardId` — step 3,
+  connected in Stage 4B.3. See
+  [stage-4b-3-admin-image-assignment.md](stage-4b-3-admin-image-assignment.md)
+  for the cards-needing-images list, the per-card upload/ordering/archive
+  workspace, and the new Admin routes behind it.
 
 ## Review actions
 
@@ -71,8 +78,8 @@ retry route's `{ outcome, review | attempt }` response.
 
 ## What is honestly not connected
 
-- Step 1 (upload) and step 3 (assign images) are not built. The Admin pages
-  say so; they do not collect input that goes nowhere.
+- Step 1 (upload) is not built. The Admin page says so; it does not collect
+  input that goes nowhere.
 - The "Ignore" button next to Approve/Reject/Apply/Retry is shown disabled
   with a "Not connected" tooltip. There is no ignore route or service
   method yet; the button makes no network call.

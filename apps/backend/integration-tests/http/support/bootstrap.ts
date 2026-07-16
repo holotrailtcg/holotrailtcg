@@ -70,6 +70,12 @@ const TEST_ENV_OVERRIDES: Record<string, string> = {
   RESEND_FROM_EMAIL: "Holo Trail TCG Test <hello@test.holotrailtcg.invalid>",
   RESEND_REPLY_TO_EMAIL: "support@test.holotrailtcg.invalid",
   PUBLIC_STOREFRONT_URL: "http://localhost:8000",
+  // Forced off regardless of the developer's local .env: this suite always
+  // registers FakeR2ImageStorageClient directly (see below), and several
+  // assertions depend on R2 being unconfigured (e.g. a null `imageUrl` when
+  // no public base URL exists). Leaving this to the ambient environment
+  // would make those assertions depend on machine-specific local state.
+  R2_IMAGES_ENABLED: "false",
   // RECAPTCHA_SECRET_KEY is deliberately left unset: the fake verifier is
   // registered before any request, so the real GoogleRecaptchaVerifier
   // (and its RECAPTCHA_SECRET_KEY requirement) must never be constructed
@@ -95,6 +101,18 @@ export interface NewsletterHttpTestApp {
   postBeginUpload: (variantId: string, body: unknown, authToken?: string) => Promise<Response>
   /** POST /admin/trading-cards/images/:imageId/confirm */
   postConfirmUpload: (imageId: string, authToken?: string) => Promise<Response>
+  /** GET /admin/trading-cards/needing-images */
+  getNeedingImages: (query: Record<string, string>, authToken?: string) => Promise<Response>
+  /** GET /admin/trading-cards/:tradingCardId/images */
+  getCardImages: (tradingCardId: string, authToken?: string) => Promise<Response>
+  /** POST /admin/trading-cards/variants/:variantId/images/reorder */
+  postReorder: (variantId: string, body: unknown, authToken?: string) => Promise<Response>
+  /** POST /admin/trading-cards/images/:imageId/archive */
+  postArchive: (imageId: string, authToken?: string) => Promise<Response>
+  /** POST /admin/trading-cards/images/:imageId/restore */
+  postRestore: (imageId: string, authToken?: string) => Promise<Response>
+  /** POST /admin/trading-cards/images/:imageId/focal-point */
+  postFocalPoint: (imageId: string, body: unknown, authToken?: string) => Promise<Response>
 }
 
 /**
@@ -215,6 +233,42 @@ export async function bootstrapNewsletterHttpTestApp(): Promise<NewsletterHttpTe
       fetch(`${baseUrl}/admin/trading-cards/images/${encodeURIComponent(imageId)}/confirm`, {
         method: "POST",
         headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    getNeedingImages: (query, authToken) =>
+      fetch(`${baseUrl}/admin/trading-cards/needing-images?${new URLSearchParams(query).toString()}`, {
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    getCardImages: (tradingCardId, authToken) =>
+      fetch(`${baseUrl}/admin/trading-cards/${encodeURIComponent(tradingCardId)}/images`, {
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    postReorder: (variantId, body, authToken) =>
+      fetch(`${baseUrl}/admin/trading-cards/variants/${encodeURIComponent(variantId)}/images/reorder`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify(body),
+      }),
+    postArchive: (imageId, authToken) =>
+      fetch(`${baseUrl}/admin/trading-cards/images/${encodeURIComponent(imageId)}/archive`, {
+        method: "POST",
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    postRestore: (imageId, authToken) =>
+      fetch(`${baseUrl}/admin/trading-cards/images/${encodeURIComponent(imageId)}/restore`, {
+        method: "POST",
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    postFocalPoint: (imageId, body, authToken) =>
+      fetch(`${baseUrl}/admin/trading-cards/images/${encodeURIComponent(imageId)}/focal-point`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify(body),
       }),
   }
 }

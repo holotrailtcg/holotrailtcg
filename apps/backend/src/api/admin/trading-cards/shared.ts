@@ -43,12 +43,22 @@ export async function safeAdminWrite<T>(write: () => Promise<T>): Promise<T> {
 
 export const variantIdParamsSchema = z.object({ variantId: z.string().min(1) })
 export const imageIdParamsSchema = z.object({ imageId: z.string().min(1) })
+export const tradingCardIdParamsSchema = z.object({ tradingCardId: z.string().min(1) })
 
 export const beginUploadBodySchema = z.object({
   originalFilename: z.string().min(1).max(255),
   declaredMimeType: z.enum(SUPPORTED_IMAGE_MIME_TYPES),
   declaredByteSize: z.number().int().positive().max(MAX_CARD_IMAGE_BYTE_SIZE),
 })
+
+export const reorderBodySchema = z.object({
+  orderedImageIds: z.array(z.string().min(1)).min(1),
+}).strict()
+
+export const focalPointBodySchema = z.object({
+  focalX: z.number().min(0).max(1),
+  focalY: z.number().min(0).max(1),
+}).strict()
 
 /**
  * The Admin-safe view of a `CardImage` row. Explicitly excludes

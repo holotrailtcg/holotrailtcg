@@ -1,9 +1,11 @@
-import { Button, Container, Heading, Tabs, Text } from "@medusajs/ui"
+import { Container, Heading, Tabs, Text } from "@medusajs/ui"
 import { keepPreviousData, useQuery } from "@tanstack/react-query"
 import { useState } from "react"
 import { Link, useNavigate } from "react-router-dom"
 import AttemptOutcomeBadge from "../../../components/imports/attempt-outcome-badge"
+import { fetchJson } from "../../../components/imports/fetch-json"
 import ImportStepper from "../../../components/imports/import-stepper"
+import PaginationBar from "../../../components/imports/pagination-bar"
 import ReviewSearchFilterBar from "../../../components/imports/review-search-filter-bar"
 import ReviewStatusBadge from "../../../components/imports/review-status-badge"
 import ReviewTable, { type ReviewTableColumn } from "../../../components/imports/review-table"
@@ -32,56 +34,6 @@ const ATTEMPT_OUTCOME_OPTIONS = [
   { value: "INVALID_LOCAL_IDENTITY", label: "Card details were incomplete" },
   { value: "PROVIDER_ERROR", label: "TCGdex could not be reached" },
 ]
-
-async function fetchJson<T>(url: string): Promise<T> {
-  const result = await fetch(url, { credentials: "include" })
-  if (!result.ok) {
-    throw new Error("Request failed")
-  }
-  return result.json()
-}
-
-interface PaginationBarProps {
-  offset: number
-  limit: number
-  count: number
-  onOffsetChange: (offset: number) => void
-}
-
-const PaginationBar = ({ offset, limit, count, onOffsetChange }: PaginationBarProps) => {
-  if (count <= limit) {
-    return null
-  }
-
-  const start = count === 0 ? 0 : offset + 1
-  const end = Math.min(offset + limit, count)
-
-  return (
-    <div className="flex items-center justify-between p-4">
-      <Text size="small" className="text-ui-fg-subtle">
-        {start}-{end} of {count}
-      </Text>
-      <div className="flex gap-2">
-        <Button
-          size="small"
-          variant="secondary"
-          disabled={offset === 0}
-          onClick={() => onOffsetChange(Math.max(0, offset - limit))}
-        >
-          Previous
-        </Button>
-        <Button
-          size="small"
-          variant="secondary"
-          disabled={offset + limit >= count}
-          onClick={() => onOffsetChange(offset + limit)}
-        >
-          Next
-        </Button>
-      </div>
-    </div>
-  )
-}
 
 const ProposalsTab = () => {
   const navigate = useNavigate()
