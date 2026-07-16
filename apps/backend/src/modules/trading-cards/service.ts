@@ -8,7 +8,7 @@ import RarityMapping from "./models/rarity-mapping"
 import TcgDexEnrichmentProposal from "./models/tcgdex-enrichment-proposal"
 import TcgDexEnrichmentAttempt from "./models/tcgdex-enrichment-attempt"
 import CardImage from "./models/card-image"
-import { cardNumberForms } from "./identity/card-number"
+import { cardNumberForms, normaliseComparisonText } from "./identity/card-number"
 import { rarityComparisonForm } from "./rarity/normalise-rarity"
 import {
   AUDIT_ACTION, AUDIT_ENTITY_TYPE, type CardCondition, type CardFinish,
@@ -388,6 +388,49 @@ class TradingCardsModuleService extends MedusaService({
       actor: input.actor, source: "TCGDEX", reason: input.reason, tradingCardId: input.tradingCardId, result,
     })
     return { code: result.code, id: record.id as string }
+  }
+
+  /**
+   * Stage 5B.1: read-only half of the Pulse matcher's `TradingCardMatchLookup`
+   * contract (see `trading-card-inventory/pulse/matching.ts`) — an existing
+   * trusted `ExternalCardReference(provider=PULSE)`, if any. A thin explicit
+   * method rather than exposing generated CRUD to a cross-module caller.
+   */
+  async findTrustedExternalReference(provider: ExternalProvider, providerIdentifier: string) {
+    providerIdentifierSchema.parse(providerIdentifier)
+    const [reference] = await this.manager_.execute<Record<string, unknown>>(
+      `select trading_card_id, trading_card_variant_id from trading_card_external_reference
+       where provider = ? and provider_identifier = ? and deleted_at is null`,
+      [provider, providerIdentifier],
+    )
+    if (!reference || !reference.trading_card_id) return null
+    return {
+      tradingCardId: reference.trading_card_id as string,
+      tradingCardVariantId: (reference.trading_card_variant_id as string | null) ?? null,
+    }
+  }
+
+  /**
+   * Stage 5B.1: the other half of `TradingCardMatchLookup` — candidate
+   * variants for a card identified by (set code, card number, language)
+   * matching the row's exact commercial attributes. Card number comparison
+   * uses the same NFC/trim normalisation as Stage 3 identity matching
+   * (`identity/card-number.ts`); set code and language are compared exactly,
+   * per ADR 0007 (never parsed/fuzzy-matched).
+   */
+  async findVariantCandidatesForPulseMatch(input: {
+    setCodeCandidate: string; cardNumberCandidate: string; language: string; condition: string; finish: string; specialTreatment: string
+  }) {
+    const cardNumber = normaliseComparisonText(input.cardNumberCandidate)
+    const rows = await this.manager_.execute<{ id: string; trading_card_id: string }>(
+      `select tcv.id, tcv.trading_card_id from trading_card_variant tcv
+       inner join trading_card tc on tc.id = tcv.trading_card_id and tc.deleted_at is null
+       inner join trading_card_set cs on cs.id = tc.card_set_id and cs.deleted_at is null
+       where cs.provider_set_code = ? and cs.language = ? and tc.card_number_normalised = ?
+         and tcv.condition = ? and tcv.finish = ? and tcv.special_treatment = ? and tcv.deleted_at is null`,
+      [input.setCodeCandidate, input.language, cardNumber, input.condition, input.finish, input.specialTreatment],
+    )
+    return rows.map((row) => ({ id: row.id, tradingCardId: row.trading_card_id }))
   }
 
   private async transitionEnrichment(input: AuditContext & { proposalId: string; target: "APPROVED" | "REJECTED" }) {

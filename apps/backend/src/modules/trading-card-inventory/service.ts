@@ -136,6 +136,35 @@ export interface ReconcileInventorySnapshotInput extends AuditContext {
   comparedAt?: Date
 }
 
+/**
+ * Thrown only by `createDraftSnapshot` when a concurrent upload wins the race
+ * between the workflow's `findLiveSnapshotByContentHash` pre-check and the
+ * insert — a rare safety-net case, not the primary duplicate-detection path
+ * (that decision belongs to the workflow, which treats this identically to a
+ * pre-check hit).
+ */
+export class DuplicateSnapshotError extends Error {
+  existingSnapshotId: string
+  constructor(existingSnapshotId: string) {
+    super("An equivalent snapshot already exists for this source")
+    this.name = "DuplicateSnapshotError"
+    this.existingSnapshotId = existingSnapshotId
+  }
+}
+
+export interface RecordSnapshotEntryMatchBatchItem {
+  snapshotEntryId: string
+  matchingStatus: string
+  tradingCardVariantId?: string | null
+  matchedVia: string
+  diagnostics: ImportedDiagnosticInput[]
+}
+
+export interface RecordSnapshotEntryMatchesInput extends AuditContext {
+  inventorySnapshotId: string
+  entries: RecordSnapshotEntryMatchBatchItem[]
+}
+
 class TradingCardInventoryModuleService extends MedusaService({
   InventorySource, InventorySnapshot, InventorySnapshotEntry, InventorySnapshotEntryMatch, InventorySnapshotEntryDiagnostic,
   InventoryHolding, InventoryProposal, InventoryTransaction, InventoryAuditEntry,
@@ -246,6 +275,55 @@ class TradingCardInventoryModuleService extends MedusaService({
     })
   }
 
+  /**
+   * Stage 5B.1: the import workflow's "use an existing active source or
+   * create one" entry point. Unlike `createInventorySource` (which throws on
+   * a name clash, for callers that want hard-fail-on-duplicate semantics),
+   * this returns the existing row. Reuses the same advisory-lock key so the
+   * module keeps a single concurrency strategy for this identity.
+   */
+  async createOrGetInventorySource(input: CreateInventorySourceInput): Promise<{ source: Record<string, unknown>; created: boolean }> {
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    const parsed = createInventorySourceSchema.parse({
+      displayName: input.displayName, provider: input.provider, language: input.language ?? null,
+      defaultCurrencyCode: input.defaultCurrencyCode ?? null, defaultPricingProfileKey: input.defaultPricingProfileKey ?? null,
+      defaultStorefrontCategoryId: input.defaultStorefrontCategoryId ?? null, notes: input.notes ?? null,
+    })
+    const normalized = normalizeSourceName(parsed.displayName)
+    return this.manager_.transactional(async (manager) => {
+      await manager.execute(`select pg_advisory_xact_lock(hashtextextended(?::text, 0))`, [`source:${normalized}`])
+      const [existing] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_inventory_source where normalized_name = ? and deleted_at is null`, [normalized]
+      )
+      if (existing) {
+        if (existing.status === INVENTORY_SOURCE_STATUS.ARCHIVED) {
+          throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This inventory source is archived and cannot receive new imports")
+        }
+        return { source: existing, created: false }
+      }
+      const id = generateEntityId(undefined, "tcisrc")
+      await manager.execute(
+        `insert into trading_card_inventory_source
+         (id, display_name, normalized_name, provider, language, status, default_currency_code, default_pricing_profile_key, default_storefront_category_id, notes)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id, parsed.displayName, normalized, parsed.provider, parsed.language ?? null, INVENTORY_SOURCE_STATUS.ACTIVE,
+          parsed.defaultCurrencyCode ?? null, parsed.defaultPricingProfileKey ?? null, parsed.defaultStorefrontCategoryId ?? null,
+          parsed.notes ?? null,
+        ]
+      )
+      await this.writeAudit(manager, {
+        ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_SOURCE, entityId: id,
+        action: INVENTORY_AUDIT_ACTION.SOURCE_CREATED,
+        newValue: { displayName: parsed.displayName, provider: parsed.provider, language: parsed.language ?? null },
+      })
+      const [saved] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_inventory_source where id = ?`, [id]
+      )
+      return { source: saved, created: true }
+    })
+  }
+
   async renameInventorySource(input: AuditContext & { id: string; displayName: string }) {
     auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
     const parsed = renameInventorySourceSchema.parse({ id: input.id, displayName: input.displayName })
@@ -317,24 +395,76 @@ class TradingCardInventoryModuleService extends MedusaService({
         `select id from trading_card_inventory_source where id = ? and deleted_at is null for update`, [input.inventorySourceId]
       )
       if (!source) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory source not found")
-      const [{ next_sequence }] = await manager.execute<{ next_sequence: number }>(
-        `select coalesce(max(sequence_number), 0) + 1 as next_sequence from trading_card_inventory_snapshot where inventory_source_id = ?`,
-        [input.inventorySourceId]
-      )
-      const id = generateEntityId(undefined, "tcisnap")
+      return this.insertDraftSnapshot(manager, input)
+    })
+  }
+
+  private async insertDraftSnapshot(manager: TxManager, input: AuditContext & {
+    inventorySourceId: string; originalFilename?: string | null; contentHash?: string | null
+  }) {
+    const [{ next_sequence }] = await manager.execute<{ next_sequence: number }>(
+      `select coalesce(max(sequence_number), 0) + 1 as next_sequence from trading_card_inventory_snapshot where inventory_source_id = ?`,
+      [input.inventorySourceId]
+    )
+    const id = generateEntityId(undefined, "tcisnap")
+    await manager.execute(
+      `insert into trading_card_inventory_snapshot
+       (id, inventory_source_id, status, sequence_number, original_filename, content_hash, created_by)
+       values (?, ?, ?, ?, ?, ?, ?)`,
+      [id, input.inventorySourceId, INVENTORY_SNAPSHOT_STATUS.DRAFT, next_sequence, input.originalFilename ?? null, input.contentHash ?? null, input.actor]
+    )
+    await this.writeAudit(manager, {
+      ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_SNAPSHOT, entityId: id,
+      action: INVENTORY_AUDIT_ACTION.SNAPSHOT_CREATED,
+      newValue: { inventorySourceId: input.inventorySourceId, sequenceNumber: next_sequence, status: INVENTORY_SNAPSHOT_STATUS.DRAFT },
+    })
+    const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_inventory_snapshot where id = ?`, [id])
+    return saved
+  }
+
+  /**
+   * Stage 5B.1: read-only lookup mirroring the partial unique index's own
+   * predicate on `(inventory_source_id, content_hash)` exactly. Pure read, no
+   * lock — duplicate-upload *decisions* belong to the import workflow, not
+   * this method; it only answers "does a live snapshot already exist".
+   */
+  async findLiveSnapshotByContentHash(input: { inventorySourceId: string; contentHash: string }) {
+    idSchema.parse(input.inventorySourceId)
+    const [existing] = await this.manager_.execute<Record<string, unknown>>(
+      `select * from trading_card_inventory_snapshot
+       where inventory_source_id = ? and content_hash = ? and status not in ('REJECTED', 'FAILED') and deleted_at is null`,
+      [input.inventorySourceId, input.contentHash],
+    )
+    return existing ?? null
+  }
+
+  /**
+   * Stage 5B.1: creates a DRAFT snapshot for a Pulse import, closing the
+   * TOCTOU race between the workflow's `findLiveSnapshotByContentHash`
+   * pre-check and this insert with an advisory lock scoped to
+   * `(source, content_hash)`. Throws `DuplicateSnapshotError` in the rare
+   * case a concurrent upload won that race — the workflow (not this method)
+   * decides what a "duplicate" result means.
+   */
+  async createDraftSnapshot(input: AuditContext & { inventorySourceId: string; originalFilename?: string | null; contentHash: string }) {
+    idSchema.parse(input.inventorySourceId)
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    return this.manager_.transactional(async (manager) => {
       await manager.execute(
-        `insert into trading_card_inventory_snapshot
-         (id, inventory_source_id, status, sequence_number, original_filename, content_hash, created_by)
-         values (?, ?, ?, ?, ?, ?, ?)`,
-        [id, input.inventorySourceId, INVENTORY_SNAPSHOT_STATUS.DRAFT, next_sequence, input.originalFilename ?? null, input.contentHash ?? null, input.actor]
+        `select pg_advisory_xact_lock(hashtextextended(?::text, 0))`,
+        [`snapshot-hash:${input.inventorySourceId}:${input.contentHash}`]
       )
-      await this.writeAudit(manager, {
-        ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_SNAPSHOT, entityId: id,
-        action: INVENTORY_AUDIT_ACTION.SNAPSHOT_CREATED,
-        newValue: { inventorySourceId: input.inventorySourceId, sequenceNumber: next_sequence, status: INVENTORY_SNAPSHOT_STATUS.DRAFT },
-      })
-      const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_inventory_snapshot where id = ?`, [id])
-      return saved
+      const [source] = await manager.execute<Record<string, unknown>>(
+        `select id from trading_card_inventory_source where id = ? and deleted_at is null for update`, [input.inventorySourceId]
+      )
+      if (!source) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory source not found")
+      const [existing] = await manager.execute<Record<string, unknown>>(
+        `select id from trading_card_inventory_snapshot
+         where inventory_source_id = ? and content_hash = ? and status not in ('REJECTED', 'FAILED') and deleted_at is null`,
+        [input.inventorySourceId, input.contentHash],
+      )
+      if (existing) throw new DuplicateSnapshotError(existing.id as string)
+      return this.insertDraftSnapshot(manager, input)
     })
   }
 
@@ -471,7 +601,7 @@ class TradingCardInventoryModuleService extends MedusaService({
         const chunk = input.rows.slice(offset, offset + 500)
         const chunkIds = chunk.map(() => generateEntityId(undefined, "tcisentry"))
         entryIds.push(...chunkIds)
-        const placeholders = chunk.map(() => `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)`).join(", ")
+        const placeholders = chunk.map(() => `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)`).join(", ")
         const params = chunk.flatMap((row, index) => {
           // A blank/malformed row may have no usable provider reference; a
           // synthetic bounded placeholder keeps the NOT-NULL/length
@@ -581,6 +711,115 @@ class TradingCardInventoryModuleService extends MedusaService({
       const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_inventory_snapshot_entry_match where id = ?`, [matchId])
       return saved
     })
+  }
+
+  /**
+   * Stage 5B.1: bulk create-or-update for the import workflow's matching
+   * step — one transaction per chunk instead of one per row. Uses the
+   * existing partial unique index on `snapshot_entry_id` as the upsert
+   * target; a retry increments `retry_count` the same way the single-entry
+   * `recordSnapshotEntryMatch` does. Diagnostics are always appended, never
+   * replaced.
+   */
+  async recordSnapshotEntryMatches(input: RecordSnapshotEntryMatchesInput) {
+    idSchema.parse(input.inventorySnapshotId)
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    if (!Array.isArray(input.entries) || input.entries.length === 0) {
+      throw new MedusaError(MedusaError.Types.INVALID_DATA, "At least one match result is required")
+    }
+    for (const entry of input.entries) {
+      idSchema.parse(entry.snapshotEntryId)
+      if (!Object.values(INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS).includes(entry.matchingStatus as never)) {
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, "Invalid matching status")
+      }
+      if (!Object.values(INVENTORY_SNAPSHOT_ENTRY_MATCHED_VIA).includes(entry.matchedVia as never)) {
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, "Invalid matched-via value")
+      }
+    }
+    return this.manager_.transactional(async (manager) => {
+      const [snapshot] = await manager.execute<Record<string, unknown>>(
+        `select id from trading_card_inventory_snapshot where id = ? and deleted_at is null`, [input.inventorySnapshotId]
+      )
+      if (!snapshot) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory snapshot not found")
+      let processedCount = 0
+      for (let offset = 0; offset < input.entries.length; offset += 250) {
+        const chunk = input.entries.slice(offset, offset + 250)
+        const entryIds = chunk.map((entry) => entry.snapshotEntryId)
+        const owned = await manager.execute<{ id: string }>(
+          `select id from trading_card_inventory_snapshot_entry
+           where id in (${entryIds.map(() => "?").join(", ")}) and inventory_snapshot_id = ? and deleted_at is null`,
+          [...entryIds, input.inventorySnapshotId],
+        )
+        const ownedIds = new Set(owned.map((row) => row.id))
+        for (const entryId of entryIds) {
+          if (!ownedIds.has(entryId)) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Snapshot entry not found for this snapshot")
+        }
+        const placeholders = chunk.map(() => `(?, ?, ?, ?, ?, ?, case when ? = 'MATCHED' then now() else null end)`).join(", ")
+        const params = chunk.flatMap((entry) => {
+          const variantId = entry.matchingStatus === INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS.MATCHED ? (entry.tradingCardVariantId ?? null) : null
+          return [
+            generateEntityId(undefined, "tcisematch"), entry.snapshotEntryId, input.inventorySnapshotId,
+            entry.matchingStatus, variantId, entry.matchedVia, entry.matchingStatus,
+          ]
+        })
+        await manager.execute(
+          `insert into trading_card_inventory_snapshot_entry_match
+           (id, snapshot_entry_id, inventory_snapshot_id, matching_status, trading_card_variant_id, matched_via, matched_at)
+           values ${placeholders}
+           on conflict (snapshot_entry_id) where deleted_at is null do update set
+             matching_status = excluded.matching_status,
+             trading_card_variant_id = excluded.trading_card_variant_id,
+             matched_via = excluded.matched_via,
+             matched_at = excluded.matched_at,
+             retry_count = trading_card_inventory_snapshot_entry_match.retry_count + 1,
+             last_retried_at = now(),
+             updated_at = now()`,
+          params,
+        )
+        for (const entry of chunk) {
+          if (entry.matchingStatus === INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS.MATCHED && entry.tradingCardVariantId) {
+            await manager.execute(
+              `update trading_card_inventory_snapshot_entry set trading_card_variant_id = ? where id = ?`,
+              [entry.tradingCardVariantId, entry.snapshotEntryId],
+            )
+          }
+        }
+        const allDiagnostics = chunk.flatMap((entry) => entry.diagnostics.map((diagnostic) => ({ ...diagnostic, entryId: entry.snapshotEntryId })))
+        for (let diagOffset = 0; diagOffset < allDiagnostics.length; diagOffset += 500) {
+          const diagChunk = allDiagnostics.slice(diagOffset, diagOffset + 500)
+          if (diagChunk.length === 0) continue
+          const diagPlaceholders = diagChunk.map(() => `(?, ?, ?, ?, ?, ?, ?, ?, ?)`).join(", ")
+          const diagParams = diagChunk.flatMap((diagnostic) => [
+            generateEntityId(undefined, "tcisediag"), diagnostic.entryId, input.inventorySnapshotId, diagnostic.rowNumber,
+            diagnostic.phase, diagnostic.code, diagnostic.severity, diagnostic.fieldRef ?? null, diagnostic.message,
+          ])
+          await manager.execute(
+            `insert into trading_card_inventory_snapshot_entry_diagnostic
+             (id, snapshot_entry_id, inventory_snapshot_id, row_number, phase, code, severity, field_ref, message)
+             values ${diagPlaceholders}`,
+            diagParams,
+          )
+        }
+        processedCount += chunk.length
+      }
+      return { inventorySnapshotId: input.inventorySnapshotId, processedCount }
+    })
+  }
+
+  /**
+   * Stage 5B.1: single-row audit write for import-lifecycle events that
+   * don't naturally belong inside an existing domain-mutation transaction
+   * (started, duplicate detected, matching completed, reconciliation
+   * bracketing, failed). Keeps `writeAudit` calls owned by a service
+   * transaction, never invoked directly from the workflow layer.
+   */
+  async recordImportLifecycleAudit(input: AuditContext & { snapshotId: string; action: string; newValue?: unknown }) {
+    idSchema.parse(input.snapshotId)
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    return this.manager_.transactional((manager) => this.writeAudit(manager, {
+      ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_SNAPSHOT, entityId: input.snapshotId,
+      action: input.action, newValue: input.newValue,
+    }))
   }
 
   /** Stage 5B.1: aggregate row/diagnostic/matching counts for the Admin preview screen — computed live, never stored redundantly. */
@@ -703,12 +942,20 @@ class TradingCardInventoryModuleService extends MedusaService({
         }
       }
 
+      // `outcome` is null for entries added through the older, non-Pulse
+      // `addInventorySnapshotEntries` path (kept behaviour-identical here);
+      // a Stage 5B.1 Pulse row with outcome INVALID/SKIPPED must never
+      // influence a reconciliation group.
       const currentRows = await manager.execute<Record<string, unknown>>(
-        `select * from trading_card_inventory_snapshot_entry where inventory_snapshot_id = ? and deleted_at is null order by id`, [input.snapshotId]
+        `select * from trading_card_inventory_snapshot_entry
+         where inventory_snapshot_id = ? and deleted_at is null and (outcome is null or outcome not in ('INVALID', 'SKIPPED'))
+         order by id`, [input.snapshotId]
       )
       const previousRows = input.previousApprovedSnapshotId
         ? await manager.execute<Record<string, unknown>>(
-          `select * from trading_card_inventory_snapshot_entry where inventory_snapshot_id = ? and deleted_at is null order by id`,
+          `select * from trading_card_inventory_snapshot_entry
+           where inventory_snapshot_id = ? and deleted_at is null and (outcome is null or outcome not in ('INVALID', 'SKIPPED'))
+           order by id`,
           [input.previousApprovedSnapshotId],
         ) : []
       const mapEntry = (row: Record<string, unknown>): SnapshotEntryInput => ({

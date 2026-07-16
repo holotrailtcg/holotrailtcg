@@ -79,12 +79,28 @@ const TRADING_CARDS_MEDUSA_APP_SPEC_PATTERNS = [
   "src/modules/trading-cards/__tests__/trading-card-image-orphan-reconciliation\\.spec\\.ts$",
 ];
 
+// Stage 5B.1 Slice 2: the same `MedusaApp`-loader-registry conflict
+// documented above for `TRADING_CARDS_MODULE` now also applies to
+// `TRADING_CARD_INVENTORY_MODULE`, once more than one spec file boots it in
+// its own `beforeAll`. `trading-card-inventory-module.spec.ts` was safe
+// alone; adding the two new Pulse-import specs (one of which also boots
+// `TRADING_CARDS_MODULE` in the same call) reintroduces the exact crash, so
+// all three must be isolated from the broad pass and from each other the
+// same way — see the `test:integration:modules` script in `package.json`.
+const TRADING_CARD_INVENTORY_MEDUSA_APP_SPEC_PATTERNS = [
+  "src/modules/trading-card-inventory/__tests__/trading-card-inventory-module\\.spec\\.ts$",
+  "src/modules/trading-card-inventory/__tests__/pulse-import-service-methods\\.integration\\.spec\\.ts$",
+  "src/modules/trading-card-inventory/__tests__/import-pulse-csv-snapshot\\.integration\\.spec\\.ts$",
+];
+
 if (process.env.TEST_TYPE === "integration:http") {
   module.exports.testMatch = ["**/integration-tests/http/*.spec.[jt]s"];
 } else if (process.env.TEST_TYPE === "integration:modules") {
   module.exports.testMatch = ["**/src/modules/*/__tests__/**/*.[jt]s"];
   if (process.env.MODULE_TESTS_EXCLUDE_MEDUSA_APP_PAIR === "true") {
-    module.exports.testPathIgnorePatterns = ["/node_modules/", ...TRADING_CARDS_MEDUSA_APP_SPEC_PATTERNS];
+    module.exports.testPathIgnorePatterns = [
+      "/node_modules/", ...TRADING_CARDS_MEDUSA_APP_SPEC_PATTERNS, ...TRADING_CARD_INVENTORY_MEDUSA_APP_SPEC_PATTERNS,
+    ];
   }
 } else if (process.env.TEST_TYPE === "unit") {
   // Admin component specs opt into jsdom per-file via a `@jest-environment

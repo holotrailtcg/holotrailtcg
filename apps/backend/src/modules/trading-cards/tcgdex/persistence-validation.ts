@@ -6,8 +6,15 @@ const MAX_PROVIDER_IDENTIFIER_LENGTH = 128
 const MAX_ACTOR_LENGTH = 128
 const MAX_DIAGNOSTIC_LENGTH = 128
 
+// `/` and `|` are allowed alongside TCGdex's plain alphanumeric identifiers
+// because a Stage 5B.1 Pulse `Product ID` (e.g.
+// `card:sv1|044/196|Holo|null|null|null|nm`) is itself a valid provider
+// identifier for `ExternalCardReference(provider=PULSE)` and always
+// contains both characters (card numbers use `/`, the Pulse format uses `|`
+// as its field separator) — still rejecting whitespace, control characters,
+// `?` and `#`, which no real provider identifier of either kind ever needs.
 export const providerIdentifierSchema = z.string().trim().min(1).max(MAX_PROVIDER_IDENTIFIER_LENGTH).refine(
-  (value) => ![...value].some((character) => character.charCodeAt(0) < 0x20 || character.charCodeAt(0) === 0x7f) && !/[\s\/?#]/u.test(value),
+  (value) => ![...value].some((character) => character.charCodeAt(0) < 0x20 || character.charCodeAt(0) === 0x7f) && !/[\s?#]/u.test(value),
   "Invalid provider identifier"
 )
 

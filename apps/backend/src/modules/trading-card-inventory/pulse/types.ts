@@ -17,6 +17,10 @@ export const PULSE_FILE_LIMITS = {
   MAX_FIELD_LENGTH: 2_000,
 } as const
 
+/** Single source of truth for filename/MIME acceptance — imported by both the import workflow and the (future) Admin upload route so validation never drifts between the two. */
+export const PULSE_UPLOAD_FILENAME_SUFFIX = ".csv"
+export const PULSE_UPLOAD_MIME_ALLOWLIST = ["text/csv", "application/vnd.ms-excel", "application/csv"] as const
+
 export interface RowDiagnostic {
   rowNumber: number
   phase: "PARSE" | "MATCHING"
