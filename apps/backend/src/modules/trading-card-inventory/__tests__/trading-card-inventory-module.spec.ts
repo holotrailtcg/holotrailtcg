@@ -1,6 +1,7 @@
 import { MedusaApp } from "@medusajs/framework/modules-sdk"
 import { ContainerRegistrationKeys, createPgConnection } from "@medusajs/framework/utils"
 import { TRADING_CARD_INVENTORY_MODULE } from "../index"
+import { Migration20260716150000 } from "../migrations/Migration20260716150000"
 
 let pgConnection: ReturnType<typeof createPgConnection>
 let medusaApp: Awaited<ReturnType<typeof MedusaApp>>
@@ -11,6 +12,9 @@ const suffix = () => `${Date.now().toString(36)}${Math.random().toString(36).sli
 
 beforeAll(async () => {
   pgConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
+  const migration = new Migration20260716150000(undefined as never, undefined as never)
+  await migration.up()
+  for (const query of migration.getQueries().map(String)) await pgConnection.raw(query)
   medusaApp = await MedusaApp({
     modulesConfig: { [TRADING_CARD_INVENTORY_MODULE]: { resolve: "./src/modules/trading-card-inventory" } },
     injectedDependencies: { [ContainerRegistrationKeys.PG_CONNECTION]: pgConnection },
@@ -36,9 +40,10 @@ async function createSource(overrides: Record<string, unknown> = {}) {
 }
 
 describe("trading-card-inventory schema", () => {
-  it("resolves all six model services", () => {
+  it("resolves all seven model services", () => {
     expect(typeof service.createInventorySources).toBe("function")
     expect(typeof service.createInventorySnapshots).toBe("function")
+    expect(typeof service.listInventorySnapshotEntries).toBe("function")
     expect(typeof service.createInventoryHoldings).toBe("function")
     expect(typeof service.createInventoryProposals).toBe("function")
     expect(typeof service.listInventoryTransactions).toBe("function")
@@ -59,6 +64,67 @@ describe("trading-card-inventory schema", () => {
     await expect(service.softDeleteInventoryAuditEntries()).rejects.toThrow("cannot be deleted")
     await expect(service.restoreInventoryAuditEntries()).rejects.toThrow("cannot be restored")
   })
+})
+
+describe("snapshot reconciliation", () => {
+  async function snapshotWithRows(sourceId: string, rows: Array<Record<string, unknown>>) {
+    const snapshot = await service.createInventorySnapshot({ inventorySourceId: sourceId, actor: "test-actor", source: "MANUAL" })
+    await service.addInventorySnapshotEntries({ snapshotId: snapshot.id, entries: rows, actor: "test-actor", source: "MANUAL" })
+    await service.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "VALIDATED", actor: "test-actor", source: "MANUAL" })
+    return snapshot
+  }
+
+  const entry = (reference: string, overrides: Record<string, unknown> = {}) => ({
+    providerReference: reference, providerReferenceType: "PULSE_PRODUCT_ID", tradingCardVariantId: `tcvar_${reference}`,
+    quantity: 1, currencyCode: "GBP", unitAcquisitionCost: "1.00", unitMarketPrice: "2.00", unitSellingPrice: "3.00",
+    ...overrides,
+  })
+
+  it("persists grouped draft proposals, exact diagnostics, and missing-to-zero changes", async () => {
+    const source = await createSource()
+    const baseline = await snapshotWithRows(source.id, [entry("duplicate"), entry("duplicate", { quantity: 3, unitAcquisitionCost: "2.00" }), entry("missing", { quantity: 4 })])
+    await service.transitionInventorySnapshotStatus({ id: baseline.id, targetStatus: "PENDING_REVIEW", actor: "reviewer", source: "MANUAL" })
+    await service.transitionInventorySnapshotStatus({ id: baseline.id, targetStatus: "APPROVED", actor: "reviewer", source: "MANUAL" })
+    const current = await snapshotWithRows(source.id, [entry("duplicate", { quantity: 5, unitAcquisitionCost: "2.00" }), entry("new"), entry("unresolved", { tradingCardVariantId: null })])
+    const summary = await service.reconcileInventorySnapshot({
+      inventorySourceId: source.id, snapshotId: current.id, previousApprovedSnapshotId: baseline.id,
+      actor: "reconciler", source: "SYSTEM", comparedAt: new Date("2026-07-16T12:00:00.000Z"),
+    })
+    expect(summary).toMatchObject({ status: "PENDING_REVIEW", proposalCount: 4, baselineSnapshotId: baseline.id })
+    const proposals = await service.listInventoryProposals({ inventory_snapshot_id: current.id })
+    expect(proposals.every((proposal: Record<string, unknown>) => proposal.review_status === "PENDING")).toBe(true)
+    const missing = proposals.find((proposal: Record<string, unknown>) => proposal.provider_reference === "missing")
+    expect(missing).toMatchObject({ previous_quantity: 4, proposed_quantity: 0, quantity_delta: -4, change_kind: "QUANTITY_CHANGE" })
+    const duplicate = proposals.find((proposal: Record<string, unknown>) => proposal.provider_reference === "duplicate")
+    expect(duplicate.reconciliation_diagnostics).toMatchObject({ duplicateRowCount: 1 })
+  }, 30000)
+
+  it("is idempotent and serialises concurrent attempts without duplicate proposals", async () => {
+    const source = await createSource()
+    const current = await snapshotWithRows(source.id, [entry(`concurrent-${suffix()}`)])
+    const attempts = await Promise.all(Array.from({ length: 4 }, () => service.reconcileInventorySnapshot({
+      inventorySourceId: source.id, snapshotId: current.id, actor: "reconciler", source: "SYSTEM",
+    })))
+    expect(new Set(attempts.map((result: Record<string, unknown>) => result.proposalCount))).toEqual(new Set([1]))
+    const [, count] = await service.listAndCountInventoryProposals({ inventory_snapshot_id: current.id })
+    expect(count).toBe(1)
+  }, 30000)
+
+  it("rejects invalid baselines and rolls back all writes", async () => {
+    const source = await createSource()
+    const rejected = await snapshotWithRows(source.id, [entry("old")])
+    await service.transitionInventorySnapshotStatus({ id: rejected.id, targetStatus: "PENDING_REVIEW", actor: "reviewer", source: "MANUAL" })
+    await service.transitionInventorySnapshotStatus({ id: rejected.id, targetStatus: "REJECTED", actor: "reviewer", source: "MANUAL" })
+    const current = await snapshotWithRows(source.id, [entry("new")])
+    await expect(service.reconcileInventorySnapshot({
+      inventorySourceId: source.id, snapshotId: current.id, previousApprovedSnapshotId: rejected.id,
+      actor: "reconciler", source: "SYSTEM",
+    })).rejects.toThrow(/approved snapshot/)
+    const refreshed = await service.retrieveInventorySnapshot(current.id)
+    expect(refreshed.status).toBe("VALIDATED")
+    const [, count] = await service.listAndCountInventoryProposals({ inventory_snapshot_id: current.id })
+    expect(count).toBe(0)
+  }, 30000)
 })
 
 describe("inventory source", () => {

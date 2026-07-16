@@ -5,14 +5,17 @@ import InventoryHolding from "./models/inventory-holding"
 import InventoryProposal from "./models/inventory-proposal"
 import InventoryTransaction from "./models/inventory-transaction"
 import InventoryAuditEntry from "./models/inventory-audit-entry"
+import InventorySnapshotEntry from "./models/inventory-snapshot-entry"
 import { normalizeSourceName } from "./identity/normalize-source-name"
+import { reconcileSnapshots, type SnapshotEntryInput } from "./reconciliation/reconcile"
+import { canonicalDecimal } from "./reconciliation/decimal"
 import {
   auditContextSchema, createInventorySourceSchema, renameInventorySourceSchema, inventoryHoldingUpsertSchema,
   holdingStatusSchema, inventoryProposalCreateSchema, inventoryTransactionAppendSchema, idSchema,
 } from "./validation"
 import {
   INVENTORY_AUDIT_ACTION, INVENTORY_AUDIT_ENTITY_TYPE, INVENTORY_HOLDING_STATUS,
-  INVENTORY_PROPOSAL_REVIEW_STATUS, INVENTORY_SNAPSHOT_STATUS, INVENTORY_SOURCE_STATUS,
+  INVENTORY_PROPOSAL_REVIEW_STATUS, INVENTORY_PROVIDER_REFERENCE_TYPE, INVENTORY_SNAPSHOT_STATUS, INVENTORY_SOURCE_STATUS,
   isValidInventoryHoldingTransition, isValidInventoryProposalTransition, isValidInventorySnapshotTransition,
   type InventoryHoldingStatus, type InventoryProposalReviewStatus, type InventoryRecordSource, type InventorySnapshotStatus,
 } from "./types"
@@ -75,8 +78,18 @@ export interface AppendInventoryTransactionInput extends AuditContext {
   note?: string | null
 }
 
+export interface AddInventorySnapshotEntryInput extends SnapshotEntryInput {}
+
+export interface ReconcileInventorySnapshotInput extends AuditContext {
+  inventorySourceId: string
+  snapshotId: string
+  previousApprovedSnapshotId?: string | null
+  priceLockedVariantIds?: string[]
+  comparedAt?: Date
+}
+
 class TradingCardInventoryModuleService extends MedusaService({
-  InventorySource, InventorySnapshot, InventoryHolding, InventoryProposal, InventoryTransaction, InventoryAuditEntry,
+  InventorySource, InventorySnapshot, InventorySnapshotEntry, InventoryHolding, InventoryProposal, InventoryTransaction, InventoryAuditEntry,
 }) {
   protected manager_: EntityManager
 
@@ -102,6 +115,14 @@ class TradingCardInventoryModuleService extends MedusaService({
   deleteInventoryAuditEntries = async (): Promise<never> => this.lifecycleMutationBlocked("Inventory audit entries cannot be deleted")
   softDeleteInventoryAuditEntries = async (): Promise<never> => this.lifecycleMutationBlocked("Inventory audit entries cannot be deleted")
   restoreInventoryAuditEntries = async (): Promise<never> => this.lifecycleMutationBlocked("Inventory audit entries cannot be restored")
+
+  // Snapshot entries are immutable input facts. They can only be appended to
+  // a DRAFT snapshot through addInventorySnapshotEntries.
+  createInventorySnapshotEntries = async (): Promise<never> => this.lifecycleMutationBlocked("Snapshot entry creation")
+  updateInventorySnapshotEntries = async (): Promise<never> => this.lifecycleMutationBlocked("Snapshot entry updates")
+  deleteInventorySnapshotEntries = async (): Promise<never> => this.lifecycleMutationBlocked("Snapshot entry deletion")
+  softDeleteInventorySnapshotEntries = async (): Promise<never> => this.lifecycleMutationBlocked("Snapshot entry deletion")
+  restoreInventorySnapshotEntries = async (): Promise<never> => this.lifecycleMutationBlocked("Snapshot entry restoration")
 
   private async writeAudit(manager: TxManager, input: AuditContext & {
     entityType: string; entityId: string; action: string; oldValue?: unknown; newValue?: unknown
@@ -300,6 +321,224 @@ class TradingCardInventoryModuleService extends MedusaService({
       const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_inventory_snapshot where id = ?`, [input.id])
       return saved
     })
+  }
+
+  async addInventorySnapshotEntries(input: AuditContext & { snapshotId: string; entries: AddInventorySnapshotEntryInput[] }) {
+    idSchema.parse(input.snapshotId)
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    if (!Array.isArray(input.entries) || input.entries.length === 0 || input.entries.length > 50_000) {
+      throw new MedusaError(MedusaError.Types.INVALID_DATA, "Snapshot entries must contain between 1 and 50,000 rows")
+    }
+    const entries = input.entries.map((entry) => {
+      if (!entry.providerReference || entry.providerReference.length > 255 ||
+        !Object.values(INVENTORY_PROVIDER_REFERENCE_TYPE).includes(entry.providerReferenceType as never)) {
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, "Every snapshot entry requires a bounded provider reference and type")
+      }
+      if (!Number.isSafeInteger(entry.quantity) || entry.quantity < 0) {
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, "Snapshot entry quantities must be non-negative safe integers")
+      }
+      if (entry.currencyCode && !/^[A-Z]{3}$/.test(entry.currencyCode)) {
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, "Snapshot entry currency codes must be three uppercase letters")
+      }
+      const amounts = [entry.unitAcquisitionCost, entry.unitMarketPrice, entry.unitSellingPrice]
+      if (amounts.some((amount) => amount !== null && amount !== undefined) && !entry.currencyCode) {
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, "Snapshot entry money amounts require a currency")
+      }
+      return {
+        ...entry,
+        unitAcquisitionCost: canonicalDecimal(entry.unitAcquisitionCost),
+        unitMarketPrice: canonicalDecimal(entry.unitMarketPrice),
+        unitSellingPrice: canonicalDecimal(entry.unitSellingPrice),
+      }
+    })
+    return this.manager_.transactional(async (manager) => {
+      const [snapshot] = await manager.execute<Record<string, unknown>>(
+        `select id, status from trading_card_inventory_snapshot where id = ? and deleted_at is null for update`, [input.snapshotId]
+      )
+      if (!snapshot) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory snapshot not found")
+      if (snapshot.status !== INVENTORY_SNAPSHOT_STATUS.DRAFT) {
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, "Snapshot entries can only be added while the snapshot is DRAFT")
+      }
+      for (let offset = 0; offset < entries.length; offset += 500) {
+        const chunk = entries.slice(offset, offset + 500)
+        const placeholders = chunk.map(() => `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).join(", ")
+        const params = chunk.flatMap((entry) => [
+          generateEntityId(undefined, "tcisentry"), input.snapshotId, entry.providerReference, entry.providerReferenceType,
+          entry.tradingCardVariantId ?? null, entry.quantity, entry.currencyCode ?? null,
+          entry.unitAcquisitionCost ?? null, entry.unitMarketPrice ?? null, entry.unitSellingPrice ?? null,
+        ])
+        await manager.execute(
+          `insert into trading_card_inventory_snapshot_entry
+           (id, inventory_snapshot_id, provider_reference, provider_reference_type, trading_card_variant_id, quantity,
+            currency_code, unit_acquisition_cost, unit_market_price, unit_selling_price) values ${placeholders}`,
+          params,
+        )
+      }
+      await manager.execute(
+        `update trading_card_inventory_snapshot set row_count = (
+           select count(*) from trading_card_inventory_snapshot_entry where inventory_snapshot_id = ? and deleted_at is null
+         ), updated_at = now() where id = ?`, [input.snapshotId, input.snapshotId]
+      )
+      return { snapshotId: input.snapshotId, addedCount: entries.length }
+    })
+  }
+
+  async reconcileInventorySnapshot(input: ReconcileInventorySnapshotInput) {
+    idSchema.parse(input.inventorySourceId)
+    idSchema.parse(input.snapshotId)
+    if (input.previousApprovedSnapshotId) idSchema.parse(input.previousApprovedSnapshotId)
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    const comparedAt = input.comparedAt ?? new Date()
+    const lockedIds = new Set(input.priceLockedVariantIds ?? [])
+    return this.manager_.transactional(async (manager) => {
+      await manager.execute(`select pg_advisory_xact_lock(hashtextextended(?::text, 0))`, [`reconcile-source:${input.inventorySourceId}`])
+      const [source] = await manager.execute<Record<string, unknown>>(
+        `select id, status from trading_card_inventory_source where id = ? and deleted_at is null`, [input.inventorySourceId]
+      )
+      if (!source) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory source not found")
+      if (source.status !== INVENTORY_SOURCE_STATUS.ACTIVE) {
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, "Only an active inventory source can be reconciled")
+      }
+      const [snapshot] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_inventory_snapshot where id = ? and inventory_source_id = ? and deleted_at is null for update`,
+        [input.snapshotId, input.inventorySourceId],
+      )
+      if (!snapshot) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory snapshot not found for this source")
+      if (snapshot.status === INVENTORY_SNAPSHOT_STATUS.PENDING_REVIEW && snapshot.reconciled_at) {
+        if ((snapshot.reconciled_against_snapshot_id ?? null) !== (input.previousApprovedSnapshotId ?? null)) {
+          throw new MedusaError(MedusaError.Types.INVALID_DATA, "Snapshot was already reconciled against a different baseline")
+        }
+        return this.getReconciliationSummaryWithManager(manager, input.snapshotId)
+      }
+      if (snapshot.status !== INVENTORY_SNAPSHOT_STATUS.VALIDATED) {
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, "Only a VALIDATED snapshot can be reconciled")
+      }
+
+      let baseline: Record<string, unknown> | undefined
+      if (input.previousApprovedSnapshotId) {
+        ;[baseline] = await manager.execute<Record<string, unknown>>(
+          `select * from trading_card_inventory_snapshot
+           where id = ? and inventory_source_id = ? and approved_at is not null and status not in ('REJECTED', 'FAILED')
+             and deleted_at is null for share`,
+          [input.previousApprovedSnapshotId, input.inventorySourceId],
+        )
+        if (!baseline) throw new MedusaError(MedusaError.Types.INVALID_DATA, "The reconciliation baseline must be an approved snapshot for this source")
+        if (Number(baseline.sequence_number) >= Number(snapshot.sequence_number)) {
+          throw new MedusaError(MedusaError.Types.INVALID_DATA, "The reconciliation baseline must precede the new snapshot")
+        }
+      }
+
+      const currentRows = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_inventory_snapshot_entry where inventory_snapshot_id = ? and deleted_at is null order by id`, [input.snapshotId]
+      )
+      const previousRows = input.previousApprovedSnapshotId
+        ? await manager.execute<Record<string, unknown>>(
+          `select * from trading_card_inventory_snapshot_entry where inventory_snapshot_id = ? and deleted_at is null order by id`,
+          [input.previousApprovedSnapshotId],
+        ) : []
+      const mapEntry = (row: Record<string, unknown>): SnapshotEntryInput => ({
+        providerReference: row.provider_reference as string,
+        providerReferenceType: row.provider_reference_type as string,
+        tradingCardVariantId: row.trading_card_variant_id as string | null,
+        quantity: Number(row.quantity), currencyCode: row.currency_code as string | null,
+        unitAcquisitionCost: row.unit_acquisition_cost === null ? null : String(row.unit_acquisition_cost),
+        unitMarketPrice: row.unit_market_price === null ? null : String(row.unit_market_price),
+        unitSellingPrice: row.unit_selling_price === null ? null : String(row.unit_selling_price),
+      })
+      const proposals = reconcileSnapshots({ previous: previousRows.map(mapEntry), current: currentRows.map(mapEntry), priceLockedVariantIds: lockedIds })
+      for (let offset = 0; offset < proposals.length; offset += 250) {
+        const chunk = proposals.slice(offset, offset + 250)
+        const placeholders = chunk.map(() => `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, 'PENDING')`).join(", ")
+        const params = chunk.flatMap((proposal) => [
+          generateEntityId(undefined, "tciprop"), input.inventorySourceId, input.snapshotId,
+          input.previousApprovedSnapshotId ?? null, proposal.reconciliationKey, proposal.tradingCardVariantId,
+          proposal.providerReference, proposal.providerReferenceType, proposal.proposedQuantity, proposal.previousQuantity,
+          proposal.quantityDelta, proposal.currencyCode, proposal.proposedUnitAcquisitionCost, proposal.previousUnitAcquisitionCost,
+          proposal.proposedUnitMarketPrice, proposal.previousUnitMarketPrice, proposal.proposedUnitSellingPrice,
+          proposal.previousUnitSellingPrice, proposal.changeKind, proposal.reason,
+          JSON.stringify({ changedFields: proposal.changedFields.slice(0, 8), duplicateRowCount: proposal.duplicateRowCount, sellingPriceLocked: proposal.sellingPriceLocked }),
+          comparedAt,
+        ])
+        await manager.execute(
+          `insert into trading_card_inventory_proposal
+           (id, inventory_source_id, inventory_snapshot_id, baseline_snapshot_id, reconciliation_key, trading_card_variant_id,
+            provider_reference, provider_reference_type, proposed_quantity, previous_quantity, quantity_delta, currency_code,
+            proposed_unit_acquisition_cost, previous_unit_acquisition_cost, proposed_unit_market_price, previous_unit_market_price,
+            proposed_unit_selling_price, previous_unit_selling_price, change_kind, reconciliation_reason,
+            reconciliation_diagnostics, compared_at, review_status) values ${placeholders}`,
+          params,
+        )
+      }
+      await manager.execute(
+        `update trading_card_inventory_snapshot set status = ?, reconciled_against_snapshot_id = ?, reconciled_at = ?, updated_at = now() where id = ?`,
+        [INVENTORY_SNAPSHOT_STATUS.PENDING_REVIEW, input.previousApprovedSnapshotId ?? null, comparedAt, input.snapshotId],
+      )
+      await this.writeAudit(manager, {
+        ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_SNAPSHOT, entityId: input.snapshotId,
+        action: INVENTORY_AUDIT_ACTION.SNAPSHOT_RECONCILED,
+        oldValue: { status: INVENTORY_SNAPSHOT_STATUS.VALIDATED },
+        newValue: { status: INVENTORY_SNAPSHOT_STATUS.PENDING_REVIEW, baselineSnapshotId: input.previousApprovedSnapshotId ?? null, proposalCount: proposals.length },
+      })
+      return this.getReconciliationSummaryWithManager(manager, input.snapshotId)
+    })
+  }
+
+  async listSnapshotVariantIds(snapshotIds: string[]) {
+    if (snapshotIds.length === 0 || snapshotIds.length > 2) return []
+    snapshotIds.forEach((id) => idSchema.parse(id))
+    const placeholders = snapshotIds.map(() => "?").join(", ")
+    const rows = await this.manager_.execute<{ trading_card_variant_id: string }>(
+      `select distinct trading_card_variant_id from trading_card_inventory_snapshot_entry
+       where inventory_snapshot_id in (${placeholders}) and trading_card_variant_id is not null and deleted_at is null
+       order by trading_card_variant_id`, snapshotIds,
+    )
+    return rows.map((row) => row.trading_card_variant_id)
+  }
+
+  private async getReconciliationSummaryWithManager(manager: TxManager, snapshotId: string) {
+    const [snapshot] = await manager.execute<Record<string, unknown>>(
+      `select id, inventory_source_id, status, reconciled_against_snapshot_id, reconciled_at
+       from trading_card_inventory_snapshot where id = ? and deleted_at is null`, [snapshotId]
+    )
+    if (!snapshot) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory snapshot not found")
+    const counts = await manager.execute<{ change_kind: string; count: string }>(
+      `select change_kind, count(*)::text as count from trading_card_inventory_proposal
+       where inventory_snapshot_id = ? and deleted_at is null group by change_kind order by change_kind`, [snapshotId]
+    )
+    return {
+      snapshotId: snapshot.id, inventorySourceId: snapshot.inventory_source_id, status: snapshot.status,
+      baselineSnapshotId: snapshot.reconciled_against_snapshot_id ?? null, comparedAt: snapshot.reconciled_at ?? null,
+      proposalCount: counts.reduce((sum, row) => sum + Number(row.count), 0),
+      proposalCounts: Object.fromEntries(counts.map((row) => [row.change_kind, Number(row.count)])),
+    }
+  }
+
+  async getReconciliationSummary(snapshotId: string) {
+    idSchema.parse(snapshotId)
+    return this.getReconciliationSummaryWithManager(this.manager_, snapshotId)
+  }
+
+  async getProposalSummary(snapshotId: string) {
+    idSchema.parse(snapshotId)
+    const [snapshot] = await this.manager_.execute<Record<string, unknown>>(
+      `select id from trading_card_inventory_snapshot where id = ? and deleted_at is null`, [snapshotId]
+    )
+    if (!snapshot) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory snapshot not found")
+    const byKind = await this.manager_.execute<{ key: string; count: string }>(
+      `select change_kind as key, count(*)::text as count from trading_card_inventory_proposal
+       where inventory_snapshot_id = ? and deleted_at is null group by change_kind order by change_kind`, [snapshotId]
+    )
+    const byStatus = await this.manager_.execute<{ key: string; count: string }>(
+      `select review_status as key, count(*)::text as count from trading_card_inventory_proposal
+       where inventory_snapshot_id = ? and deleted_at is null group by review_status order by review_status`, [snapshotId]
+    )
+    const byChangeKind = Object.fromEntries(byKind.map((row) => [row.key, Number(row.count)]))
+    const byReviewStatus = Object.fromEntries(byStatus.map((row) => [row.key, Number(row.count)]))
+    return {
+      inventorySnapshotId: snapshotId,
+      count: Object.values(byChangeKind).reduce((sum, count) => sum + count, 0),
+      byChangeKind, byReviewStatus,
+    }
   }
 
   // ---------------------------------------------------------------------

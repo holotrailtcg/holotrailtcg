@@ -1,5 +1,6 @@
 import { createPgConnection } from "@medusajs/framework/utils"
 import { Migration20260716090000 } from "../migrations/Migration20260716090000"
+import { Migration20260716150000 } from "../migrations/Migration20260716150000"
 
 let pgConnection: ReturnType<typeof createPgConnection>
 
@@ -7,11 +8,16 @@ let pgConnection: ReturnType<typeof createPgConnection>
 const rows = (result: any): any[] => Array.isArray(result) ? result : result.rows
 
 const migrationQueries = async (direction: "up" | "down") => {
-  const migration = new Migration20260716090000(undefined as never, undefined as never)
-  await migration[direction]()
-  const queries = [...migration.getQueries()]
-  migration.reset()
-  return queries.map(String)
+  const migrations = direction === "up"
+    ? [new Migration20260716090000(undefined as never, undefined as never), new Migration20260716150000(undefined as never, undefined as never)]
+    : [new Migration20260716150000(undefined as never, undefined as never), new Migration20260716090000(undefined as never, undefined as never)]
+  const queries: string[] = []
+  for (const migration of migrations) {
+    await migration[direction]()
+    queries.push(...migration.getQueries().map(String))
+    migration.reset()
+  }
+  return queries
 }
 
 const executeMigration = async (direction: "up" | "down") => {
@@ -23,6 +29,7 @@ const executeMigration = async (direction: "up" | "down") => {
 const tableNames = [
   "trading_card_inventory_source",
   "trading_card_inventory_snapshot",
+  "trading_card_inventory_snapshot_entry",
   "trading_card_inventory_holding",
   "trading_card_inventory_proposal",
   "trading_card_inventory_transaction",
@@ -66,7 +73,7 @@ afterAll(async () => {
   await pgConnection?.destroy()
 })
 
-describe("Stage 5A.1 inventory domain migration", () => {
+describe("Stage 5A inventory domain migrations", () => {
   it("supports up/up/down/down/up without leaving unrelated schema objects behind", async () => {
     await executeMigration("up")
     const afterFirstUp = await catalogSnapshot()
@@ -100,5 +107,18 @@ describe("Stage 5A.1 inventory domain migration", () => {
       [`tcihold_${Date.now().toString(36)}`, sourceId, `tcvar_${Date.now().toString(36)}`]
     )).rejects.toThrow(/quantity_non_negative|check constraint/i)
     await pgConnection.raw(`delete from trading_card_inventory_source where id = ?`, [sourceId])
+  }, 60000)
+
+  it("rolls the reconciliation migration down without disturbing the Stage 5A.1 tables", async () => {
+    await executeMigration("up")
+    const migration = new Migration20260716150000(undefined as never, undefined as never)
+    await migration.down()
+    for (const query of migration.getQueries().map(String)) await pgConnection.raw(query)
+    const afterDown = await catalogSnapshot()
+    expect(afterDown.tables.map((row) => row.relation_name)).not.toContain("trading_card_inventory_snapshot_entry")
+    expect(afterDown.tables.map((row) => row.relation_name)).toContain("trading_card_inventory_source")
+    migration.reset()
+    await migration.up()
+    for (const query of migration.getQueries().map(String)) await pgConnection.raw(query)
   }, 60000)
 })

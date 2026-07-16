@@ -12,6 +12,8 @@ const InventorySnapshot = model
     original_filename: model.text().nullable(),
     content_hash: model.text().nullable(),
     row_count: model.number().nullable(),
+    reconciled_against_snapshot_id: model.text().nullable(),
+    reconciled_at: model.dateTime().nullable(),
     created_by: model.text(),
     approved_by: model.text().nullable(),
     approved_at: model.dateTime().nullable(),
