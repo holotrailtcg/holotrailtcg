@@ -113,6 +113,22 @@ export interface NewsletterHttpTestApp {
   postRestore: (imageId: string, authToken?: string) => Promise<Response>
   /** POST /admin/trading-cards/images/:imageId/focal-point */
   postFocalPoint: (imageId: string, body: unknown, authToken?: string) => Promise<Response>
+  /** GET /admin/trading-card-inventory/sources */
+  getInventorySources: (query: Record<string, string>, authToken?: string) => Promise<Response>
+  /** POST /admin/trading-card-inventory/sources */
+  postCreateInventorySource: (body: unknown, authToken?: string) => Promise<Response>
+  /** POST /admin/trading-card-inventory/sources/:id/rename */
+  postRenameInventorySource: (id: string, body: unknown, authToken?: string) => Promise<Response>
+  /** POST /admin/trading-card-inventory/sources/:id/archive */
+  postArchiveInventorySource: (id: string, authToken?: string) => Promise<Response>
+  /** POST /admin/trading-card-inventory/sources/:id/restore */
+  postRestoreInventorySource: (id: string, authToken?: string) => Promise<Response>
+  /** GET /admin/trading-card-inventory/sources/:id/summary */
+  getInventorySourceSummary: (id: string, authToken?: string) => Promise<Response>
+  /** GET /admin/trading-card-inventory/transactions */
+  getInventoryTransactions: (query: Record<string, string>, authToken?: string) => Promise<Response>
+  /** GET /admin/trading-card-inventory/variants/:variantId/publish-readiness */
+  getPublishReadiness: (variantId: string, authToken?: string) => Promise<Response>
 }
 
 /**
@@ -269,6 +285,50 @@ export async function bootstrapNewsletterHttpTestApp(): Promise<NewsletterHttpTe
           ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
         },
         body: JSON.stringify(body),
+      }),
+    getInventorySources: (query, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/sources?${new URLSearchParams(query).toString()}`, {
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    postCreateInventorySource: (body, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/sources`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify(body),
+      }),
+    postRenameInventorySource: (id, body, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/sources/${encodeURIComponent(id)}/rename`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify(body),
+      }),
+    postArchiveInventorySource: (id, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/sources/${encodeURIComponent(id)}/archive`, {
+        method: "POST",
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    postRestoreInventorySource: (id, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/sources/${encodeURIComponent(id)}/restore`, {
+        method: "POST",
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    getInventorySourceSummary: (id, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/sources/${encodeURIComponent(id)}/summary`, {
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    getInventoryTransactions: (query, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/transactions?${new URLSearchParams(query).toString()}`, {
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    getPublishReadiness: (variantId, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/variants/${encodeURIComponent(variantId)}/publish-readiness`, {
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
       }),
   }
 }
