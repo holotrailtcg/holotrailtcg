@@ -20,6 +20,8 @@ import { generateStagingObjectKey, generateFinalObjectKey, sanitiseOriginalFilen
 import type { R2ImageStorageClient } from "./images/r2-client"
 import { expiresAtFromNow } from "./images/r2-client"
 import { processCardImageUpload } from "./images/image-processing"
+import { acquirePrefixReconciliationLock } from "./images/orphan-reconciliation-lock"
+import { runOrphanReconciliation, type OrphanReconciliationCounts } from "./images/orphan-reconciliation"
 import type { TcgDexMatchInput, TcgDexMatchResult } from "./tcgdex/matching-types"
 import type { TcgDexLookupDependency } from "./tcgdex/matching"
 import { matchTcgdexCard } from "./tcgdex/matching"
@@ -104,6 +106,16 @@ export interface BeginCardImageUploadInput extends AuditContext {
 export interface ConfirmPendingCardImageInput extends AuditContext {
   id: string
   r2Client: R2ImageStorageClient
+}
+
+export interface ReconcileOrphanedImageObjectsInput {
+  r2Client: R2ImageStorageClient
+  prefix: string
+  graceCutoff: Date
+  dryRun: boolean
+  maxObjectsPerRun: number
+  /** Used only to open the dedicated advisory-lock connection; never logged. */
+  databaseUrl: string
 }
 
 export interface ReorderReadyCardImagesInput extends AuditContext {
@@ -1248,6 +1260,48 @@ class TradingCardsModuleService extends MedusaService({
       }
       return ids
     })
+  }
+
+  /**
+   * Stage 4B.4 Slice 2: safely deletes orphaned R2 objects under one
+   * managed prefix. Never mutates a `CardImage` row (only deletes an R2
+   * object nothing references), so unlike the mutations above this writes
+   * no audit entry — there is no row-level change to record. Guarded by a
+   * non-blocking session-level advisory lock
+   * (`images/orphan-reconciliation-lock.ts`) so overlapping runs for the
+   * same prefix simply return zeroed counts rather than racing; staging and
+   * final prefixes use independent lock keys and always run independently.
+   * The list/check/delete loop itself never holds a MikroORM/Knex
+   * transaction open — only plain, non-locking reference-check reads run
+   * against the pooled connection, interleaved with R2 network calls.
+   */
+  async reconcileOrphanedImageObjects(input: ReconcileOrphanedImageObjectsInput): Promise<OrphanReconciliationCounts> {
+    const lease = await acquirePrefixReconciliationLock(input.databaseUrl, input.prefix)
+    if (!lease.acquired) {
+      return { scanned: 0, retained: 0, wouldDelete: 0, deleted: 0, errors: 0, pagesProcessed: 0, limitReached: false }
+    }
+    try {
+      return await runOrphanReconciliation({
+        r2Client: input.r2Client,
+        prefix: input.prefix,
+        graceCutoff: input.graceCutoff,
+        dryRun: input.dryRun,
+        maxObjectsPerRun: input.maxObjectsPerRun,
+        isReferenced: (key) => this.isCardImageKeyReferenced(key),
+      })
+    } finally {
+      await lease.release()
+    }
+  }
+
+  private async isCardImageKeyReferenced(key: string): Promise<boolean> {
+    const rows = await this.manager_.execute<Record<string, unknown>>(
+      `select 1 from trading_card_image
+       where deleted_at is null and (staging_object_key = ? or final_object_key = ?)
+       limit 1`,
+      [key, key]
+    )
+    return rows.length > 0
   }
 }
 
