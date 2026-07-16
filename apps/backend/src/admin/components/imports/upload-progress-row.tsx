@@ -12,7 +12,7 @@ export interface UploadProgressRowProps {
 const STATE_LABEL: Record<UploadRowState, string> = {
   queued: "Waiting to upload",
   uploading: "Uploading",
-  confirming: "Confirming",
+  confirming: "Confirming…",
   success: "Uploaded",
   error: "Upload failed",
 }

@@ -19,7 +19,7 @@
     "seed": "medusa exec ./src/scripts/initial-data-seed.ts",
     "lint": "medusa lint",
     "test:integration:http": "cross-env TEST_TYPE=integration:http NODE_OPTIONS=--experimental-vm-modules jest --silent=false --runInBand --forceExit",
-    "test:integration:modules": "cross-env TEST_TYPE=integration:modules MODULE_TESTS_EXCLUDE_MEDUSA_APP_PAIR=true NODE_OPTIONS=--experimental-vm-modules jest --silent=false --runInBand --forceExit && cross-env TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --forceExit --maxWorkers=3 src/modules/trading-cards/__tests__/trading-cards-module.spec.ts src/modules/trading-cards/__tests__/tcgdex-enrichment-persistence.integration.spec.ts src/modules/trading-cards/__tests__/trading-card-image-confirmation.spec.ts src/modules/trading-cards/__tests__/trading-card-image-focal-point.spec.ts",
+    "test:integration:modules": "cross-env TEST_TYPE=integration:modules MODULE_TESTS_EXCLUDE_MEDUSA_APP_PAIR=true NODE_OPTIONS=--experimental-vm-modules jest --silent=false --runInBand --forceExit && cross-env TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --forceExit --maxWorkers=4 src/modules/trading-cards/__tests__/trading-cards-module.spec.ts src/modules/trading-cards/__tests__/tcgdex-enrichment-persistence.integration.spec.ts src/modules/trading-cards/__tests__/trading-card-image-confirmation.spec.ts src/modules/trading-cards/__tests__/trading-card-image-focal-point.spec.ts",
     "test:unit": "cross-env TEST_TYPE=unit NODE_OPTIONS=--experimental-vm-modules jest --silent --runInBand --forceExit"
   },
   "dependencies": {

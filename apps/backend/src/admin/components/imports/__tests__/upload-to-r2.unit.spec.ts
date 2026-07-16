@@ -34,9 +34,11 @@ class FakeXhr {
   url = ""
   headers: Record<string, string> = {}
   status = 200
+  aborted = false
   upload = { onprogress: null as ((event: { lengthComputable: boolean; loaded: number; total: number }) => void) | null }
   onload: (() => void) | null = null
   onerror: (() => void) | null = null
+  onabort: (() => void) | null = null
   sentBody: unknown = null
 
   constructor() {
@@ -54,6 +56,11 @@ class FakeXhr {
 
   send(body: unknown) {
     this.sentBody = body
+  }
+
+  abort() {
+    this.aborted = true
+    this.onabort?.()
   }
 }
 
@@ -105,5 +112,24 @@ describe("uploadToR2", () => {
     const xhr = FakeXhr.instances[0]
     xhr.onerror?.()
     await expect(promise).rejects.toThrow("Upload failed")
+  })
+
+  it("registers the xhr with the caller and rejects when it is aborted externally", async () => {
+    const registered: FakeXhr[] = []
+    const unregistered: FakeXhr[] = []
+    const promise = uploadToR2({
+      uploadUrl: "https://fake-r2.invalid/key",
+      requiredHeaders: {},
+      file: fakeFile(),
+      registerXhr: (xhr) => registered.push(xhr as unknown as FakeXhr),
+      unregisterXhr: (xhr) => unregistered.push(xhr as unknown as FakeXhr),
+    })
+    const xhr = FakeXhr.instances[0]
+    expect(registered).toEqual([xhr])
+
+    xhr.abort()
+
+    await expect(promise).rejects.toThrow("Upload aborted")
+    expect(unregistered).toEqual([xhr])
   })
 })

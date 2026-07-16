@@ -26,6 +26,13 @@ export interface UploadToR2Input {
   requiredHeaders: Record<string, string>
   file: File
   onProgress?: (fractionComplete: number) => void
+  /**
+   * Called synchronously with the live `XMLHttpRequest` as soon as it is
+   * created, so a caller that owns the upload's lifetime (e.g. a queue being
+   * cancelled or replaced) can abort it from the outside.
+   */
+  registerXhr?: (xhr: XMLHttpRequest) => void
+  unregisterXhr?: (xhr: XMLHttpRequest) => void
 }
 
 /**
@@ -36,6 +43,13 @@ export interface UploadToR2Input {
 export function uploadToR2(input: UploadToR2Input): Promise<void> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
+    input.registerXhr?.(xhr)
+
+    const settle = (run: () => void) => {
+      input.unregisterXhr?.(xhr)
+      run()
+    }
+
     xhr.open("PUT", input.uploadUrl, true)
     for (const [key, value] of Object.entries(input.requiredHeaders)) {
       xhr.setRequestHeader(key, value)
@@ -46,13 +60,16 @@ export function uploadToR2(input: UploadToR2Input): Promise<void> {
       }
     }
     xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve()
-      } else {
-        reject(new Error(`Upload failed with status ${xhr.status}`))
-      }
+      settle(() => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve()
+        } else {
+          reject(new Error(`Upload failed with status ${xhr.status}`))
+        }
+      })
     }
-    xhr.onerror = () => reject(new Error("Upload failed"))
+    xhr.onerror = () => settle(() => reject(new Error("Upload failed")))
+    xhr.onabort = () => settle(() => reject(new Error("Upload aborted")))
     xhr.send(input.file)
   })
 }
