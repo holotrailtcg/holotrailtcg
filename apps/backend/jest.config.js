@@ -76,6 +76,7 @@ const TRADING_CARDS_MEDUSA_APP_SPEC_PATTERNS = [
   "src/modules/trading-cards/__tests__/trading-card-image-confirmation\\.spec\\.ts$",
   "src/modules/trading-cards/__tests__/trading-card-image-focal-point\\.spec\\.ts$",
   "src/modules/trading-cards/__tests__/trading-card-image-expiry-sweep\\.spec\\.ts$",
+  "src/modules/trading-cards/__tests__/trading-card-image-orphan-reconciliation\\.spec\\.ts$",
 ];
 
 if (process.env.TEST_TYPE === "integration:http") {
