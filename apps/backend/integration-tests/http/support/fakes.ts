@@ -8,8 +8,12 @@ import type {
   ConfirmationEmailSendOutcome,
   SendConfirmationEmailInput,
 } from "../../../src/modules/newsletter/resend/sender"
+import { MedusaError } from "@medusajs/framework/utils"
 import { TcgDexError, type TcgDexLookupDependency } from "../../../src/modules/trading-cards/tcgdex"
 import type { TcgDexCard, TcgDexLanguage } from "../../../src/modules/trading-cards/tcgdex/types"
+import type {
+  FetchedObject, PresignedUpload, R2ImageStorageClient,
+} from "../../../src/modules/trading-cards/images/r2-client"
 
 /**
  * Test-only fake reCAPTCHA verifier. Registered into the container before
@@ -96,5 +100,47 @@ export class FakeTcgDexClient implements TcgDexLookupDependency {
     const result = this.next()
     if (result.type === "error") throw result.error
     return result.card
+  }
+}
+
+/**
+ * Test-only fake R2 image storage client. Registered into the container
+ * before any HTTP request is made (`support/bootstrap.ts`), so the real
+ * `createR2ImageStorageClient` — and therefore any real network call to
+ * Cloudflare R2 — is never constructed during the HTTP integration test
+ * suite. Object bytes live entirely in an in-memory map; `seedObject`
+ * simulates "the browser already PUT the file" for confirm-route tests.
+ */
+export class FakeR2ImageStorageClient implements R2ImageStorageClient {
+  private objects = new Map<string, Buffer>()
+  public readonly presignCalls: Array<{ key: string; contentType: string; expiresInSeconds: number }> = []
+  public readonly getCalls: string[] = []
+  public readonly putCalls: Array<{ key: string; contentType: string; contentLength: number }> = []
+
+  seedObject(key: string, bytes: Buffer): void {
+    this.objects.set(key, bytes)
+  }
+
+  async createPresignedPutUrl(input: { key: string; contentType: string; expiresInSeconds: number }): Promise<PresignedUpload> {
+    this.presignCalls.push(input)
+    return {
+      uploadUrl: `https://fake-r2.invalid/${input.key}`,
+      requiredHeaders: { "Content-Type": input.contentType },
+      expiresAt: new Date(Date.now() + input.expiresInSeconds * 1000),
+    }
+  }
+
+  async getObject(key: string): Promise<FetchedObject> {
+    this.getCalls.push(key)
+    const bytes = this.objects.get(key)
+    if (!bytes) {
+      throw new MedusaError(MedusaError.Types.NOT_FOUND, "fake object not found")
+    }
+    return { bytes, byteSize: bytes.length, contentType: null }
+  }
+
+  async putObject(input: { key: string; body: Buffer; contentType: string; contentLength: number }): Promise<void> {
+    this.putCalls.push({ key: input.key, contentType: input.contentType, contentLength: input.contentLength })
+    this.objects.set(input.key, input.body)
   }
 }

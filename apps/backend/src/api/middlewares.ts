@@ -56,5 +56,20 @@ export default defineMiddlewares({
       methods: ["POST"],
       bodyParser: { sizeLimit: "2kb" },
     },
+    // Stage 4B.2 card-image upload/confirm: no image bytes ever pass
+    // through this backend — the browser PUTs directly to R2 using the
+    // presigned URL these routes return, so both request bodies stay tiny.
+    // The upload-request body carries only a filename/MIME/size; the
+    // confirm route accepts no body at all.
+    {
+      matcher: "/admin/trading-cards/variants/*/images/upload",
+      methods: ["POST"],
+      bodyParser: { sizeLimit: "2kb" },
+    },
+    {
+      matcher: "/admin/trading-cards/images/*/confirm",
+      methods: ["POST"],
+      bodyParser: { sizeLimit: "1kb" },
+    },
   ],
 })

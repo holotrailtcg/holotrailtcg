@@ -57,6 +57,7 @@ module.exports = {
 const TRADING_CARDS_MEDUSA_APP_SPEC_PATTERNS = [
   "src/modules/trading-cards/__tests__/trading-cards-module\\.spec\\.ts$",
   "src/modules/trading-cards/__tests__/tcgdex-enrichment-persistence\\.integration\\.spec\\.ts$",
+  "src/modules/trading-cards/__tests__/trading-card-image-confirmation\\.spec\\.ts$",
 ];
 
 if (process.env.TEST_TYPE === "integration:http") {

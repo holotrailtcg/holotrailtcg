@@ -1,5 +1,6 @@
 import { ContainerRegistrationKeys, generateJwtToken, Modules } from "@medusajs/framework/utils"
 import type { IProductModuleService } from "@medusajs/framework/types"
+import sharp from "sharp"
 import { NEWSLETTER_MODULE } from "../../src/modules/newsletter"
 import type NewsletterModuleService from "../../src/modules/newsletter/service"
 import { TRADING_CARDS_MODULE } from "../../src/modules/trading-cards"
@@ -1155,5 +1156,165 @@ describe("TCGdex Admin review API", () => {
     const response = await app.postSubscribe(validSubmission({ countryCode: "gb" }))
     expect(response.status).toBe(202)
     expect(await response.json()).toEqual(ACCEPTED_BODY)
+  })
+})
+
+/**
+ * Stage 4B.2 Admin card-image upload/confirm routes. Lives in this file
+ * (despite its name) for the same reason the TCGdex Admin review API tests
+ * above do: `startApp()` boots the real Medusa app once for the whole
+ * `integration-tests/http/*.spec.ts` suite, and Medusa's module registry is
+ * process-wide static state that cannot survive a second boot in one Jest
+ * worker — see the top-of-file comment. `app.r2ImageClient` (a
+ * `FakeR2ImageStorageClient`, registered in `support/bootstrap.ts` under the
+ * same lazy-DI key the real `resolveR2ImageStorageClient` would use) is the
+ * only R2 client ever constructed anywhere in this suite: `R2_IMAGES_ENABLED`
+ * is never set to `"true"` in `TEST_ENV_OVERRIDES`, so even if the fake's
+ * registration were somehow bypassed, `resolveR2Config()` would report
+ * disabled and the real `S3Client` would still never be constructed.
+ */
+describe("Admin trading-card image upload/confirm", () => {
+  if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required for HTTP integration tests")
+  const adminToken = generateJwtToken({
+    actor_id: "user_card_image_http_test",
+    actor_type: "user",
+    auth_identity_id: "auth_card_image_http_test",
+  }, { secret: process.env.JWT_SECRET, expiresIn: 3600 })
+
+  const uniqueMarker = (label: string) =>
+    `${label}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`
+
+  async function createVariantFixture(marker: string) {
+    const cards = app.container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
+    const set = await cards.createCardSets({
+      game: "POKEMON", language: "EN", display_name: `Image HTTP set ${marker}`, provider_set_code: `img-${marker}`,
+    })
+    const card = await cards.createTradingCards({
+      card_set_id: set.id, name: `Image HTTP card ${marker}`, search_name: `image http card ${marker}`,
+      card_number: "001/100", card_number_normalised: "001/100", origin: "MANUAL",
+    })
+    const variant = await cards.createTradingCardVariants({
+      trading_card_id: card.id, condition: "NEAR_MINT", condition_source: "DEFAULTED",
+      finish: "HOLO", finish_confirmed: true, special_treatment: "NONE", special_treatment_confirmed: true,
+      sku: `POKEMON-EN-IMG-${marker.toUpperCase()}`, origin: "MANUAL",
+    })
+    return { cards, set, card, variant }
+  }
+
+  function buildJpegFixture(): Promise<Buffer> {
+    return sharp({
+      create: { width: 6, height: 8, channels: 3, background: { r: 200, g: 40, b: 40 } },
+    }).jpeg().toBuffer()
+  }
+
+  const uploadBody = (overrides: Record<string, unknown> = {}) => ({
+    originalFilename: "card.jpg", declaredMimeType: "image/jpeg", declaredByteSize: 1_048_576, ...overrides,
+  })
+
+  it("requires Admin authentication for both routes", async () => {
+    const { variant } = await createVariantFixture(uniqueMarker("auth"))
+    const responses = await Promise.all([
+      app.postBeginUpload(variant.id, uploadBody()),
+      app.postConfirmUpload("tcimg_missing"),
+    ])
+    expect(responses.map((response) => response.status)).toEqual([401, 401])
+  })
+
+  it("requests an upload target and returns a presigned URL for the staging key", async () => {
+    const { variant } = await createVariantFixture(uniqueMarker("upload"))
+    const response = await app.postBeginUpload(variant.id, uploadBody(), adminToken)
+    expect(response.status).toBe(201)
+    const body = await response.json()
+    expect(Object.keys(body).sort()).toEqual(["expiresAt", "imageId", "objectKey", "requiredHeaders", "uploadUrl"])
+    expect(body.objectKey).toContain(`card-images/${variant.id}/`)
+    expect(app.r2ImageClient.presignCalls.some((call) => call.key === body.objectKey)).toBe(true)
+  })
+
+  it("returns a safe not-found response for an unknown variant", async () => {
+    const response = await app.postBeginUpload("tcvar_missing", uploadBody(), adminToken)
+    expect(response.status).toBe(404)
+  })
+
+  it("rejects an invalid upload-request body with a generic message", async () => {
+    const { variant } = await createVariantFixture(uniqueMarker("invalid"))
+    const response = await app.postBeginUpload(variant.id, uploadBody({ declaredMimeType: "image/gif" }), adminToken)
+    expect(response.status).toBe(400)
+    const serialized = JSON.stringify(await response.json())
+    expect(serialized).toContain("The request parameters are invalid.")
+    expect(serialized).not.toMatch(/Zod|invalid_type|stack/i)
+  })
+
+  it("confirms a valid upload end-to-end", async () => {
+    const { variant } = await createVariantFixture(uniqueMarker("confirm"))
+    const uploadResponse = await app.postBeginUpload(variant.id, uploadBody(), adminToken)
+    const { imageId, objectKey } = await uploadResponse.json()
+    app.r2ImageClient.seedObject(objectKey, await buildJpegFixture())
+
+    const confirmResponse = await app.postConfirmUpload(imageId, adminToken)
+    expect(confirmResponse.status).toBe(200)
+    const body = await confirmResponse.json()
+    expect(body).toMatchObject({ id: imageId, status: "READY", width: 6, height: 8, confirmedMimeType: "image/jpeg" })
+    // R2_IMAGES_ENABLED is never "true" in TEST_ENV_OVERRIDES, so no public
+    // base URL is configured here; null is the expected test-environment
+    // value, not a bug.
+    expect(body.imageUrl).toBeNull()
+    const serialized = JSON.stringify(body)
+    expect(serialized).not.toMatch(/staging_object_key|final_object_key|sha256/i)
+  })
+
+  it("rejects confirming an already-confirmed upload without a 500", async () => {
+    const { variant } = await createVariantFixture(uniqueMarker("dup-confirm"))
+    const uploadResponse = await app.postBeginUpload(variant.id, uploadBody(), adminToken)
+    const { imageId, objectKey } = await uploadResponse.json()
+    app.r2ImageClient.seedObject(objectKey, await buildJpegFixture())
+
+    const first = await app.postConfirmUpload(imageId, adminToken)
+    expect(first.status).toBe(200)
+    const second = await app.postConfirmUpload(imageId, adminToken)
+    expect(second.status).toBe(400)
+    expect(JSON.stringify(await second.json())).toContain("already been confirmed")
+  })
+
+  it("rejects an expired upload", async () => {
+    const { variant } = await createVariantFixture(uniqueMarker("expired"))
+    const uploadResponse = await app.postBeginUpload(variant.id, uploadBody(), adminToken)
+    const { imageId, objectKey } = await uploadResponse.json()
+    app.r2ImageClient.seedObject(objectKey, await buildJpegFixture())
+    const pgConnection = app.container.resolve<{ raw: (query: string, params?: unknown[]) => Promise<unknown> }>(
+      ContainerRegistrationKeys.PG_CONNECTION
+    )
+    await pgConnection.raw(`update trading_card_image set upload_expires_at = now() - interval '1 minute' where id = ?`, [imageId])
+
+    const response = await app.postConfirmUpload(imageId, adminToken)
+    expect(response.status).toBe(400)
+    expect(JSON.stringify(await response.json())).toContain("expired")
+  })
+
+  it("rejects an unsupported format, a corrupted file, a zero-byte upload, and an oversized upload", async () => {
+    const cases: Array<{ label: string; bytes: Buffer; expectedMessageFragment: string }> = [
+      {
+        label: "unsupported",
+        bytes: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"></svg>'),
+        expectedMessageFragment: "not a supported image format",
+      },
+      {
+        label: "corrupted",
+        bytes: Buffer.from("not an image, just plain text bytes"),
+        expectedMessageFragment: "corrupted or not a readable image",
+      },
+      { label: "zero-byte", bytes: Buffer.alloc(0), expectedMessageFragment: "was empty" },
+      { label: "oversized", bytes: Buffer.alloc(11 * 1024 * 1024, 1), expectedMessageFragment: "exceeds the" },
+    ]
+
+    for (const testCase of cases) {
+      const { variant } = await createVariantFixture(uniqueMarker(testCase.label))
+      const uploadResponse = await app.postBeginUpload(variant.id, uploadBody(), adminToken)
+      const { imageId, objectKey } = await uploadResponse.json()
+      app.r2ImageClient.seedObject(objectKey, testCase.bytes)
+
+      const response = await app.postConfirmUpload(imageId, adminToken)
+      expect(response.status).toBe(400)
+      expect(JSON.stringify(await response.json())).toContain(testCase.expectedMessageFragment)
+    }
   })
 })

@@ -160,3 +160,9 @@ export type ImageStatus = (typeof IMAGE_STATUS)[keyof typeof IMAGE_STATUS]
 
 export const SUPPORTED_IMAGE_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"] as const
 export type SupportedImageMimeType = (typeof SUPPORTED_IMAGE_MIME_TYPES)[number]
+
+/** Stage 4B.2: the only project-wide limit on an uploaded card image's declared or actual byte size. */
+export const MAX_CARD_IMAGE_BYTE_SIZE = 10 * 1024 * 1024
+
+/** Stage 4B.2: how long a presigned upload URL, and the PENDING row it belongs to, remain valid. Checked lazily at confirm time; there is no background expiry sweep. */
+export const CARD_IMAGE_UPLOAD_EXPIRY_MINUTES = 15
