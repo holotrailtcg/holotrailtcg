@@ -127,6 +127,12 @@ export interface NewsletterHttpTestApp {
   getInventorySourceSummary: (id: string, authToken?: string) => Promise<Response>
   /** GET /admin/trading-card-inventory/transactions */
   getInventoryTransactions: (query: Record<string, string>, authToken?: string) => Promise<Response>
+  /** GET /admin/trading-card-inventory/proposals */
+  getInventoryProposals: (query: Record<string, string>, authToken?: string) => Promise<Response>
+  /** GET /admin/trading-card-inventory/proposals/summary */
+  getInventoryProposalSummary: (query: Record<string, string>, authToken?: string) => Promise<Response>
+  /** GET /admin/trading-card-inventory/snapshots/:id/reconciliation-summary */
+  getInventoryReconciliationSummary: (id: string, authToken?: string) => Promise<Response>
   /** GET /admin/trading-card-inventory/variants/:variantId/publish-readiness */
   getPublishReadiness: (variantId: string, authToken?: string) => Promise<Response>
 }
@@ -324,6 +330,18 @@ export async function bootstrapNewsletterHttpTestApp(): Promise<NewsletterHttpTe
       }),
     getInventoryTransactions: (query, authToken) =>
       fetch(`${baseUrl}/admin/trading-card-inventory/transactions?${new URLSearchParams(query).toString()}`, {
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    getInventoryProposals: (query, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/proposals?${new URLSearchParams(query).toString()}`, {
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    getInventoryProposalSummary: (query, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/proposals/summary?${new URLSearchParams(query).toString()}`, {
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    getInventoryReconciliationSummary: (id, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/snapshots/${encodeURIComponent(id)}/reconciliation-summary`, {
         headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
       }),
     getPublishReadiness: (variantId, authToken) =>

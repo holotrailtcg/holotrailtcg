@@ -1555,9 +1555,12 @@ describe("Admin trading-card-inventory", () => {
         app.postRestoreInventorySource("tcisrc_missing"),
         app.getInventorySourceSummary("tcisrc_missing"),
         app.getInventoryTransactions({}),
+        app.getInventoryProposals({}),
+        app.getInventoryProposalSummary({ inventorySnapshotId: "tcisnap_missing" }),
+        app.getInventoryReconciliationSummary("tcisnap_missing"),
         app.getPublishReadiness("tcvar_missing"),
       ])
-      expect(responses.map((response) => response.status)).toEqual([401, 401, 401, 401, 401, 401, 401, 401])
+      expect(responses.map((response) => response.status)).toEqual([401, 401, 401, 401, 401, 401, 401, 401, 401, 401, 401])
     })
 
     it("creates a source, rejects a duplicate name, renames, archives and restores it", async () => {
@@ -1657,6 +1660,62 @@ describe("Admin trading-card-inventory", () => {
     it("rejects a malformed query", async () => {
       const response = await app.getInventoryTransactions({ limit: "not-a-number" }, adminToken)
       expect(response.status).toBe(400)
+    })
+  })
+
+  describe("reconciliation proposals", () => {
+    async function createReconciledSnapshot() {
+      const inventory = app.container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
+      const marker = uniqueMarker("reconciliation")
+      const source = await inventory.createInventorySource({
+        displayName: `Reconciliation HTTP ${marker}`, provider: "PULSE", actor: "http-test", source: "MANUAL",
+      })
+      const snapshot = await inventory.createInventorySnapshot({
+        inventorySourceId: source.id, actor: "http-test", source: "MANUAL",
+      })
+      await inventory.addInventorySnapshotEntries({
+        snapshotId: snapshot.id, actor: "http-test", source: "MANUAL", entries: [
+          { providerReference: `${marker}-a`, providerReferenceType: "PULSE_PRODUCT_ID", tradingCardVariantId: `tcvar_${marker}_a`, quantity: 1, currencyCode: "GBP", unitAcquisitionCost: "1", unitMarketPrice: "2", unitSellingPrice: "3" },
+          { providerReference: `${marker}-b`, providerReferenceType: "PULSE_PRODUCT_ID", tradingCardVariantId: null, quantity: 2, currencyCode: "GBP", unitAcquisitionCost: "1", unitMarketPrice: "2", unitSellingPrice: "3" },
+        ],
+      })
+      await inventory.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "VALIDATED", actor: "http-test", source: "MANUAL" })
+      await inventory.reconcileInventorySnapshot({ inventorySourceId: source.id, snapshotId: snapshot.id, actor: "http-test", source: "SYSTEM" })
+      return { source, snapshot }
+    }
+
+    it("returns authenticated, paginated, filtered, allow-listed proposal reads", async () => {
+      const { snapshot } = await createReconciledSnapshot()
+      const response = await app.getInventoryProposals({
+        inventorySnapshotId: snapshot.id, changeKind: "UNRESOLVED_VARIANT", limit: "1", offset: "0",
+      }, adminToken)
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      expect(body).toMatchObject({ count: 1, limit: 1, offset: 0 })
+      expect(body.proposals).toHaveLength(1)
+      expect(body.proposals[0].changeKind).toBe("UNRESOLVED_VARIANT")
+      expect(Object.keys(body.proposals[0]).sort()).toEqual([
+        "baselineSnapshotId", "changeKind", "comparedAt", "createdAt", "currencyCode", "diagnostics", "id",
+        "inventorySnapshotId", "inventorySourceId", "previousQuantity", "previousUnitAcquisitionCost",
+        "previousUnitMarketPrice", "previousUnitSellingPrice", "proposedQuantity", "proposedUnitAcquisitionCost",
+        "proposedUnitMarketPrice", "proposedUnitSellingPrice", "providerReference", "providerReferenceType",
+        "quantityDelta", "reason", "reviewStatus", "tradingCardVariantId",
+      ].sort())
+      expect(await app.getInventoryProposals({ limit: "101" }, adminToken).then((result) => result.status)).toBe(400)
+    })
+
+    it("returns reconciliation and proposal count summaries", async () => {
+      const { snapshot } = await createReconciledSnapshot()
+      const reconciliationResponse = await app.getInventoryReconciliationSummary(snapshot.id, adminToken)
+      expect(reconciliationResponse.status).toBe(200)
+      expect(await reconciliationResponse.json()).toMatchObject({ snapshotId: snapshot.id, status: "PENDING_REVIEW", proposalCount: 2 })
+
+      const proposalResponse = await app.getInventoryProposalSummary({ inventorySnapshotId: snapshot.id }, adminToken)
+      expect(proposalResponse.status).toBe(200)
+      expect(await proposalResponse.json()).toMatchObject({
+        inventorySnapshotId: snapshot.id, count: 2,
+        byChangeKind: { NEW_HOLDING: 1, UNRESOLVED_VARIANT: 1 }, byReviewStatus: { PENDING: 2 },
+      })
     })
   })
 

@@ -3,7 +3,9 @@ import { MedusaError } from "@medusajs/framework/utils"
 import { z } from "@medusajs/framework/zod"
 import { TRADING_CARD_INVENTORY_MODULE } from "../../../modules/trading-card-inventory"
 import type TradingCardInventoryModuleService from "../../../modules/trading-card-inventory/service"
-import { INVENTORY_PROVIDER, INVENTORY_SOURCE_STATUS } from "../../../modules/trading-card-inventory/types"
+import {
+  INVENTORY_PROPOSAL_CHANGE_KIND, INVENTORY_PROPOSAL_REVIEW_STATUS, INVENTORY_PROVIDER, INVENTORY_SOURCE_STATUS,
+} from "../../../modules/trading-card-inventory/types"
 
 export function tradingCardInventoryService(req: MedusaRequest): TradingCardInventoryModuleService {
   return req.scope.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
@@ -57,6 +59,20 @@ export const transactionListQuerySchema = z.object({
   tradingCardVariantId: z.string().min(1).optional(),
 }).strict()
 
+export const proposalListQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+  inventorySourceId: z.string().min(1).optional(),
+  inventorySnapshotId: z.string().min(1).optional(),
+  tradingCardVariantId: z.string().min(1).optional(),
+  changeKind: z.enum(Object.values(INVENTORY_PROPOSAL_CHANGE_KIND) as [string, ...string[]]).optional(),
+  reviewStatus: z.enum(Object.values(INVENTORY_PROPOSAL_REVIEW_STATUS) as [string, ...string[]]).optional(),
+}).strict()
+
+export const proposalSummaryQuerySchema = z.object({
+  inventorySnapshotId: z.string().min(1),
+}).strict()
+
 export const createSourceBodySchema = z.object({
   displayName: z.string().trim().min(1).max(255),
   provider: z.enum(Object.values(INVENTORY_PROVIDER) as [string, ...string[]]),
@@ -102,6 +118,39 @@ export function toSafeInventoryTransactionDto(row: Record<string, unknown>) {
     originatingReference: row.originating_reference ?? null,
     actor: row.actor,
     note: row.note ?? null,
+    createdAt: row.created_at,
+  }
+}
+
+export function toSafeInventoryProposalDto(row: Record<string, unknown>) {
+  const diagnostics = row.reconciliation_diagnostics as Record<string, unknown> | null
+  return {
+    id: row.id,
+    inventorySourceId: row.inventory_source_id,
+    inventorySnapshotId: row.inventory_snapshot_id ?? null,
+    baselineSnapshotId: row.baseline_snapshot_id ?? null,
+    tradingCardVariantId: row.trading_card_variant_id ?? null,
+    providerReference: row.provider_reference ?? null,
+    providerReferenceType: row.provider_reference_type ?? null,
+    previousQuantity: row.previous_quantity ?? null,
+    proposedQuantity: row.proposed_quantity ?? null,
+    quantityDelta: row.quantity_delta ?? null,
+    currencyCode: row.currency_code ?? null,
+    previousUnitAcquisitionCost: row.previous_unit_acquisition_cost === null ? null : String(row.previous_unit_acquisition_cost),
+    proposedUnitAcquisitionCost: row.proposed_unit_acquisition_cost === null ? null : String(row.proposed_unit_acquisition_cost),
+    previousUnitMarketPrice: row.previous_unit_market_price === null ? null : String(row.previous_unit_market_price),
+    proposedUnitMarketPrice: row.proposed_unit_market_price === null ? null : String(row.proposed_unit_market_price),
+    previousUnitSellingPrice: row.previous_unit_selling_price === null ? null : String(row.previous_unit_selling_price),
+    proposedUnitSellingPrice: row.proposed_unit_selling_price === null ? null : String(row.proposed_unit_selling_price),
+    changeKind: row.change_kind,
+    reviewStatus: row.review_status,
+    reason: row.reconciliation_reason ?? null,
+    diagnostics: diagnostics ? {
+      changedFields: Array.isArray(diagnostics.changedFields) ? diagnostics.changedFields.slice(0, 8) : [],
+      duplicateRowCount: diagnostics.duplicateRowCount ?? 1,
+      sellingPriceLocked: diagnostics.sellingPriceLocked === true,
+    } : null,
+    comparedAt: row.compared_at ?? null,
     createdAt: row.created_at,
   }
 }
