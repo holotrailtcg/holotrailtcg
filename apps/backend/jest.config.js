@@ -46,20 +46,30 @@ module.exports = {
 // shared-fixture/`globalThis` cache cannot fix this either: Jest gives every
 // spec *file* its own global object, so no in-memory state set by one file's
 // `beforeAll` is ever visible to another file's `beforeAll` (confirmed
-// directly against this repository's exact Jest config). The only reliable
-// fix is to make sure no two of these files ever bootstrap
-// `TRADING_CARDS_MODULE` inside the *same* OS process. See the
-// `test:integration:modules` script in `package.json`, which runs this list
-// in its own `jest` invocation with `--maxWorkers` set to exactly the number
-// of files listed (no `--runInBand`), so Jest schedules one file per worker
-// process with none reused/shared. If a file is added to or removed from
-// this list, `--maxWorkers` in `package.json` must be updated to match, or a
-// worker gets reused across two files and either the registry crash above or
-// a concurrent-DDL deadlock (multiple `beforeAll`s re-applying the same
-// migration at once) can result. Every other module spec (including the
-// count-based Stage 4A.3 migration spec, which must not race against
-// concurrent row inserts from a parallel worker) keeps running sequentially
-// in one process exactly as before.
+// directly against this repository's exact Jest config).
+//
+// A `--maxWorkers` scheme that gives each of these files its own worker
+// process (one file per worker, as this used to run) fixes the loader-registry
+// crash above, but every worker still connects to the *same* physical
+// PostgreSQL test database — matching the file count to `--maxWorkers` is
+// process isolation, not database isolation. Several of these `beforeAll`s
+// independently re-apply the same trading-card migrations to widen audit
+// checks; run concurrently from separate worker processes, those concurrent
+// DDL statements can deadlock, race to create duplicate constraints, or leave
+// an incompatible audit check behind for whichever spec runs its assertions
+// next. The only reliable fix is to make sure no two of these files ever run
+// at the same time, in any process, against this database. See the
+// `test:integration:modules` script in `package.json`, which chains one
+// `jest --runTestsByPath <file> --runInBand` invocation per file with `&&`,
+// each a fresh OS process running exactly one spec to completion before the
+// next one starts. If a file is added to or removed from this list, the
+// chained invocations in `package.json` must be updated to match — an
+// omitted file silently stops running, and a file added to the broad phase
+// without being added here reintroduces the concurrent-bootstrap crash.
+// Every other module spec (including the count-based Stage 4A.3 migration
+// spec, which must not race against concurrent row inserts from a parallel
+// worker) keeps running sequentially in the first, broad `--runInBand`
+// invocation exactly as before.
 const TRADING_CARDS_MEDUSA_APP_SPEC_PATTERNS = [
   "src/modules/trading-cards/__tests__/trading-cards-module\\.spec\\.ts$",
   "src/modules/trading-cards/__tests__/tcgdex-enrichment-persistence\\.integration\\.spec\\.ts$",

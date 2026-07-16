@@ -4,6 +4,7 @@ import { ContainerRegistrationKeys, createPgConnection, Modules } from "@medusaj
 import type { IProductModuleService } from "@medusajs/framework/types"
 import { TRADING_CARDS_MODULE } from "../index"
 import { Migration20260714150000 } from "../migrations/Migration20260714150000"
+import { Migration20260715120000 } from "../migrations/Migration20260715120000"
 import { rarityComparisonForm } from "../rarity/normalise-rarity"
 import { createTradingCardForProductWorkflow } from "../../../workflows/trading-cards/create-trading-card-for-product"
 import "../../../links/trading-card-product"
@@ -18,8 +19,26 @@ beforeAll(async () => {
   pgConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
   const migration = new Migration20260714150000(undefined as never, undefined as never)
   await migration.up()
-  for (const query of migration.getQueries()) await pgConnection.raw(String(query))
+  // Migration20260714150000's up() unconditionally narrows the
+  // `trading_card_audit_entry` entity_type/action checks to lists that
+  // exclude `CARD_IMAGE`/`IMAGE_*`. If a card-image spec (which widens those
+  // same checks, see Migration20260715120000) has ever run against this
+  // database and left `CARD_IMAGE` audit rows behind, re-adding that
+  // narrower check here fails outright — the existing rows violate it. This
+  // spec only actually needs this migration's `trading_card_external_reference`
+  // and `trading_card_tcgdex_enrichment_*` schema changes, so its
+  // `trading_card_audit_entry` constraint queries are skipped here and
+  // superseded by Migration20260715120000's wider checks below, which are a
+  // strict superset of what this migration would otherwise add.
+  const schemaOnlyQueries = migration.getQueries().map(String).filter((query) => !query.includes(`"trading_card_audit_entry"`))
+  for (const query of schemaOnlyQueries) await pgConnection.raw(query)
   migration.reset()
+
+  const imageMigration = new Migration20260715120000(undefined as never, undefined as never)
+  await imageMigration.up()
+  for (const query of imageMigration.getQueries()) await pgConnection.raw(String(query))
+  imageMigration.reset()
+
   medusaApp = await MedusaApp({ modulesConfig: {
     [TRADING_CARDS_MODULE]: { resolve: "./src/modules/trading-cards", definition: { key: TRADING_CARDS_MODULE, isQueryable: true } },
     [Modules.PRODUCT]: { resolve: "@medusajs/medusa/product" },
