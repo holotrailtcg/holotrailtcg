@@ -171,6 +171,50 @@ In short:
 5. Production values belong in the future Medusa hosting provider's secret
    environment settings, not Vercel storefront settings.
 
+## Reserved production origins and R2 CORS
+
+The Medusa production host has not been selected or deployed yet. Reserve the
+following hostname layout so the intended boundary is explicit when production
+hosting is configured:
+
+- Storefront: `https://holotrailtcg.co.uk`
+- Medusa backend and Admin origin: `https://api.holotrailtcg.co.uk`
+- Medusa Admin UI: `https://api.holotrailtcg.co.uk/app`
+- Public R2 images: `https://images.holotrailtcg.co.uk`
+
+The Admin UI is served by the Medusa backend, so `/app` is a path and must not
+appear in an allowed-origin value. Preconfigure the listing-image bucket with
+the following CORS policy for local development and the reserved production
+Admin origin:
+
+```json
+[
+  {
+    "AllowedOrigins": [
+      "http://localhost:9000",
+      "https://api.holotrailtcg.co.uk"
+    ],
+    "AllowedMethods": ["PUT"],
+    "AllowedHeaders": ["Content-Type"],
+    "ExposeHeaders": ["ETag"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+When the production Medusa host is provisioned, connect
+`api.holotrailtcg.co.uk` to it and use:
+
+```dotenv
+ADMIN_CORS=https://api.holotrailtcg.co.uk
+AUTH_CORS=https://holotrailtcg.co.uk,https://api.holotrailtcg.co.uk
+STORE_CORS=https://holotrailtcg.co.uk
+```
+
+If the final Medusa host requires a different public origin, update both the
+backend CORS variables and the R2 `AllowedOrigins` entry before launch. Do not
+replace the explicit upload origins with `*`.
+
 ## Public URL derivation
 
 No `CardImage` row stores a public URL, a presigned URL, or an R2 credential.
