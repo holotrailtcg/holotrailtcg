@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { MedusaError } from "@medusajs/framework/utils"
 import { SUPPORTED_IMAGE_MIME_TYPES, type SupportedImageMimeType } from "../types"
+import { MANAGED_FINAL_PREFIX, MANAGED_STAGING_PREFIX } from "./managed-prefixes"
 
 /**
  * Server-generated object-key helpers for Cloudflare R2. Keys never carry the
@@ -49,15 +50,15 @@ function buildObjectKey(prefix: string, input: ObjectKeyInput): string {
   const variantId = assertSafeKeySegment("variantId", input.variantId)
   const imageId = assertSafeKeySegment("imageId", input.imageId)
   const extension = canonicalExtensionForMimeType(input.mimeType)
-  return `${prefix}card-images/${variantId}/${imageId}/${randomUUID()}.${extension}`
+  return `${prefix}${variantId}/${imageId}/${randomUUID()}.${extension}`
 }
 
 export function generateStagingObjectKey(input: ObjectKeyInput): string {
-  return buildObjectKey("staging/", input)
+  return buildObjectKey(MANAGED_STAGING_PREFIX, input)
 }
 
 export function generateFinalObjectKey(input: ObjectKeyInput): string {
-  return buildObjectKey("", input)
+  return buildObjectKey(MANAGED_FINAL_PREFIX, input)
 }
 
 const MAX_ORIGINAL_FILENAME_LENGTH = 255

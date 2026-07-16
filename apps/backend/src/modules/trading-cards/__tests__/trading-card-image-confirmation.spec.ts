@@ -3,7 +3,7 @@ import { ContainerRegistrationKeys, createPgConnection, MedusaError } from "@med
 import sharp from "sharp"
 import { TRADING_CARDS_MODULE } from "../index"
 import { Migration20260715120000 } from "../migrations/Migration20260715120000"
-import type { FetchedObject, PresignedUpload, R2ImageStorageClient } from "../images/r2-client"
+import { FakeR2ImageStorageClient } from "../__fixtures__/fake-r2-client"
 
 let pgConnection: ReturnType<typeof createPgConnection>
 let medusaApp: Awaited<ReturnType<typeof MedusaApp>>
@@ -84,90 +84,6 @@ async function buildPngFixture(): Promise<Buffer> {
   return sharp({
     create: { width: 4, height: 4, channels: 4, background: { r: 10, g: 20, b: 30, alpha: 0.5 } },
   }).png().toBuffer()
-}
-
-/**
- * A hand-rolled fake `R2ImageStorageClient`. No real network call is ever
- * made — object bytes live entirely in an in-memory map, seeded by each
- * test via `seedObject` to simulate "the browser already PUT the file".
- */
-class FakeR2ImageStorageClient implements R2ImageStorageClient {
-  private objects = new Map<string, Buffer>()
-  private presignFailure: Error | null = null
-  private getFailure: Error | null = null
-  private putFailure: Error | null = null
-  /** Runs once, synchronously, at the start of the next `putObject` call — used to simulate real-world timing (e.g. the upload window expiring mid-network-call) without waiting real time. */
-  private putSideEffect: (() => Promise<void> | void) | null = null
-  public readonly presignCalls: Array<{ key: string; contentType: string; expiresInSeconds: number }> = []
-  public readonly getCalls: string[] = []
-  public readonly putCalls: Array<{ key: string; contentType: string; contentLength: number }> = []
-
-  seedObject(key: string, bytes: Buffer) {
-    this.objects.set(key, bytes)
-  }
-
-  /** The next `createPresignedPutUrl` call throws `error` instead of succeeding; consumed once. */
-  failNextPresignWith(error: Error) {
-    this.presignFailure = error
-  }
-
-  /** The next `getObject` call throws `error` instead of succeeding; consumed once. */
-  failNextGetWith(error: Error) {
-    this.getFailure = error
-  }
-
-  /** The next `putObject` call throws `error` instead of succeeding; consumed once. */
-  failNextPutWith(error: Error) {
-    this.putFailure = error
-  }
-
-  /** Runs `effect` once at the start of the next `putObject` call, before it succeeds or fails. */
-  onNextPut(effect: () => Promise<void> | void) {
-    this.putSideEffect = effect
-  }
-
-  async createPresignedPutUrl(input: { key: string; contentType: string; expiresInSeconds: number }): Promise<PresignedUpload> {
-    this.presignCalls.push(input)
-    if (this.presignFailure) {
-      const error = this.presignFailure
-      this.presignFailure = null
-      throw error
-    }
-    return {
-      uploadUrl: `https://fake-r2.invalid/${input.key}`,
-      requiredHeaders: { "Content-Type": input.contentType },
-      expiresAt: new Date(Date.now() + input.expiresInSeconds * 1000),
-    }
-  }
-
-  async getObject(key: string): Promise<FetchedObject> {
-    this.getCalls.push(key)
-    if (this.getFailure) {
-      const error = this.getFailure
-      this.getFailure = null
-      throw error
-    }
-    const bytes = this.objects.get(key)
-    if (!bytes) {
-      throw new MedusaError(MedusaError.Types.NOT_FOUND, "fake object not found")
-    }
-    return { bytes, byteSize: bytes.length, contentType: null }
-  }
-
-  async putObject(input: { key: string; body: Buffer; contentType: string; contentLength: number }): Promise<void> {
-    if (this.putSideEffect) {
-      const effect = this.putSideEffect
-      this.putSideEffect = null
-      await effect()
-    }
-    this.putCalls.push({ key: input.key, contentType: input.contentType, contentLength: input.contentLength })
-    if (this.putFailure) {
-      const error = this.putFailure
-      this.putFailure = null
-      throw error
-    }
-    this.objects.set(input.key, input.body)
-  }
 }
 
 describe("beginCardImageUpload", () => {
