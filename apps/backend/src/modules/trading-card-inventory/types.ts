@@ -165,3 +165,93 @@ export type InventoryRecordSource = (typeof INVENTORY_RECORD_SOURCE)[keyof typeo
 export const INVENTORY_NOTE_MAX_LENGTH = 500
 export const INVENTORY_SOURCE_NOTES_MAX_LENGTH = 1000
 export const INVENTORY_PROVIDER_METADATA_MAX_BYTES = 2000
+
+/**
+ * Stage 5B.1 row outcome — set once at parse time, on the immutable
+ * `InventorySnapshotEntry` row itself. Never revised after insert; matching
+ * outcomes (which can be retried) live separately on the mutable
+ * `InventorySnapshotEntryMatch` row.
+ */
+export const INVENTORY_SNAPSHOT_ENTRY_OUTCOME = {
+  VALID: "VALID",
+  VALID_WITH_WARNINGS: "VALID_WITH_WARNINGS",
+  UNRESOLVED_VARIANT: "UNRESOLVED_VARIANT",
+  REVIEW_REQUIRED: "REVIEW_REQUIRED",
+  INVALID: "INVALID",
+  SKIPPED: "SKIPPED",
+} as const
+export type InventorySnapshotEntryOutcome =
+  (typeof INVENTORY_SNAPSHOT_ENTRY_OUTCOME)[keyof typeof INVENTORY_SNAPSHOT_ENTRY_OUTCOME]
+
+/** Mirrors Stage 3's `CONDITION_SOURCE`; kept local to avoid a cross-module dependency for one shared enum. */
+export const INVENTORY_CONDITION_SOURCE = { EXPLICIT: "EXPLICIT", DEFAULTED: "DEFAULTED" } as const
+export type InventoryConditionSource = (typeof INVENTORY_CONDITION_SOURCE)[keyof typeof INVENTORY_CONDITION_SOURCE]
+
+/** Mirrors Stage 3's `CARD_CONDITION` value set; kept local so the pulse/ parser never imports across a module boundary. Values must stay identical to `trading-cards/types.ts`'s `CARD_CONDITION`. */
+export const INVENTORY_CARD_CONDITION = {
+  NEAR_MINT: "NEAR_MINT",
+  LIGHTLY_PLAYED: "LIGHTLY_PLAYED",
+  MODERATELY_PLAYED: "MODERATELY_PLAYED",
+  HEAVILY_PLAYED: "HEAVILY_PLAYED",
+  DAMAGED: "DAMAGED",
+} as const
+export type InventoryCardCondition = (typeof INVENTORY_CARD_CONDITION)[keyof typeof INVENTORY_CARD_CONDITION]
+
+/** Mirrors Stage 3's `CARD_FINISH` value set; kept local for the same reason. */
+export const INVENTORY_CARD_FINISH = { NORMAL: "NORMAL", HOLO: "HOLO", REVERSE_HOLO: "REVERSE_HOLO", OTHER: "OTHER" } as const
+export type InventoryCardFinish = (typeof INVENTORY_CARD_FINISH)[keyof typeof INVENTORY_CARD_FINISH]
+
+/** Mirrors Stage 3's `SPECIAL_TREATMENT` value set; kept local for the same reason. */
+export const INVENTORY_SPECIAL_TREATMENT = {
+  NONE: "NONE", ENERGY_REVERSE: "ENERGY_REVERSE", POKE_BALL_REVERSE: "POKE_BALL_REVERSE",
+  MASTER_BALL_REVERSE: "MASTER_BALL_REVERSE", LOVE_BALL_REVERSE: "LOVE_BALL_REVERSE",
+  QUICK_BALL_REVERSE: "QUICK_BALL_REVERSE", FRIEND_BALL_REVERSE: "FRIEND_BALL_REVERSE",
+  DUSK_BALL_REVERSE: "DUSK_BALL_REVERSE", ROCKET_REVERSE: "ROCKET_REVERSE", POKE_BALL: "POKE_BALL",
+  MASTER_BALL: "MASTER_BALL", STARLIGHT_HOLO: "STARLIGHT_HOLO", COSMOS_HOLO: "COSMOS_HOLO",
+  GALAXY_HOLO: "GALAXY_HOLO", CRACKED_ICE: "CRACKED_ICE", STAMPED: "STAMPED",
+  PRERELEASE_STAMPED: "PRERELEASE_STAMPED", PROMOTIONAL_STAMPED: "PROMOTIONAL_STAMPED",
+  TEXTURED: "TEXTURED", ETCHED: "ETCHED", OTHER: "OTHER",
+} as const
+export type InventorySpecialTreatment = (typeof INVENTORY_SPECIAL_TREATMENT)[keyof typeof INVENTORY_SPECIAL_TREATMENT]
+
+/** Mirrors a conservative subset of Stage 3's `RARITY` value set — only rarities the Pulse mapper can safely infer without guessing. */
+export const INVENTORY_RARITY = {
+  COMMON: "COMMON", UNCOMMON: "UNCOMMON", DOUBLE_RARE: "DOUBLE_RARE", ULTRA_RARE: "ULTRA_RARE",
+  ACE_SPEC: "ACE_SPEC", PROMO: "PROMO", NO_RARITY: "NO_RARITY",
+} as const
+export type InventoryRarity = (typeof INVENTORY_RARITY)[keyof typeof INVENTORY_RARITY]
+
+export const INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS = {
+  UNMATCHED: "UNMATCHED",
+  MATCHED: "MATCHED",
+  AMBIGUOUS: "AMBIGUOUS",
+  REVIEW_REQUIRED: "REVIEW_REQUIRED",
+} as const
+export type InventorySnapshotEntryMatchingStatus =
+  (typeof INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS)[keyof typeof INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS]
+
+/**
+ * How a snapshot entry's match was decided. `TRUSTED_REFERENCE` reuses an
+ * existing `ExternalCardReference`; `UNIQUE_ATTRIBUTE_MATCH` is a uniquely
+ * proven attribute match (only kind that may create a *new* trusted
+ * reference); `NONE` means the entry is unmatched.
+ */
+export const INVENTORY_SNAPSHOT_ENTRY_MATCHED_VIA = {
+  TRUSTED_REFERENCE: "TRUSTED_REFERENCE",
+  UNIQUE_ATTRIBUTE_MATCH: "UNIQUE_ATTRIBUTE_MATCH",
+  NONE: "NONE",
+} as const
+export type InventorySnapshotEntryMatchedVia =
+  (typeof INVENTORY_SNAPSHOT_ENTRY_MATCHED_VIA)[keyof typeof INVENTORY_SNAPSHOT_ENTRY_MATCHED_VIA]
+
+export const INVENTORY_DIAGNOSTIC_PHASE = { PARSE: "PARSE", MATCHING: "MATCHING" } as const
+export type InventoryDiagnosticPhase = (typeof INVENTORY_DIAGNOSTIC_PHASE)[keyof typeof INVENTORY_DIAGNOSTIC_PHASE]
+
+export const INVENTORY_DIAGNOSTIC_SEVERITY = { INFO: "INFO", WARNING: "WARNING", ERROR: "ERROR" } as const
+export type InventoryDiagnosticSeverity = (typeof INVENTORY_DIAGNOSTIC_SEVERITY)[keyof typeof INVENTORY_DIAGNOSTIC_SEVERITY]
+
+export const INVENTORY_DIAGNOSTIC_MESSAGE_MAX_LENGTH = 500
+export const INVENTORY_DIAGNOSTIC_FIELD_REF_MAX_LENGTH = 64
+export const INVENTORY_DIAGNOSTIC_CODE_MAX_LENGTH = 64
+/** Bounded allow-listed raw-field snapshot retained per entry; a full raw CSV row is never stored. */
+export const INVENTORY_SNAPSHOT_ENTRY_RAW_FIELDS_MAX_BYTES = 4000

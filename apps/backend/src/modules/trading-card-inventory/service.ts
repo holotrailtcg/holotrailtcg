@@ -6,6 +6,8 @@ import InventoryProposal from "./models/inventory-proposal"
 import InventoryTransaction from "./models/inventory-transaction"
 import InventoryAuditEntry from "./models/inventory-audit-entry"
 import InventorySnapshotEntry from "./models/inventory-snapshot-entry"
+import InventorySnapshotEntryMatch from "./models/inventory-snapshot-entry-match"
+import InventorySnapshotEntryDiagnostic from "./models/inventory-snapshot-entry-diagnostic"
 import { normalizeSourceName } from "./identity/normalize-source-name"
 import { reconcileSnapshots, type SnapshotEntryInput } from "./reconciliation/reconcile"
 import { canonicalDecimal } from "./reconciliation/decimal"
@@ -16,6 +18,7 @@ import {
 import {
   INVENTORY_AUDIT_ACTION, INVENTORY_AUDIT_ENTITY_TYPE, INVENTORY_HOLDING_STATUS,
   INVENTORY_PROPOSAL_REVIEW_STATUS, INVENTORY_PROVIDER_REFERENCE_TYPE, INVENTORY_SNAPSHOT_STATUS, INVENTORY_SOURCE_STATUS,
+  INVENTORY_SNAPSHOT_ENTRY_OUTCOME, INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS, INVENTORY_SNAPSHOT_ENTRY_MATCHED_VIA,
   isValidInventoryHoldingTransition, isValidInventoryProposalTransition, isValidInventorySnapshotTransition,
   type InventoryHoldingStatus, type InventoryProposalReviewStatus, type InventoryRecordSource, type InventorySnapshotStatus,
 } from "./types"
@@ -80,6 +83,51 @@ export interface AppendInventoryTransactionInput extends AuditContext {
 
 export interface AddInventorySnapshotEntryInput extends SnapshotEntryInput {}
 
+export interface ImportedDiagnosticInput {
+  rowNumber: number
+  phase: "PARSE" | "MATCHING"
+  code: string
+  severity: "INFO" | "WARNING" | "ERROR"
+  fieldRef?: string | null
+  message: string
+}
+
+/**
+ * One Stage 5B.1 imported row, ready to persist. Mirrors `ParsedPulseRow`
+ * (the pulse/ parser's pure output) but is declared independently here so
+ * this module never depends on the parser's internal types — only the
+ * workflow layer bridges the two.
+ */
+export interface ImportedSnapshotEntryInput {
+  rowNumber: number
+  outcome: string
+  providerReference: string
+  providerReferenceType: string
+  tradingCardVariantId?: string | null
+  quantity: number | null
+  currencyCode?: string | null
+  unitAcquisitionCost?: string | null
+  unitMarketPrice?: string | null
+  unitSellingPrice?: string | null
+  conditionSource?: string | null
+  finishCandidate?: string | null
+  specialTreatmentCandidate?: string | null
+  rarityCandidate?: string | null
+  rarityRaw?: string | null
+  languageConflict: boolean
+  rawFields?: Record<string, string | null>
+  diagnostics: ImportedDiagnosticInput[]
+}
+
+export interface RecordSnapshotEntryMatchInput {
+  snapshotEntryId: string
+  inventorySnapshotId: string
+  matchingStatus: string
+  tradingCardVariantId?: string | null
+  matchedVia: string
+  diagnostics: ImportedDiagnosticInput[]
+}
+
 export interface ReconcileInventorySnapshotInput extends AuditContext {
   inventorySourceId: string
   snapshotId: string
@@ -89,7 +137,8 @@ export interface ReconcileInventorySnapshotInput extends AuditContext {
 }
 
 class TradingCardInventoryModuleService extends MedusaService({
-  InventorySource, InventorySnapshot, InventorySnapshotEntry, InventoryHolding, InventoryProposal, InventoryTransaction, InventoryAuditEntry,
+  InventorySource, InventorySnapshot, InventorySnapshotEntry, InventorySnapshotEntryMatch, InventorySnapshotEntryDiagnostic,
+  InventoryHolding, InventoryProposal, InventoryTransaction, InventoryAuditEntry,
 }) {
   protected manager_: EntityManager
 
@@ -123,6 +172,20 @@ class TradingCardInventoryModuleService extends MedusaService({
   deleteInventorySnapshotEntries = async (): Promise<never> => this.lifecycleMutationBlocked("Snapshot entry deletion")
   softDeleteInventorySnapshotEntries = async (): Promise<never> => this.lifecycleMutationBlocked("Snapshot entry deletion")
   restoreInventorySnapshotEntries = async (): Promise<never> => this.lifecycleMutationBlocked("Snapshot entry restoration")
+
+  // Diagnostics are append-only, written only through recordSnapshotEntryDiagnostics.
+  createInventorySnapshotEntryDiagnostics = async (): Promise<never> => this.lifecycleMutationBlocked("Snapshot entry diagnostic creation")
+  updateInventorySnapshotEntryDiagnostics = async (): Promise<never> => this.lifecycleMutationBlocked("Snapshot entry diagnostics are append-only")
+  deleteInventorySnapshotEntryDiagnostics = async (): Promise<never> => this.lifecycleMutationBlocked("Snapshot entry diagnostics cannot be deleted")
+  softDeleteInventorySnapshotEntryDiagnostics = async (): Promise<never> => this.lifecycleMutationBlocked("Snapshot entry diagnostics cannot be deleted")
+  restoreInventorySnapshotEntryDiagnostics = async (): Promise<never> => this.lifecycleMutationBlocked("Snapshot entry diagnostics cannot be restored")
+
+  // Matches are only written/updated through recordSnapshotEntryMatch (create-or-update on retry).
+  createInventorySnapshotEntryMatches = async (): Promise<never> => this.lifecycleMutationBlocked("Snapshot entry match creation")
+  updateInventorySnapshotEntryMatches = async (): Promise<never> => this.lifecycleMutationBlocked("Snapshot entry match updates")
+  deleteInventorySnapshotEntryMatches = async (): Promise<never> => this.lifecycleMutationBlocked("Snapshot entry match deletion")
+  softDeleteInventorySnapshotEntryMatches = async (): Promise<never> => this.lifecycleMutationBlocked("Snapshot entry match deletion")
+  restoreInventorySnapshotEntryMatches = async (): Promise<never> => this.lifecycleMutationBlocked("Snapshot entry match restoration")
 
   private async writeAudit(manager: TxManager, input: AuditContext & {
     entityType: string; entityId: string; action: string; oldValue?: unknown; newValue?: unknown
@@ -381,6 +444,218 @@ class TradingCardInventoryModuleService extends MedusaService({
       )
       return { snapshotId: input.snapshotId, addedCount: entries.length }
     })
+  }
+
+  /**
+   * Stage 5B.1: persists parsed, bounded rows as immutable snapshot entries
+   * plus their PARSE-phase diagnostics, in one transaction per batch. Only
+   * write-once columns are set here — matching results are written
+   * separately (and only) by `recordSnapshotEntryMatch`.
+   */
+  async addInventorySnapshotEntriesWithDiagnostics(input: AuditContext & { snapshotId: string; rows: ImportedSnapshotEntryInput[] }) {
+    idSchema.parse(input.snapshotId)
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    if (!Array.isArray(input.rows) || input.rows.length === 0 || input.rows.length > 50_000) {
+      throw new MedusaError(MedusaError.Types.INVALID_DATA, "Imported rows must contain between 1 and 50,000 entries")
+    }
+    return this.manager_.transactional(async (manager) => {
+      const [snapshot] = await manager.execute<Record<string, unknown>>(
+        `select id, status from trading_card_inventory_snapshot where id = ? and deleted_at is null for update`, [input.snapshotId]
+      )
+      if (!snapshot) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory snapshot not found")
+      if (snapshot.status !== INVENTORY_SNAPSHOT_STATUS.DRAFT) {
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, "Imported rows can only be added while the snapshot is DRAFT")
+      }
+      const entryIds: string[] = []
+      for (let offset = 0; offset < input.rows.length; offset += 500) {
+        const chunk = input.rows.slice(offset, offset + 500)
+        const chunkIds = chunk.map(() => generateEntityId(undefined, "tcisentry"))
+        entryIds.push(...chunkIds)
+        const placeholders = chunk.map(() => `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)`).join(", ")
+        const params = chunk.flatMap((row, index) => {
+          // A blank/malformed row may have no usable provider reference; a
+          // synthetic bounded placeholder keeps the NOT-NULL/length
+          // constraint satisfied without ever colliding with a real Pulse
+          // reference (which always starts with "card:").
+          const providerReference = row.providerReference.trim() || `__row_${input.snapshotId}_${row.rowNumber}__`
+          return [
+            chunkIds[index], input.snapshotId, providerReference.slice(0, 255), row.providerReferenceType,
+            row.tradingCardVariantId ?? null, row.quantity ?? 0, row.currencyCode ?? null,
+            canonicalDecimal(row.unitAcquisitionCost ?? null), canonicalDecimal(row.unitMarketPrice ?? null),
+            canonicalDecimal(row.unitSellingPrice ?? null), row.rowNumber, row.outcome, row.conditionSource ?? null,
+            row.finishCandidate ?? null, row.specialTreatmentCandidate ?? null, row.rarityCandidate ?? null,
+            row.rarityRaw ?? null, row.languageConflict, row.rawFields ? JSON.stringify(row.rawFields) : null,
+          ]
+        })
+        await manager.execute(
+          `insert into trading_card_inventory_snapshot_entry
+           (id, inventory_snapshot_id, provider_reference, provider_reference_type, trading_card_variant_id, quantity,
+            currency_code, unit_acquisition_cost, unit_market_price, unit_selling_price, row_number, outcome,
+            condition_source, finish_candidate, special_treatment_candidate, rarity_candidate, rarity_raw,
+            language_conflict, raw_fields) values ${placeholders}`,
+          params,
+        )
+        const allDiagnostics = chunk.flatMap((row, index) => row.diagnostics.map((diagnostic) => ({ ...diagnostic, entryId: chunkIds[index] })))
+        for (let diagOffset = 0; diagOffset < allDiagnostics.length; diagOffset += 500) {
+          const diagChunk = allDiagnostics.slice(diagOffset, diagOffset + 500)
+          if (diagChunk.length === 0) continue
+          const diagPlaceholders = diagChunk.map(() => `(?, ?, ?, ?, ?, ?, ?, ?, ?)`).join(", ")
+          const diagParams = diagChunk.flatMap((diagnostic) => [
+            generateEntityId(undefined, "tcisediag"), diagnostic.entryId, input.snapshotId, diagnostic.rowNumber,
+            diagnostic.phase, diagnostic.code, diagnostic.severity, diagnostic.fieldRef ?? null, diagnostic.message,
+          ])
+          await manager.execute(
+            `insert into trading_card_inventory_snapshot_entry_diagnostic
+             (id, snapshot_entry_id, inventory_snapshot_id, row_number, phase, code, severity, field_ref, message)
+             values ${diagPlaceholders}`,
+            diagParams,
+          )
+        }
+      }
+      await manager.execute(
+        `update trading_card_inventory_snapshot set row_count = (
+           select count(*) from trading_card_inventory_snapshot_entry where inventory_snapshot_id = ? and deleted_at is null
+         ), updated_at = now() where id = ?`, [input.snapshotId, input.snapshotId]
+      )
+      return { snapshotId: input.snapshotId, addedCount: input.rows.length, entryIds }
+    })
+  }
+
+  /** Stage 5B.1: writes or re-writes matching results for one entry. Create-or-update — the only writer of `InventorySnapshotEntryMatch`. Appends new MATCHING diagnostics rather than replacing prior ones. */
+  async recordSnapshotEntryMatch(input: AuditContext & RecordSnapshotEntryMatchInput) {
+    idSchema.parse(input.snapshotEntryId)
+    idSchema.parse(input.inventorySnapshotId)
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    if (!Object.values(INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS).includes(input.matchingStatus as never)) {
+      throw new MedusaError(MedusaError.Types.INVALID_DATA, "Invalid matching status")
+    }
+    if (!Object.values(INVENTORY_SNAPSHOT_ENTRY_MATCHED_VIA).includes(input.matchedVia as never)) {
+      throw new MedusaError(MedusaError.Types.INVALID_DATA, "Invalid matched-via value")
+    }
+    return this.manager_.transactional(async (manager) => {
+      const [entry] = await manager.execute<Record<string, unknown>>(
+        `select id from trading_card_inventory_snapshot_entry where id = ? and inventory_snapshot_id = ? and deleted_at is null`,
+        [input.snapshotEntryId, input.inventorySnapshotId],
+      )
+      if (!entry) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Snapshot entry not found for this snapshot")
+      const variantId = input.matchingStatus === INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS.MATCHED ? (input.tradingCardVariantId ?? null) : null
+      const [existing] = await manager.execute<Record<string, unknown>>(
+        `select id, retry_count from trading_card_inventory_snapshot_entry_match where snapshot_entry_id = ? and deleted_at is null for update`,
+        [input.snapshotEntryId],
+      )
+      let matchId: string
+      if (existing) {
+        matchId = existing.id as string
+        await manager.execute(
+          `update trading_card_inventory_snapshot_entry_match set matching_status = ?, trading_card_variant_id = ?, matched_via = ?,
+           matched_at = case when ? = 'MATCHED' then now() else null end, retry_count = retry_count + 1, last_retried_at = now(), updated_at = now()
+           where id = ?`,
+          [input.matchingStatus, variantId, input.matchedVia, input.matchingStatus, matchId],
+        )
+      } else {
+        matchId = generateEntityId(undefined, "tcisematch")
+        await manager.execute(
+          `insert into trading_card_inventory_snapshot_entry_match
+           (id, snapshot_entry_id, inventory_snapshot_id, matching_status, trading_card_variant_id, matched_via, matched_at)
+           values (?, ?, ?, ?, ?, ?, case when ? = 'MATCHED' then now() else null end)`,
+          [matchId, input.snapshotEntryId, input.inventorySnapshotId, input.matchingStatus, variantId, input.matchedVia, input.matchingStatus],
+        )
+      }
+      if (input.matchingStatus === INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS.MATCHED && variantId) {
+        await manager.execute(
+          `update trading_card_inventory_snapshot_entry set trading_card_variant_id = ? where id = ?`,
+          [variantId, input.snapshotEntryId],
+        )
+      }
+      for (const diagnostic of input.diagnostics) {
+        await manager.execute(
+          `insert into trading_card_inventory_snapshot_entry_diagnostic
+           (id, snapshot_entry_id, inventory_snapshot_id, row_number, phase, code, severity, field_ref, message)
+           values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            generateEntityId(undefined, "tcisediag"), input.snapshotEntryId, input.inventorySnapshotId, diagnostic.rowNumber,
+            diagnostic.phase, diagnostic.code, diagnostic.severity, diagnostic.fieldRef ?? null, diagnostic.message,
+          ],
+        )
+      }
+      const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_inventory_snapshot_entry_match where id = ?`, [matchId])
+      return saved
+    })
+  }
+
+  /** Stage 5B.1: aggregate row/diagnostic/matching counts for the Admin preview screen — computed live, never stored redundantly. */
+  async getSnapshotImportSummary(snapshotId: string) {
+    idSchema.parse(snapshotId)
+    const [snapshot] = await this.manager_.execute<Record<string, unknown>>(
+      `select id, inventory_source_id, status, original_filename, content_hash, row_count
+       from trading_card_inventory_snapshot where id = ? and deleted_at is null`, [snapshotId]
+    )
+    if (!snapshot) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory snapshot not found")
+    const byOutcome = await this.manager_.execute<{ key: string; count: string }>(
+      `select outcome as key, count(*)::text as count from trading_card_inventory_snapshot_entry
+       where inventory_snapshot_id = ? and deleted_at is null group by outcome`, [snapshotId]
+    )
+    const byMatchingStatus = await this.manager_.execute<{ key: string; count: string }>(
+      `select matching_status as key, count(*)::text as count from trading_card_inventory_snapshot_entry_match
+       where inventory_snapshot_id = ? and deleted_at is null group by matching_status`, [snapshotId]
+    )
+    const byDiagnosticSeverity = await this.manager_.execute<{ key: string; count: string }>(
+      `select severity as key, count(*)::text as count from trading_card_inventory_snapshot_entry_diagnostic
+       where inventory_snapshot_id = ? and deleted_at is null group by severity`, [snapshotId]
+    )
+    const [{ unique_references, duplicate_rows }] = await this.manager_.execute<{ unique_references: string; duplicate_rows: string }>(
+      `select count(distinct provider_reference)::text as unique_references,
+              (count(*) - count(distinct provider_reference))::text as duplicate_rows
+       from trading_card_inventory_snapshot_entry where inventory_snapshot_id = ? and deleted_at is null`, [snapshotId]
+    )
+    return {
+      snapshotId: snapshot.id, inventorySourceId: snapshot.inventory_source_id, status: snapshot.status,
+      originalFilename: snapshot.original_filename, contentHash: snapshot.content_hash, rowCount: snapshot.row_count,
+      byOutcome: Object.fromEntries(byOutcome.map((row) => [row.key, Number(row.count)])),
+      byMatchingStatus: Object.fromEntries(byMatchingStatus.map((row) => [row.key, Number(row.count)])),
+      byDiagnosticSeverity: Object.fromEntries(byDiagnosticSeverity.map((row) => [row.key, Number(row.count)])),
+      uniqueProviderReferences: Number(unique_references), duplicateRowCount: Number(duplicate_rows),
+    }
+  }
+
+  /** Stage 5B.1: paginated, filterable entry listing for the Admin preview screen. */
+  async listSnapshotEntriesForAdmin(snapshotId: string, filters: { outcome?: string; matchingStatus?: string }, pagination: { limit: number; offset: number }) {
+    idSchema.parse(snapshotId)
+    const conditions = ["e.inventory_snapshot_id = ?", "e.deleted_at is null"]
+    const params: unknown[] = [snapshotId]
+    if (filters.outcome) { conditions.push("e.outcome = ?"); params.push(filters.outcome) }
+    if (filters.matchingStatus) { conditions.push("m.matching_status = ?"); params.push(filters.matchingStatus) }
+    const where = conditions.join(" and ")
+    const [{ count }] = await this.manager_.execute<{ count: string }>(
+      `select count(*)::text as count from trading_card_inventory_snapshot_entry e
+       left join trading_card_inventory_snapshot_entry_match m on m.snapshot_entry_id = e.id and m.deleted_at is null
+       where ${where}`, params,
+    )
+    const rows = await this.manager_.execute<Record<string, unknown>>(
+      `select e.*, m.matching_status, m.matched_via, m.retry_count from trading_card_inventory_snapshot_entry e
+       left join trading_card_inventory_snapshot_entry_match m on m.snapshot_entry_id = e.id and m.deleted_at is null
+       where ${where} order by e.row_number asc nulls last limit ? offset ?`,
+      [...params, pagination.limit, pagination.offset],
+    )
+    return { rows, count: Number(count) }
+  }
+
+  /** Stage 5B.1: paginated diagnostics for a single entry or the whole snapshot. */
+  async listSnapshotEntryDiagnostics(snapshotId: string, filters: { severity?: string; snapshotEntryId?: string }, pagination: { limit: number; offset: number }) {
+    idSchema.parse(snapshotId)
+    const conditions = ["inventory_snapshot_id = ?", "deleted_at is null"]
+    const params: unknown[] = [snapshotId]
+    if (filters.severity) { conditions.push("severity = ?"); params.push(filters.severity) }
+    if (filters.snapshotEntryId) { conditions.push("snapshot_entry_id = ?"); params.push(filters.snapshotEntryId) }
+    const where = conditions.join(" and ")
+    const [{ count }] = await this.manager_.execute<{ count: string }>(
+      `select count(*)::text as count from trading_card_inventory_snapshot_entry_diagnostic where ${where}`, params,
+    )
+    const rows = await this.manager_.execute<Record<string, unknown>>(
+      `select * from trading_card_inventory_snapshot_entry_diagnostic where ${where} order by row_number asc limit ? offset ?`,
+      [...params, pagination.limit, pagination.offset],
+    )
+    return { rows, count: Number(count) }
   }
 
   async reconcileInventorySnapshot(input: ReconcileInventorySnapshotInput) {

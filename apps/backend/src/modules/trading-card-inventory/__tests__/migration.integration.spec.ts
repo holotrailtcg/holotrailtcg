@@ -1,6 +1,7 @@
 import { createPgConnection } from "@medusajs/framework/utils"
 import { Migration20260716090000 } from "../migrations/Migration20260716090000"
 import { Migration20260716150000 } from "../migrations/Migration20260716150000"
+import { Migration20260716180000 } from "../migrations/Migration20260716180000"
 
 let pgConnection: ReturnType<typeof createPgConnection>
 
@@ -9,8 +10,16 @@ const rows = (result: any): any[] => Array.isArray(result) ? result : result.row
 
 const migrationQueries = async (direction: "up" | "down") => {
   const migrations = direction === "up"
-    ? [new Migration20260716090000(undefined as never, undefined as never), new Migration20260716150000(undefined as never, undefined as never)]
-    : [new Migration20260716150000(undefined as never, undefined as never), new Migration20260716090000(undefined as never, undefined as never)]
+    ? [
+        new Migration20260716090000(undefined as never, undefined as never),
+        new Migration20260716150000(undefined as never, undefined as never),
+        new Migration20260716180000(undefined as never, undefined as never),
+      ]
+    : [
+        new Migration20260716180000(undefined as never, undefined as never),
+        new Migration20260716150000(undefined as never, undefined as never),
+        new Migration20260716090000(undefined as never, undefined as never),
+      ]
   const queries: string[] = []
   for (const migration of migrations) {
     await migration[direction]()
