@@ -5,6 +5,8 @@ import { NEWSLETTER_MODULE } from "../../src/modules/newsletter"
 import type NewsletterModuleService from "../../src/modules/newsletter/service"
 import { TRADING_CARDS_MODULE } from "../../src/modules/trading-cards"
 import type TradingCardsModuleService from "../../src/modules/trading-cards/service"
+import { TRADING_CARD_INVENTORY_MODULE } from "../../src/modules/trading-card-inventory"
+import type TradingCardInventoryModuleService from "../../src/modules/trading-card-inventory/service"
 import { TCGDEX_ERROR_CODE, TcgDexError } from "../../src/modules/trading-cards/tcgdex"
 import { createTradingCardForProductWorkflow } from "../../src/workflows/trading-cards/create-trading-card-for-product"
 import { createVariantForProductVariantWorkflow } from "../../src/workflows/trading-cards/create-variant-for-product-variant"
@@ -1511,6 +1513,163 @@ describe("Admin trading-card image list, detail and lifecycle actions", () => {
       const { imageId } = await uploadResponse.json()
       const pendingResponse = await app.postFocalPoint(imageId, { focalX: 0.5, focalY: 0.5 }, adminToken)
       expect(pendingResponse.status).toBe(400)
+    })
+  })
+})
+
+describe("Admin trading-card-inventory", () => {
+  if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required for HTTP integration tests")
+  const adminToken = generateJwtToken({
+    actor_id: "user_inventory_http_test",
+    actor_type: "user",
+    auth_identity_id: "auth_inventory_http_test",
+  }, { secret: process.env.JWT_SECRET, expiresIn: 3600 })
+
+  const uniqueMarker = (label: string) =>
+    `${label}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`
+
+  async function createVariantFixture(marker: string) {
+    const cards = app.container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
+    const set = await cards.createCardSets({
+      game: "POKEMON", language: "EN", display_name: `Inventory HTTP set ${marker}`, provider_set_code: `inv-${marker}`,
+    })
+    const card = await cards.createTradingCards({
+      card_set_id: set.id, name: `Inventory HTTP card ${marker}`, search_name: `inventory http card ${marker}`,
+      card_number: "001/100", card_number_normalised: "001/100", origin: "MANUAL",
+    })
+    const variant = await cards.createTradingCardVariants({
+      trading_card_id: card.id, condition: "NEAR_MINT", condition_source: "DEFAULTED",
+      finish: "HOLO", finish_confirmed: true, special_treatment: "NONE", special_treatment_confirmed: true,
+      sku: `POKEMON-EN-INV-${marker.toUpperCase()}`, origin: "MANUAL",
+    })
+    return { cards, set, card, variant }
+  }
+
+  describe("sources", () => {
+    it("requires Admin authentication for every route", async () => {
+      const responses = await Promise.all([
+        app.getInventorySources({}),
+        app.postCreateInventorySource({ displayName: "x", provider: "PULSE" }),
+        app.postRenameInventorySource("tcisrc_missing", { displayName: "x" }),
+        app.postArchiveInventorySource("tcisrc_missing"),
+        app.postRestoreInventorySource("tcisrc_missing"),
+        app.getInventorySourceSummary("tcisrc_missing"),
+        app.getInventoryTransactions({}),
+        app.getPublishReadiness("tcvar_missing"),
+      ])
+      expect(responses.map((response) => response.status)).toEqual([401, 401, 401, 401, 401, 401, 401, 401])
+    })
+
+    it("creates a source, rejects a duplicate name, renames, archives and restores it", async () => {
+      const marker = uniqueMarker("source")
+      const createResponse = await app.postCreateInventorySource({
+        displayName: `[ME] eBay Stock ${marker}`, provider: "PULSE", language: "EN",
+      }, adminToken)
+      expect(createResponse.status).toBe(201)
+      const created = await createResponse.json()
+      expect(Object.keys(created.source).sort()).toEqual([
+        "createdAt", "defaultCurrencyCode", "defaultPricingProfileKey", "defaultStorefrontCategoryId",
+        "displayName", "id", "language", "notes", "provider", "status", "updatedAt",
+      ])
+      expect(created.source.status).toBe("ACTIVE")
+
+      const duplicateResponse = await app.postCreateInventorySource({
+        displayName: `  [me]  ebay   stock   ${marker}  `, provider: "PULSE",
+      }, adminToken)
+      expect(duplicateResponse.status).toBe(400)
+
+      const renameResponse = await app.postRenameInventorySource(created.source.id, { displayName: `Renamed ${marker}` }, adminToken)
+      expect(renameResponse.status).toBe(200)
+      expect((await renameResponse.json()).source.displayName).toBe(`Renamed ${marker}`)
+
+      const archiveResponse = await app.postArchiveInventorySource(created.source.id, adminToken)
+      expect(archiveResponse.status).toBe(200)
+      expect((await archiveResponse.json()).source.status).toBe("ARCHIVED")
+
+      const restoreResponse = await app.postRestoreInventorySource(created.source.id, adminToken)
+      expect(restoreResponse.status).toBe(200)
+      expect((await restoreResponse.json()).source.status).toBe("ACTIVE")
+    })
+
+    it("rejects invalid input before it reaches the service", async () => {
+      const missingProvider = await app.postCreateInventorySource({ displayName: "No provider" }, adminToken)
+      expect(missingProvider.status).toBe(400)
+      const emptyName = await app.postCreateInventorySource({ displayName: "   ", provider: "PULSE" }, adminToken)
+      expect(emptyName.status).toBe(400)
+    })
+
+    it("paginates the source list and returns a bounded response shape", async () => {
+      const marker = uniqueMarker("page")
+      for (let i = 0; i < 3; i += 1) {
+        await app.postCreateInventorySource({ displayName: `[Page ${marker}] Source ${i}`, provider: "PULSE" }, adminToken)
+      }
+      const response = await app.getInventorySources({ limit: "2", offset: "0" }, adminToken)
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      expect(Object.keys(body).sort()).toEqual(["count", "limit", "offset", "sources"])
+      expect(body.limit).toBe(2)
+      expect(body.sources.length).toBeLessThanOrEqual(2)
+      expect(body.count).toBeGreaterThanOrEqual(3)
+
+      const invalidResponse = await app.getInventorySources({ limit: "not-a-number" }, adminToken)
+      expect(invalidResponse.status).toBe(400)
+    })
+
+    it("returns a bounded summary with no raw internal fields", async () => {
+      const inventory = app.container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
+      const source = await inventory.createInventorySource({
+        displayName: `Summary Source ${uniqueMarker("summary")}`, provider: "PULSE", actor: "http-test", source: "MANUAL",
+      })
+      const response = await app.getInventorySourceSummary((source as Record<string, unknown>).id as string, adminToken)
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      expect(Object.keys(body).sort()).toEqual([
+        "approvedHoldingCount", "holdingStatusCounts", "latestSnapshot", "source", "totalGroupedQuantity", "unresolvedProposalCount",
+      ])
+      expect(body.latestSnapshot).toBeNull()
+      expect(body.approvedHoldingCount).toBe(0)
+    })
+
+    it("returns a safe not-found response for an unknown source", async () => {
+      const response = await app.getInventorySourceSummary("tcisrc_missing", adminToken)
+      expect(response.status).toBe(404)
+    })
+  })
+
+  describe("transactions", () => {
+    it("lists appended ledger entries without exposing unrelated fields", async () => {
+      const inventory = app.container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
+      const { variant } = await createVariantFixture(uniqueMarker("txn"))
+      await inventory.appendInventoryTransaction({
+        tradingCardVariantId: variant.id, quantityBefore: 5, quantityAfter: 3,
+        reason: "WEBSITE_SALE", actor: "http-test", source: "SYSTEM",
+      })
+      const response = await app.getInventoryTransactions({ tradingCardVariantId: variant.id }, adminToken)
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      expect(body.count).toBeGreaterThanOrEqual(1)
+      expect(Object.keys(body.transactions[0]).sort()).toEqual([
+        "actor", "createdAt", "inventoryHoldingId", "inventorySnapshotId", "inventorySourceId", "note",
+        "originatingReference", "quantityAfter", "quantityBefore", "quantityDelta", "reason", "tradingCardVariantId", "id",
+      ].sort())
+    })
+
+    it("rejects a malformed query", async () => {
+      const response = await app.getInventoryTransactions({ limit: "not-a-number" }, adminToken)
+      expect(response.status).toBe(400)
+    })
+  })
+
+  describe("publish readiness", () => {
+    it("reports every blocker for a brand-new, unlinked variant", async () => {
+      const { variant } = await createVariantFixture(uniqueMarker("readiness"))
+      const response = await app.getPublishReadiness(variant.id, adminToken)
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      expect(body.ready).toBe(false)
+      expect(body.blockers).toEqual(expect.arrayContaining([
+        "NO_APPROVED_TCGDEX_DATA", "NO_READY_IMAGE", "NO_LINKED_PRODUCT", "ZERO_APPROVED_QUANTITY",
+      ]))
     })
   })
 })

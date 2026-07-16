@@ -71,5 +71,28 @@ export default defineMiddlewares({
       methods: ["POST"],
       bodyParser: { sizeLimit: "1kb" },
     },
+    // Stage 5A.1 inventory-source management: small bounded bodies only
+    // (display name, provider, language, a handful of short reserved config
+    // fields) — no CSV or bulk payload ever reaches these routes.
+    {
+      matcher: "/admin/trading-card-inventory/sources",
+      methods: ["POST"],
+      bodyParser: { sizeLimit: "5kb" },
+    },
+    {
+      matcher: "/admin/trading-card-inventory/sources/*/rename",
+      methods: ["POST"],
+      bodyParser: { sizeLimit: "2kb" },
+    },
+    {
+      matcher: "/admin/trading-card-inventory/sources/*/archive",
+      methods: ["POST"],
+      bodyParser: { sizeLimit: "1kb" },
+    },
+    {
+      matcher: "/admin/trading-card-inventory/sources/*/restore",
+      methods: ["POST"],
+      bodyParser: { sizeLimit: "1kb" },
+    },
   ],
 })
