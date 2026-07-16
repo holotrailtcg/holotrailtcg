@@ -36,10 +36,12 @@ confirmed objects live under `card-images/<variantId>/<imageId>/<uuid>.<ext>`
 **never synchronously deleted** — not when confirmation succeeds (the
 original staging bytes are simply left in place once the re-encoded bytes
 are written to the final key), and not when confirmation rejects or expires
-a row. Cleaning up abandoned or superseded staging objects is a future,
-separately protected background job, explicitly out of scope for this
-stage — the same principle Stage 4B.1 applied to permanent deletion of an
-archived `CardImage` row.
+a row. Cleaning up abandoned or superseded staging objects is handled by
+the Stage 4B.4 Slice 2 daily orphan-reconciliation job (see
+[stage-4b-4-image-cleanup-and-hardening.md](stage-4b-4-image-cleanup-and-hardening.md)),
+not synchronously here — the same principle Stage 4B.1 applied to permanent
+deletion of an archived `CardImage` row, which remains out of scope for
+every stage through 4B.4.
 
 One accepted trade-off follows from keeping every R2 network call outside
 the DB transaction: the final re-encoded bytes are written to R2 (via
@@ -52,7 +54,8 @@ never references it — a `DUPLICATE` row has no `final_object_key`, and a
 rolled-back attempt stays `PENDING`, also without one). This is harmless and
 consistent with the "no synchronous cleanup" principle above — orphaned
 staging *and* final objects are both left in place, and cleaning either up
-is deferred to the same future background job.
+is the Stage 4B.4 Slice 2 daily orphan-reconciliation job's responsibility,
+not something this stage does synchronously.
 
 ## Confirmation pipeline in detail
 
@@ -249,10 +252,14 @@ placed in `apps/storefront/.env.local` or behind a `NEXT_PUBLIC_` prefix.
   `CardImage` row.
 - Resizing, cropping, and marketplace-specific image derivatives; thumbnails.
 - Admin image pages and storefront image display.
-- Background cleanup of abandoned or superseded staging objects, and of any
+- Synchronous cleanup of abandoned or superseded staging objects, and of any
   final object orphaned by a duplicate detection or a post-`putObject`
-  failure (see "Failure handling and retry semantics" above) — no
-  synchronous or background cleanup of either exists in this stage.
-- A background expiry sweep — expiry is currently confirm-time-lazy only
-  (though whenever it *is* detected, the `EXPIRED` transition itself always
-  commits durably; see "Failure handling and retry semantics").
+  failure (see "Failure handling and retry semantics" above) — this stage
+  still performs none. Both are instead swept up daily, once older than a
+  30-minute grace period, by the Stage 4B.4 Slice 2 orphan-reconciliation
+  job — see
+  [stage-4b-4-image-cleanup-and-hardening.md](stage-4b-4-image-cleanup-and-hardening.md).
+- A background expiry sweep — expiry is confirm-time-lazy here, but Stage
+  4B.4 Slice 1 adds an hourly sweep on top (see the same document above);
+  whenever expiry *is* detected, the `EXPIRED` transition itself always
+  commits durably; see "Failure handling and retry semantics".

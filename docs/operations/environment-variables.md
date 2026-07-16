@@ -193,6 +193,21 @@ Getting the R2 credentials:
 No automated test may call real R2. Config-reader tests pass explicit fake
 environment objects; `.env.test` keeps `R2_IMAGES_ENABLED=false`.
 
+## Stage 4B.4 Slice 2 card-image cleanup dry-run
+
+Backend-only; never a storefront file, never `NEXT_PUBLIC_`. See
+[stage-4b-4-image-cleanup-and-hardening.md](stage-4b-4-image-cleanup-and-hardening.md)
+for the full daily orphan-reconciliation job design.
+
+| Variable | Owner / class | Local file and committed template | Required when enabled | Validation |
+| --- | --- | --- | --- | --- |
+| `CARD_IMAGE_CLEANUP_DRY_RUN` | Backend / config | Backend `.env`; backend template | Always set; default (unset) is dry-run | Only the exact, case-sensitive string `"false"` disables dry-run and enables real R2 deletion; unset, empty, or any other value keeps dry-run on |
+
+No automated test requires real R2 credentials for this job — it runs
+against `FakeR2ImageStorageClient`. The advisory lock that serialises
+reconciliation runs uses this project's real (non-production) test
+database directly, not a fake.
+
 ## Test database safety
 
 Before any automated database-backed test or reviewed migration command, load

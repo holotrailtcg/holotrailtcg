@@ -144,9 +144,23 @@ export class FakeR2ImageStorageClient implements R2ImageStorageClient {
       this.listFailure = null
       throw error
     }
-    const objects = [...this.objects.entries()]
+    // Sorted-by-key so continuationToken (the last key already returned) has
+    // a stable, deterministic meaning across calls, matching real
+    // ListObjectsV2 pagination semantics closely enough for reconciliation
+    // tests to exercise real multi-page loops against this fake.
+    const matching = [...this.objects.entries()]
       .filter(([key]) => key.startsWith(input.prefix))
-      .map(([key, entry]) => ({ key, lastModified: entry.lastModified, size: entry.bytes.length }))
-    return { objects }
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    const startIndex = input.continuationToken
+      ? matching.findIndex(([key]) => key > input.continuationToken!)
+      : 0
+    const remaining = startIndex === -1 ? [] : matching.slice(startIndex)
+    const page = input.maxKeys ? remaining.slice(0, input.maxKeys) : remaining
+    const objects = page.map(([key, entry]) => ({ key, lastModified: entry.lastModified, size: entry.bytes.length }))
+    const hasMore = page.length < remaining.length
+    return {
+      objects,
+      nextContinuationToken: hasMore ? objects[objects.length - 1]?.key : undefined,
+    }
   }
 }

@@ -169,3 +169,12 @@ export const CARD_IMAGE_UPLOAD_EXPIRY_MINUTES = 15
 
 /** Stage 4B.4: the audit-entry `actor` recorded for card-image mutations made by a background cleanup job rather than an authenticated Admin user. */
 export const CARD_IMAGE_CLEANUP_ACTOR = "system:card-image-cleanup"
+
+/** Stage 4B.4 Slice 2: an R2 object under a managed prefix younger than this is never treated as an orphan candidate, regardless of reference state — it may simply be mid-upload. */
+export const CARD_IMAGE_ORPHAN_GRACE_PERIOD_MINUTES = 30
+
+/** Stage 4B.4 Slice 2: the bounded maximum number of R2 objects a single reconciliation run inspects for one managed prefix; a larger backlog is drained across successive scheduled runs, never in one pass. */
+export const CARD_IMAGE_ORPHAN_MAX_OBJECTS_PER_RUN = 5000
+
+/** Stage 4B.4 Slice 2: the fixed `pg_advisory_lock` namespace (first int of the two-int form) reserved for orphan-reconciliation prefix locks — arbitrary but stable, chosen once and never reused for another lock domain. */
+export const CARD_IMAGE_ORPHAN_LOCK_NAMESPACE = 424242
