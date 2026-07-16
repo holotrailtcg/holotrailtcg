@@ -1,7 +1,9 @@
 import {
-  expiresAtFromNow, readBoundedStream, readFetchedObjectFromResponse,
+  createR2ImageStorageClient,
+  expiresAtFromNow, mapHeadObjectResponse, mapListObjectsV2Response, readBoundedStream, readFetchedObjectFromResponse,
   type DestroyableByteStream, type RawGetObjectResponse,
 } from "../r2-client"
+import type { R2EnabledConfig } from "../r2-config"
 
 const MAX_BYTES = 10
 
@@ -119,5 +121,116 @@ describe("expiresAtFromNow", () => {
     const after = Date.now()
     expect(result.getTime()).toBeGreaterThanOrEqual(before + 15 * 60_000)
     expect(result.getTime()).toBeLessThanOrEqual(after + 15 * 60_000)
+  })
+})
+
+describe("mapHeadObjectResponse", () => {
+  it("maps LastModified and ContentLength", () => {
+    const lastModified = new Date("2026-01-01T00:00:00.000Z")
+    expect(mapHeadObjectResponse({ LastModified: lastModified, ContentLength: 1234 }))
+      .toEqual({ lastModified, size: 1234 })
+  })
+
+  it("defaults size to 0 and lastModified to the epoch when missing", () => {
+    expect(mapHeadObjectResponse({})).toEqual({ lastModified: new Date(0), size: 0 })
+  })
+})
+
+describe("mapListObjectsV2Response", () => {
+  it("maps Key/LastModified/Size for each entry", () => {
+    const lastModified = new Date("2026-01-01T00:00:00.000Z")
+    const result = mapListObjectsV2Response({
+      Contents: [{ Key: "card-images/a/b/c.jpg", LastModified: lastModified, Size: 42 }],
+    })
+    expect(result.objects).toEqual([{ key: "card-images/a/b/c.jpg", lastModified, size: 42 }])
+  })
+
+  it("drops entries with no Key", () => {
+    const result = mapListObjectsV2Response({ Contents: [{ LastModified: new Date(), Size: 1 }] })
+    expect(result.objects).toEqual([])
+  })
+
+  it("returns nextContinuationToken only when IsTruncated is true", () => {
+    const truncated = mapListObjectsV2Response({ IsTruncated: true, NextContinuationToken: "token-a" })
+    expect(truncated.nextContinuationToken).toBe("token-a")
+
+    const notTruncated = mapListObjectsV2Response({ IsTruncated: false, NextContinuationToken: "token-b" })
+    expect(notTruncated.nextContinuationToken).toBeUndefined()
+  })
+
+  it("returns an empty objects array when Contents is absent", () => {
+    expect(mapListObjectsV2Response({})).toEqual({ objects: [], nextContinuationToken: undefined })
+  })
+})
+
+/**
+ * These two guards run before any AWS SDK call is dispatched (see
+ * `listObjects`/`deleteObject` in `r2-client.ts`), so exercising them
+ * through the real `createR2ImageStorageClient` never makes a real network
+ * call — the rejection happens synchronously inside the guard.
+ */
+describe("createR2ImageStorageClient prefix/key guards", () => {
+  const fakeConfig: R2EnabledConfig = {
+    enabled: true,
+    accountId: "a".repeat(32),
+    accessKeyId: "fake-access-key-id",
+    secretAccessKey: "fake-secret-access-key",
+    bucketName: "fake-bucket",
+    endpoint: `https://${"a".repeat(32)}.r2.cloudflarestorage.com`,
+    publicBaseUrl: "https://images.example.com",
+    region: "auto",
+    cacheControl: "public, max-age=31536000, immutable",
+    acl: false,
+  }
+
+  it("listObjects rejects a non-managed prefix without dispatching any SDK call", async () => {
+    const client = createR2ImageStorageClient(fakeConfig)
+    await expect(client.listObjects({ prefix: "not-managed/" })).rejects.toThrow(/managed R2 prefix/)
+  })
+
+  it("deleteObject rejects a key outside both managed prefixes without dispatching any SDK call", async () => {
+    const client = createR2ImageStorageClient(fakeConfig)
+    await expect(client.deleteObject("not-managed/some-key.jpg")).rejects.toThrow(/managed R2 prefix/)
+  })
+
+  it("headObject accepts a valid staging descendant key (rejected only by the network, not the guard)", async () => {
+    const client = createR2ImageStorageClient(fakeConfig)
+    // No real network is reachable in this unit test, so a valid key still
+    // throws — but it must fail from the SDK call, not the synchronous guard.
+    await expect(client.headObject("staging/card-images/variant/image/uuid.jpg"))
+      .rejects.not.toThrow(/managed R2 prefix/)
+  })
+
+  it("headObject accepts a valid final descendant key (rejected only by the network, not the guard)", async () => {
+    const client = createR2ImageStorageClient(fakeConfig)
+    await expect(client.headObject("card-images/variant/image/uuid.jpg"))
+      .rejects.not.toThrow(/managed R2 prefix/)
+  })
+
+  it("headObject rejects an unrelated key without dispatching any SDK call", async () => {
+    const client = createR2ImageStorageClient(fakeConfig)
+    await expect(client.headObject("not-managed/some-key.jpg")).rejects.toThrow(/managed R2 prefix/)
+  })
+
+  it("headObject rejects an empty key without dispatching any SDK call", async () => {
+    const client = createR2ImageStorageClient(fakeConfig)
+    await expect(client.headObject("")).rejects.toThrow(/managed R2 prefix/)
+  })
+
+  it("headObject rejects the exact managed prefix without dispatching any SDK call", async () => {
+    const client = createR2ImageStorageClient(fakeConfig)
+    await expect(client.headObject("card-images/")).rejects.toThrow(/managed R2 prefix/)
+    await expect(client.headObject("staging/card-images/")).rejects.toThrow(/managed R2 prefix/)
+  })
+
+  it("headObject never includes the supplied key in the thrown error message for a rejected key", async () => {
+    const client = createR2ImageStorageClient(fakeConfig)
+    const secretLookingKey = "not-managed/super-secret-path/uuid.jpg"
+    try {
+      await client.headObject(secretLookingKey)
+      throw new Error("expected headObject to throw")
+    } catch (error) {
+      expect((error as Error).message).not.toContain(secretLookingKey)
+    }
   })
 })
