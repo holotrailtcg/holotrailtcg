@@ -12,9 +12,9 @@ import { cardNumberForms } from "./identity/card-number"
 import { rarityComparisonForm } from "./rarity/normalise-rarity"
 import {
   AUDIT_ACTION, AUDIT_ENTITY_TYPE, type CardCondition, type CardFinish,
-  type CardLanguage, type ConditionSource, type ExternalProvider, type RecordOrigin, type SpecialTreatment,
+  type CardLanguage, type ConditionSource, type ExternalProvider, RECORD_ORIGIN, type RecordOrigin, type SpecialTreatment,
   EXTERNAL_REFERENCE_PROVENANCE, type ExternalReferenceProvenance, IMAGE_STATUS,
-  MAX_CARD_IMAGE_BYTE_SIZE, CARD_IMAGE_UPLOAD_EXPIRY_MINUTES, SUPPORTED_IMAGE_MIME_TYPES,
+  MAX_CARD_IMAGE_BYTE_SIZE, CARD_IMAGE_UPLOAD_EXPIRY_MINUTES, CARD_IMAGE_CLEANUP_ACTOR, SUPPORTED_IMAGE_MIME_TYPES,
 } from "./types"
 import { generateStagingObjectKey, generateFinalObjectKey, sanitiseOriginalFilename, derivePublicImageUrl } from "./images/object-keys"
 import type { R2ImageStorageClient } from "./images/r2-client"
@@ -1213,6 +1213,41 @@ class TradingCardsModuleService extends MedusaService({
       throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This upload window has expired")
     }
     return outcome.row
+  }
+
+  /**
+   * Stage 4B.4 hourly sweep: transitions up to `batchSize` `PENDING` rows
+   * whose `upload_expires_at` is already past `cutoff` to `EXPIRED`, exactly
+   * like the lazy confirm-time expiry path above. `for update skip locked`
+   * means a row `confirmPendingCardImage` already holds a lock on is simply
+   * skipped rather than raced or blocked on — it is picked up by a later
+   * sweep once that confirm attempt finishes. This transition is never
+   * gated by dry-run: an expired `PENDING` row is stale bookkeeping, not a
+   * destructive delete, so the sweep always runs and always writes its
+   * audit entries. Returns the ids transitioned, so the caller can loop
+   * until a batch comes back smaller than `batchSize`.
+   */
+  async expirePendingCardImages(cutoff: Date, batchSize: number): Promise<string[]> {
+    return this.manager_.transactional(async (manager) => {
+      const candidates = await manager.execute<Record<string, unknown>>(
+        `select id from trading_card_image
+         where status = ? and upload_expires_at < ? and deleted_at is null
+         order by upload_expires_at asc
+         limit ?
+         for update skip locked`,
+        [IMAGE_STATUS.PENDING, cutoff, batchSize]
+      )
+      const ids: string[] = []
+      for (const row of candidates) {
+        const id = row.id as string
+        await this.transitionPendingCardImage(manager, {
+          actor: CARD_IMAGE_CLEANUP_ACTOR, source: RECORD_ORIGIN.OTHER,
+          id, currentStatus: IMAGE_STATUS.PENDING, target: "EXPIRED", action: AUDIT_ACTION.IMAGE_UPLOAD_EXPIRED,
+        })
+        ids.push(id)
+      }
+      return ids
+    })
   }
 }
 
