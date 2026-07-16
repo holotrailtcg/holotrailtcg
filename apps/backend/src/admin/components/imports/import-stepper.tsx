@@ -20,7 +20,7 @@ export const IMPORT_STEPS: ImportStep[] = [
   {
     label: "3. Assign card images",
     description: "Add real Holo Trail photographs to each card.",
-    state: "not_connected",
+    state: "connected",
   },
   {
     label: "4. Check and approve",

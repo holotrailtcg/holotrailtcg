@@ -2,32 +2,14 @@ import { Button, Container, Heading, Text, Textarea, Tooltip, toast, usePrompt }
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useState } from "react"
 import { Link, useParams } from "react-router-dom"
+import { fetchJson, postAction } from "../../../../components/imports/fetch-json"
 import ReviewStatusBadge from "../../../../components/imports/review-status-badge"
 import { MAX_REJECT_REASON_LENGTH, visibleReviewActions } from "../../../../components/imports/review-actions"
 import type { ReviewDetailResponse, RetryResponse } from "../../../../components/imports/types"
 import "../../../../styles/imports.css"
 
-async function fetchReview(proposalId: string): Promise<ReviewDetailResponse> {
-  const result = await fetch(`/admin/tcgdex/reviews/${encodeURIComponent(proposalId)}`, {
-    credentials: "include",
-  })
-  if (!result.ok) {
-    throw new Error("Request failed")
-  }
-  return result.json()
-}
-
-async function postAction<T>(url: string, body?: Record<string, unknown>): Promise<T> {
-  const result = await fetch(url, {
-    method: "POST",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body ?? {}),
-  })
-  if (!result.ok) {
-    throw new Error("Request failed")
-  }
-  return result.json()
+function fetchReview(proposalId: string): Promise<ReviewDetailResponse> {
+  return fetchJson(`/admin/tcgdex/reviews/${encodeURIComponent(proposalId)}`)
 }
 
 const RETRY_OUTCOME_MESSAGE: Record<string, string> = {

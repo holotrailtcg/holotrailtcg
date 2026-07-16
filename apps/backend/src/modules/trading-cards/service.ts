@@ -32,6 +32,11 @@ import {
   type AttemptListQuery,
   type ReviewListQuery,
 } from "./tcgdex/admin-review"
+import {
+  listCardsNeedingImages,
+  retrieveCardImageDetail,
+  type ImageListQuery,
+} from "./images/admin-image-review"
 
 interface TxManager {
   execute<T = Record<string, unknown>>(query: string, params?: unknown[]): Promise<T[]>
@@ -109,6 +114,12 @@ export interface ReorderReadyCardImagesInput extends AuditContext {
 export interface ArchiveCardImageInput extends AuditContext {
   id: string
   adminId: string
+}
+
+export interface UpdateCardImageFocalPointInput extends AuditContext {
+  id: string
+  focalX: number
+  focalY: number
 }
 
 interface PriceLockState {
@@ -888,6 +899,54 @@ class TradingCardsModuleService extends MedusaService({
       const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_image where id = ?`, [input.id])
       return saved
     })
+  }
+
+  /**
+   * Focal position only ever applies to an active (READY) photograph — an
+   * archived image has no gallery position to focus, and a pending/terminal
+   * row has no confirmed pixels yet. The 0..1 bounds check here duplicates
+   * the `CK_trading_card_image_focal_bounds` database constraint so a bad
+   * value gets a specific `INVALID_DATA` error instead of a raw constraint
+   * violation.
+   */
+  async updateCardImageFocalPoint(input: UpdateCardImageFocalPointInput) {
+    if (input.focalX < 0 || input.focalX > 1 || input.focalY < 0 || input.focalY > 1) {
+      throw new MedusaError(MedusaError.Types.INVALID_DATA, "focalX and focalY must be between 0 and 1")
+    }
+    return this.manager_.transactional(async (manager) => {
+      const [target] = await manager.execute<Record<string, unknown>>(
+        `select trading_card_variant_id from trading_card_image where id = ? and deleted_at is null`, [input.id]
+      )
+      if (!target) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Card image not found")
+      await this.lockCardImageVariant(manager, target.trading_card_variant_id as string)
+      const [current] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_image where id = ? and deleted_at is null for update`, [input.id]
+      )
+      if (!current) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Card image not found")
+      if (current.status !== IMAGE_STATUS.READY) {
+        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Only a ready image's focal point can be changed")
+      }
+      await manager.execute(
+        `update trading_card_image set focal_x = ?, focal_y = ?, updated_at = now() where id = ?`,
+        [input.focalX, input.focalY, input.id]
+      )
+      await this.writeAudit(manager, {
+        ...input, entityType: AUDIT_ENTITY_TYPE.CARD_IMAGE, entityId: input.id,
+        action: AUDIT_ACTION.IMAGE_FOCAL_CHANGED,
+        oldValue: { focalX: current.focal_x, focalY: current.focal_y },
+        newValue: { focalX: input.focalX, focalY: input.focalY },
+      })
+      const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_image where id = ?`, [input.id])
+      return saved
+    })
+  }
+
+  async listCardsNeedingImages(query: ImageListQuery) {
+    return listCardsNeedingImages(this.manager_, query)
+  }
+
+  async retrieveCardImageDetail(tradingCardId: string) {
+    return retrieveCardImageDetail(this.manager_, tradingCardId)
   }
 
   /**

@@ -41,8 +41,8 @@ const ImportsOverviewPage = () => {
       <Container className="flex flex-col gap-2 p-6">
         <Heading level="h1">Import cards</Heading>
         <Text size="small" className="text-ui-fg-subtle">
-          This page shows the four steps for bringing new cards into Holo Trail. Two steps
-          are connected to real data now. The other two are not connected yet.
+          This page shows the four steps for bringing new cards into Holo Trail. Three steps
+          are connected to real data now. One step is not connected yet.
         </Text>
       </Container>
 
@@ -64,8 +64,8 @@ const ImportsOverviewPage = () => {
         <OverviewCard
           title="3. Assign card images"
           description="Add real Holo Trail photographs to each card."
-          href={null}
-          connected={false}
+          href="/imports/images"
+          connected
         />
         <OverviewCard
           title="4. Check and approve"
