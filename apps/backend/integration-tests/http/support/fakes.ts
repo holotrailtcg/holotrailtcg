@@ -12,8 +12,9 @@ import { MedusaError } from "@medusajs/framework/utils"
 import { TcgDexError, type TcgDexLookupDependency } from "../../../src/modules/trading-cards/tcgdex"
 import type { TcgDexCard, TcgDexLanguage } from "../../../src/modules/trading-cards/tcgdex/types"
 import type {
-  FetchedObject, PresignedUpload, R2ImageStorageClient,
+  FetchedObject, ListObjectsPage, PresignedUpload, R2ImageStorageClient,
 } from "../../../src/modules/trading-cards/images/r2-client"
+import { assertManagedKey, assertManagedPrefix } from "../../../src/modules/trading-cards/images/managed-prefixes"
 
 /**
  * Test-only fake reCAPTCHA verifier. Registered into the container before
@@ -112,13 +113,15 @@ export class FakeTcgDexClient implements TcgDexLookupDependency {
  * simulates "the browser already PUT the file" for confirm-route tests.
  */
 export class FakeR2ImageStorageClient implements R2ImageStorageClient {
-  private objects = new Map<string, Buffer>()
+  private objects = new Map<string, { bytes: Buffer; lastModified: Date }>()
   public readonly presignCalls: Array<{ key: string; contentType: string; expiresInSeconds: number }> = []
   public readonly getCalls: string[] = []
   public readonly putCalls: Array<{ key: string; contentType: string; contentLength: number }> = []
+  public readonly headCalls: string[] = []
+  public readonly deleteCalls: string[] = []
 
   seedObject(key: string, bytes: Buffer): void {
-    this.objects.set(key, bytes)
+    this.objects.set(key, { bytes, lastModified: new Date() })
   }
 
   async createPresignedPutUrl(input: { key: string; contentType: string; expiresInSeconds: number }): Promise<PresignedUpload> {
@@ -132,15 +135,39 @@ export class FakeR2ImageStorageClient implements R2ImageStorageClient {
 
   async getObject(key: string): Promise<FetchedObject> {
     this.getCalls.push(key)
-    const bytes = this.objects.get(key)
-    if (!bytes) {
+    const entry = this.objects.get(key)
+    if (!entry) {
       throw new MedusaError(MedusaError.Types.NOT_FOUND, "fake object not found")
     }
-    return { bytes, byteSize: bytes.length, contentType: null }
+    return { bytes: entry.bytes, byteSize: entry.bytes.length, contentType: null }
   }
 
   async putObject(input: { key: string; body: Buffer; contentType: string; contentLength: number }): Promise<void> {
     this.putCalls.push({ key: input.key, contentType: input.contentType, contentLength: input.contentLength })
-    this.objects.set(input.key, input.body)
+    this.objects.set(input.key, { bytes: input.body, lastModified: new Date() })
+  }
+
+  async headObject(key: string): Promise<{ lastModified: Date; size: number }> {
+    assertManagedKey(key)
+    this.headCalls.push(key)
+    const entry = this.objects.get(key)
+    if (!entry) {
+      throw new MedusaError(MedusaError.Types.NOT_FOUND, "fake object not found")
+    }
+    return { lastModified: entry.lastModified, size: entry.bytes.length }
+  }
+
+  async deleteObject(key: string): Promise<void> {
+    assertManagedKey(key)
+    this.deleteCalls.push(key)
+    this.objects.delete(key)
+  }
+
+  async listObjects(input: { prefix: string; continuationToken?: string; maxKeys?: number }): Promise<ListObjectsPage> {
+    assertManagedPrefix(input.prefix)
+    const objects = [...this.objects.entries()]
+      .filter(([key]) => key.startsWith(input.prefix))
+      .map(([key, entry]) => ({ key, lastModified: entry.lastModified, size: entry.bytes.length }))
+    return { objects }
   }
 }

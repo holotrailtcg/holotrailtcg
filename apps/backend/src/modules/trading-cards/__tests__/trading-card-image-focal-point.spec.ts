@@ -3,7 +3,7 @@ import { ContainerRegistrationKeys, createPgConnection } from "@medusajs/framewo
 import sharp from "sharp"
 import { TRADING_CARDS_MODULE } from "../index"
 import { Migration20260715120000 } from "../migrations/Migration20260715120000"
-import type { FetchedObject, PresignedUpload, R2ImageStorageClient } from "../images/r2-client"
+import { FakeR2ImageStorageClient } from "../__fixtures__/fake-r2-client"
 
 let pgConnection: ReturnType<typeof createPgConnection>
 let medusaApp: Awaited<ReturnType<typeof MedusaApp>>
@@ -53,33 +53,6 @@ async function createVariant() {
     origin: "PULSE",
   })
   return { card, variant }
-}
-
-/** Minimal fake R2 client, only enough to drive a PENDING image to READY. */
-class FakeR2ImageStorageClient implements R2ImageStorageClient {
-  private objects = new Map<string, Buffer>()
-
-  seedObject(key: string, bytes: Buffer) {
-    this.objects.set(key, bytes)
-  }
-
-  async createPresignedPutUrl(input: { key: string; contentType: string; expiresInSeconds: number }): Promise<PresignedUpload> {
-    return {
-      uploadUrl: `https://fake-r2.invalid/${input.key}`,
-      requiredHeaders: { "Content-Type": input.contentType },
-      expiresAt: new Date(Date.now() + input.expiresInSeconds * 1000),
-    }
-  }
-
-  async getObject(key: string): Promise<FetchedObject> {
-    const bytes = this.objects.get(key)
-    if (!bytes) throw new Error("fake object not found")
-    return { bytes, byteSize: bytes.length, contentType: null }
-  }
-
-  async putObject(input: { key: string; body: Buffer }): Promise<void> {
-    this.objects.set(input.key, input.body)
-  }
 }
 
 async function createReadyImage() {
