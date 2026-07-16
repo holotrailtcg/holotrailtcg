@@ -47,15 +47,20 @@ export async function runOrphanReconciliation(
   let inspected = 0
   let continuationToken: string | undefined
 
-  do {
+  while (true) {
     const page = await input.r2Client.listObjects({
       prefix: input.prefix, continuationToken, maxKeys: pageSize,
     })
     counts.pagesProcessed += 1
 
+    // Tracks whether the cap was hit with objects still unprocessed in this
+    // page — that alone proves more backlog remains, independent of
+    // whether the listing itself reports a continuation token.
+    let capHitMidPage = false
+
     for (const object of page.objects) {
       if (inspected >= input.maxObjectsPerRun) {
-        counts.limitReached = true
+        capHitMidPage = true
         break
       }
       inspected += 1
@@ -99,7 +104,26 @@ export async function runOrphanReconciliation(
     }
 
     continuationToken = page.nextContinuationToken
-  } while (continuationToken && inspected < input.maxObjectsPerRun)
+
+    if (capHitMidPage) {
+      counts.limitReached = true
+      break
+    }
+
+    if (inspected >= input.maxObjectsPerRun) {
+      // Every object in this page was consumed and the cap landed exactly
+      // on a page boundary. Whether real backlog remains depends only on
+      // what the listing itself reports — a `nextContinuationToken` means
+      // more objects exist beyond this run's cap; its absence means this
+      // page was also the last page, so there is nothing left to report.
+      counts.limitReached = Boolean(continuationToken)
+      break
+    }
+
+    if (!continuationToken) {
+      break
+    }
+  }
 
   return counts
 }
