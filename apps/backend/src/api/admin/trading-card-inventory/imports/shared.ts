@@ -1,7 +1,8 @@
 import { z } from "@medusajs/framework/zod"
 import {
   INVENTORY_CARD_FINISH, INVENTORY_PROVIDER, INVENTORY_RARITY, INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS,
-  INVENTORY_SNAPSHOT_ENTRY_OUTCOME, INVENTORY_DIAGNOSTIC_SEVERITY, INVENTORY_SOURCE_LANGUAGE, INVENTORY_SPECIAL_TREATMENT,
+  INVENTORY_SNAPSHOT_ENTRY_OUTCOME, INVENTORY_DIAGNOSTIC_SEVERITY, INVENTORY_SNAPSHOT_STATUS,
+  INVENTORY_SOURCE_LANGUAGE, INVENTORY_SPECIAL_TREATMENT,
 } from "../../../../modules/trading-card-inventory/types"
 
 export {
@@ -54,6 +55,26 @@ export const reconcileBodySchema = z.object({
   previousApprovedSnapshotId: z.string().min(1).nullish(),
   reason: z.string().max(500).optional(),
 }).strict()
+
+export const snapshotListQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+  inventorySourceId: z.string().min(1).optional(),
+  status: z.enum(Object.values(INVENTORY_SNAPSHOT_STATUS) as [string, ...string[]]).optional(),
+}).strict()
+
+/** Allow-listed Admin view of a snapshot list row — minimal, navigation-only fields. */
+export function toSafeInventorySnapshotListItemDto(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    inventorySourceId: row.inventory_source_id,
+    status: row.status,
+    sequenceNumber: row.sequence_number,
+    originalFilename: row.original_filename ?? null,
+    rowCount: row.row_count ?? null,
+    createdAt: row.created_at,
+  }
+}
 
 /** Allow-listed Admin view of an entry row — never returns `raw_fields`. */
 export function toSafeSnapshotEntryDto(row: Record<string, unknown>) {

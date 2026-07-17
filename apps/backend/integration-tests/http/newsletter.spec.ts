@@ -1556,11 +1556,19 @@ describe("Admin trading-card-inventory", () => {
         app.getInventorySourceSummary("tcisrc_missing"),
         app.getInventoryTransactions({}),
         app.getInventoryProposals({}),
+        app.getInventoryProposal("tciprop_missing"),
+        app.postReviewInventoryProposal("tciprop_missing", { targetStatus: "APPROVED" }),
+        app.postBulkReviewInventoryProposals({ ids: ["tciprop_missing"], targetStatus: "APPROVED" }),
+        app.postApplyInventoryProposal("tciprop_missing"),
+        app.postBulkApplyInventoryProposals({ ids: ["tciprop_missing"] }),
+        app.postRetryInventoryProposalSync("tciprop_missing"),
         app.getInventoryProposalSummary({ inventorySnapshotId: "tcisnap_missing" }),
         app.getInventoryReconciliationSummary("tcisnap_missing"),
         app.getPublishReadiness("tcvar_missing"),
       ])
-      expect(responses.map((response) => response.status)).toEqual([401, 401, 401, 401, 401, 401, 401, 401, 401, 401, 401])
+      expect(responses.map((response) => response.status)).toEqual([
+        401, 401, 401, 401, 401, 401, 401, 401, 401, 401, 401, 401, 401, 401, 401, 401, 401,
+      ])
     })
 
     it("creates a source, rejects a duplicate name, renames, archives and restores it", async () => {
@@ -1699,7 +1707,10 @@ describe("Admin trading-card-inventory", () => {
         "inventorySnapshotId", "inventorySourceId", "previousQuantity", "previousUnitAcquisitionCost",
         "previousUnitMarketPrice", "previousUnitSellingPrice", "proposedQuantity", "proposedUnitAcquisitionCost",
         "proposedUnitMarketPrice", "proposedUnitSellingPrice", "providerReference", "providerReferenceType",
-        "quantityDelta", "reason", "reviewStatus", "tradingCardVariantId",
+        "quantityDelta", "reason", "reviewStatus", "tradingCardVariantId", "resolvedBy", "resolvedAt", "reviewNote",
+        "appliedAt", "appliedTransactionId", "appliedHoldingId", "medusaSyncStatus", "medusaInventoryItemId",
+        "medusaStockLocationId", "medusaSyncAttemptedAt", "medusaSyncSucceededAt", "medusaSyncRetryCount",
+        "medusaSyncLastError",
       ].sort())
       expect(await app.getInventoryProposals({ limit: "101" }, adminToken).then((result) => result.status)).toBe(400)
     })
@@ -1716,6 +1727,67 @@ describe("Admin trading-card-inventory", () => {
         inventorySnapshotId: snapshot.id, count: 2,
         byChangeKind: { NEW_HOLDING: 1, UNRESOLVED_VARIANT: 1 }, byReviewStatus: { PENDING: 2 },
       })
+    })
+
+    it("uses the authenticated actor, rejects extra body fields, and returns bounded safe history", async () => {
+      const inventory = app.container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
+      const marker = uniqueMarker("proposal-review")
+      const source = await inventory.createInventorySource({
+        displayName: `Proposal review ${marker}`, provider: "PULSE", actor: "http-test", source: "MANUAL",
+      })
+      const proposal = await inventory.createInventoryProposal({
+        inventorySourceId: source.id as string, tradingCardVariantId: `tcvar_${marker}`, changeKind: "NEW_HOLDING",
+        previousQuantity: 0, proposedQuantity: 2, actor: "http-test", source: "MANUAL",
+      })
+
+      const rejectedExtraField = await app.postReviewInventoryProposal(
+        proposal.id as string, { targetStatus: "APPROVED", actor: "client-forged" }, adminToken,
+      )
+      expect(rejectedExtraField.status).toBe(400)
+      expect((await inventory.retrieveInventoryProposal(proposal.id as string)).review_status).toBe("PENDING")
+
+      const reviewedResponse = await app.postReviewInventoryProposal(
+        proposal.id as string, { targetStatus: "APPROVED", reviewNote: "checked" }, adminToken,
+      )
+      expect(reviewedResponse.status).toBe(200)
+      expect((await reviewedResponse.json()).proposal).toMatchObject({ resolvedBy: "user_inventory_http_test", reviewNote: "checked" })
+
+      const detailResponse = await app.getInventoryProposal(proposal.id as string, { limit: "2" }, adminToken)
+      expect(detailResponse.status).toBe(200)
+      const detail = await detailResponse.json()
+      expect(detail.history.length).toBeLessThanOrEqual(2)
+      expect(Object.keys(detail.history[0]).sort()).toEqual(["action", "actor", "createdAt", "id", "newValue", "oldValue", "reason", "source"])
+      expect(detail.proposal).not.toHaveProperty("reconciliation_diagnostics")
+      expect(detail.proposal).not.toHaveProperty("medusa_sync_attempt_token")
+    })
+
+    it("reports local apply success when Medusa fails and retry never duplicates the ledger movement", async () => {
+      const inventory = app.container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
+      const marker = uniqueMarker("proposal-apply")
+      const source = await inventory.createInventorySource({
+        displayName: `Proposal apply ${marker}`, provider: "PULSE", actor: "http-test", source: "MANUAL",
+      })
+      const proposal = await inventory.createInventoryProposal({
+        inventorySourceId: source.id as string, tradingCardVariantId: `tcvar_${marker}`, changeKind: "NEW_HOLDING",
+        previousQuantity: 0, proposedQuantity: 3, actor: "http-test", source: "MANUAL",
+      })
+      await inventory.reviewInventoryProposals({
+        ids: [proposal.id as string], targetStatus: "APPROVED", actor: "http-test", source: "MANUAL",
+      })
+
+      const appliedResponse = await app.postApplyInventoryProposal(proposal.id as string, adminToken)
+      expect(appliedResponse.status).toBe(200)
+      expect((await appliedResponse.json()).result).toMatchObject({
+        localApplicationStatus: "APPLIED", medusaSyncStatus: "FAILED", errorCode: null,
+      })
+      const [, beforeRetry] = await inventory.listAndCountInventoryTransactions({ originating_reference: proposal.id })
+      expect(beforeRetry).toBe(1)
+
+      const retryResponse = await app.postRetryInventoryProposalSync(proposal.id as string, adminToken)
+      expect(retryResponse.status).toBe(502)
+      expect((await retryResponse.json()).proposal).toMatchObject({ reviewStatus: "APPLIED", medusaSyncStatus: "FAILED" })
+      const [, afterRetry] = await inventory.listAndCountInventoryTransactions({ originating_reference: proposal.id })
+      expect(afterRetry).toBe(1)
     })
   })
 

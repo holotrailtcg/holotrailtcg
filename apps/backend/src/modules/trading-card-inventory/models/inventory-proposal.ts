@@ -3,6 +3,7 @@ import InventorySource from "./inventory-source"
 import InventorySnapshot from "./inventory-snapshot"
 import {
   INVENTORY_PROPOSAL_CHANGE_KIND, INVENTORY_PROPOSAL_REVIEW_STATUS, INVENTORY_PROVIDER_REFERENCE_TYPE,
+  MEDUSA_SYNC_STATUS,
 } from "../types"
 
 const InventoryProposal = model
@@ -35,6 +36,32 @@ const InventoryProposal = model
     resolved_by: model.text().nullable(),
     resolved_at: model.dateTime().nullable(),
     rejection_reason: model.text().nullable(),
+    // Optional reviewer-supplied note, recorded alongside approve/reject.
+    review_note: model.text().nullable(),
+    // Stage 5B.2 application (authoritative local stock movement) tracking.
+    applied_at: model.dateTime().nullable(),
+    applied_transaction_id: model.text().nullable(),
+    applied_holding_id: model.text().nullable(),
+    application_idempotency_key: model.text().nullable(),
+    /**
+     * Medusa inventory sync state, independent of `review_status`. A proposal
+     * reaching `review_status = APPLIED` means the authoritative local stock
+     * movement (holding + ledger) has already committed — this column tracks
+     * only whether that already-committed fact has also been reflected into
+     * Medusa's own InventoryItem/StockLocation level. NOT_APPLICABLE covers
+     * every proposal not yet locally applied. Never treat APPLIED+FAILED or
+     * APPLIED+PENDING as "fully synchronised" in any UI/DTO.
+     */
+    medusa_sync_status: model.enum(Object.values(MEDUSA_SYNC_STATUS)).default(MEDUSA_SYNC_STATUS.NOT_APPLICABLE),
+    medusa_inventory_item_id: model.text().nullable(),
+    medusa_stock_location_id: model.text().nullable(),
+    medusa_sync_attempted_at: model.dateTime().nullable(),
+    medusa_sync_succeeded_at: model.dateTime().nullable(),
+    medusa_sync_retry_count: model.number().default(0),
+    // Minted fresh on every sync attempt; a result whose token no longer matches this value is stale and discarded.
+    medusa_sync_attempt_token: model.text().nullable(),
+    // Categorized, bounded, Admin-safe diagnostic only — never a raw Medusa exception or stack trace.
+    medusa_sync_last_error: model.json().nullable(),
   })
   .indexes([
     {
@@ -46,6 +73,13 @@ const InventoryProposal = model
     { name: "IDX_trading_card_inventory_proposal_variant", on: ["trading_card_variant_id"] },
     { name: "IDX_tci_proposal_reconciliation_key", on: ["inventory_snapshot_id", "reconciliation_key"], unique: true,
       where: "reconciliation_key is not null and deleted_at is null" },
+    { name: "IDX_tci_proposal_medusa_sync_status", on: ["medusa_sync_status"], where: "deleted_at is null" },
+    {
+      name: "IDX_tci_proposal_application_idempotency_key",
+      on: ["application_idempotency_key"],
+      unique: true,
+      where: "application_idempotency_key is not null and deleted_at is null",
+    },
   ])
   .checks([
     {
@@ -79,13 +113,42 @@ const InventoryProposal = model
     {
       name: "CK_trading_card_inventory_proposal_resolved_consistency",
       expression: (columns) =>
-        `(${columns.resolved_by} is null and ${columns.resolved_at} is null) or ` +
-        `(${columns.resolved_by} is not null and ${columns.resolved_at} is not null)`,
+        `(${columns.review_status} = 'PENDING' and ${columns.resolved_by} is null and ${columns.resolved_at} is null) or ` +
+        `(${columns.review_status} <> 'PENDING' and ${columns.resolved_by} is not null and ${columns.resolved_at} is not null)`,
     },
     {
       name: "CK_trading_card_inventory_proposal_unresolved_variant_kind",
       expression: (columns) =>
         `${columns.trading_card_variant_id} is not null or ${columns.change_kind} = 'UNRESOLVED_VARIANT'`,
+    },
+    {
+      name: "CK_tci_proposal_rejection_reason_scope",
+      expression: (columns) =>
+        `${columns.rejection_reason} is null or ${columns.review_status} = 'REJECTED'`,
+    },
+    {
+      name: "CK_tci_proposal_review_note_length",
+      expression: (columns) => `${columns.review_note} is null or length(${columns.review_note}) <= 500`,
+    },
+    {
+      name: "CK_tci_proposal_applied_consistency",
+      expression: (columns) =>
+        `(${columns.review_status} = 'APPLIED' and ${columns.applied_at} is not null and ${columns.applied_transaction_id} is not null ` +
+        `and ${columns.applied_holding_id} is not null and ${columns.application_idempotency_key} is not null ` +
+        `and ${columns.medusa_sync_status} in ('PENDING', 'SYNCED', 'FAILED')) or ` +
+        `(${columns.review_status} <> 'APPLIED' and ${columns.applied_at} is null and ${columns.applied_transaction_id} is null ` +
+        `and ${columns.applied_holding_id} is null and ${columns.application_idempotency_key} is null ` +
+        `and ${columns.medusa_sync_status} = 'NOT_APPLICABLE')`,
+    },
+    {
+      name: "CK_tci_proposal_medusa_error_requires_failed",
+      expression: (columns) => `${columns.medusa_sync_last_error} is null or ${columns.medusa_sync_status} = 'FAILED'`,
+    },
+    {
+      name: "CK_tci_proposal_medusa_attempt_token_scope",
+      expression: (columns) =>
+        `${columns.medusa_sync_attempt_token} is null or ` +
+        `(${columns.review_status} = 'APPLIED' and ${columns.medusa_sync_status} = 'PENDING')`,
     },
   ])
 

@@ -91,6 +91,7 @@ const TRADING_CARD_INVENTORY_MEDUSA_APP_SPEC_PATTERNS = [
   "src/modules/trading-card-inventory/__tests__/trading-card-inventory-module\\.spec\\.ts$",
   "src/modules/trading-card-inventory/__tests__/pulse-import-service-methods\\.integration\\.spec\\.ts$",
   "src/modules/trading-card-inventory/__tests__/import-pulse-csv-snapshot\\.integration\\.spec\\.ts$",
+  "src/modules/trading-card-inventory/__tests__/medusa-inventory-sync\\.integration\\.spec\\.ts$",
 ];
 
 if (process.env.TEST_TYPE === "integration:http") {

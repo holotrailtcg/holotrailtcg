@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import { generateEntityId, MedusaError, MedusaService } from "@medusajs/framework/utils"
 import InventorySource from "./models/inventory-source"
 import InventorySnapshot from "./models/inventory-snapshot"
@@ -14,13 +15,17 @@ import { canonicalDecimal } from "./reconciliation/decimal"
 import {
   auditContextSchema, createInventorySourceSchema, renameInventorySourceSchema, inventoryHoldingUpsertSchema,
   holdingStatusSchema, inventoryProposalCreateSchema, inventoryTransactionAppendSchema, idSchema,
+  proposalReviewSchema, proposalApplySchema, proposalApplyBatchSchema, recordMedusaSyncResultSchema,
 } from "./validation"
 import {
   INVENTORY_AUDIT_ACTION, INVENTORY_AUDIT_ENTITY_TYPE, INVENTORY_HOLDING_STATUS,
-  INVENTORY_PROPOSAL_REVIEW_STATUS, INVENTORY_PROVIDER_REFERENCE_TYPE, INVENTORY_SNAPSHOT_STATUS, INVENTORY_SOURCE_STATUS,
+  INVENTORY_PROPOSAL_REVIEW_STATUS, INVENTORY_PROPOSAL_CHANGE_KIND, INVENTORY_PROVIDER_REFERENCE_TYPE,
+  INVENTORY_SNAPSHOT_STATUS, INVENTORY_SOURCE_STATUS, INVENTORY_TRANSACTION_REASON,
   INVENTORY_SNAPSHOT_ENTRY_OUTCOME, INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS, INVENTORY_SNAPSHOT_ENTRY_MATCHED_VIA,
+  MEDUSA_SYNC_STATUS, MEDUSA_SYNC_ATTEMPT_LEASE_MS,
   isValidInventoryHoldingTransition, isValidInventoryProposalTransition, isValidInventorySnapshotTransition,
-  type InventoryHoldingStatus, type InventoryProposalReviewStatus, type InventoryRecordSource, type InventorySnapshotStatus,
+  type InventoryHoldingStatus, type InventoryProposalReviewStatus, type InventoryProposalChangeKind,
+  type InventoryRecordSource, type InventorySnapshotStatus, type MedusaSyncStatus,
 } from "./types"
 
 interface TxManager {
@@ -79,6 +84,38 @@ export interface AppendInventoryTransactionInput extends AuditContext {
   originatingReference?: string | null
   idempotencyKey?: string | null
   note?: string | null
+}
+
+export interface ReviewInventoryProposalsInput extends AuditContext {
+  ids: string[]
+  targetStatus: "APPROVED" | "REJECTED"
+  rejectionReason?: string | null
+  reviewNote?: string | null
+}
+
+export interface ApplyInventoryProposalInput extends AuditContext {
+  id: string
+  applicationIdempotencyKey?: string | null
+}
+
+export interface ApplyInventoryProposalItemResult {
+  proposalId: string
+  localApplicationStatus: "APPLIED" | "ALREADY_APPLIED" | "STALE_BASELINE" | "INVALID_STATE" | "OUT_OF_SCOPE"
+  transactionId: string | null
+  priorQuantity: number | null
+  resultingQuantity: number | null
+  medusaSyncStatus: MedusaSyncStatus
+  errorCode: string | null
+  errorMessage: string | null
+}
+
+export interface RecordMedusaSyncResultInput extends AuditContext {
+  proposalId: string
+  attemptToken: string
+  outcome: "SYNCED" | "FAILED"
+  medusaInventoryItemId?: string | null
+  medusaStockLocationId?: string | null
+  error?: { category: string; message: string } | null
 }
 
 export interface AddInventorySnapshotEntryInput extends SnapshotEntryInput {}
@@ -1521,6 +1558,390 @@ class TradingCardInventoryModuleService extends MedusaService({
         ]
       )
       const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_inventory_transaction where id = ?`, [id])
+      return saved
+    })
+  }
+
+  // ---------------------------------------------------------------------
+  // Stage 5B.2: proposal review, application, and Medusa sync-state tracking
+  // ---------------------------------------------------------------------
+
+  /**
+   * Bulk approve/reject. All-or-nothing: every id must currently be PENDING,
+   * or the whole batch aborts with no mutation (a reviewer bulk-approving a
+   * selection should never see a partial, ambiguous result). Reuses the same
+   * status-flip fields `transitionInventoryProposalStatus` sets for a single
+   * proposal, inlined here so the whole batch commits in one transaction.
+   */
+  async reviewInventoryProposals(input: ReviewInventoryProposalsInput) {
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    const parsed = proposalReviewSchema.parse({
+      ids: input.ids, targetStatus: input.targetStatus,
+      rejectionReason: input.rejectionReason ?? null, reviewNote: input.reviewNote ?? null,
+    })
+    return this.manager_.transactional(async (manager) => {
+      const rows = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_inventory_proposal where id in (${parsed.ids.map(() => "?").join(", ")}) and deleted_at is null for update`,
+        [...parsed.ids]
+      )
+      const foundIds = new Set(rows.map((row) => row.id as string))
+      const missing = parsed.ids.filter((id) => !foundIds.has(id))
+      if (missing.length > 0) throw new MedusaError(MedusaError.Types.NOT_FOUND, `Inventory proposal(s) not found: ${missing.join(", ")}`)
+      for (const row of rows) {
+        const currentStatus = row.review_status as InventoryProposalReviewStatus
+        if (currentStatus !== INVENTORY_PROPOSAL_REVIEW_STATUS.PENDING) {
+          throw new MedusaError(
+            MedusaError.Types.NOT_ALLOWED,
+            `Proposal ${row.id} is ${currentStatus}, not PENDING — bulk review aborted with no changes`
+          )
+        }
+      }
+      const saved: Record<string, unknown>[] = []
+      for (const row of rows) {
+        await manager.execute(
+          `update trading_card_inventory_proposal
+           set review_status = ?, resolved_by = ?, resolved_at = now(), review_note = ?, rejection_reason = ?, updated_at = now()
+           where id = ?`,
+          [
+            parsed.targetStatus, input.actor, parsed.reviewNote ?? null,
+            parsed.targetStatus === INVENTORY_PROPOSAL_REVIEW_STATUS.REJECTED ? (parsed.rejectionReason ?? null) : null,
+            row.id,
+          ]
+        )
+        await this.writeAudit(manager, {
+          ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_PROPOSAL, entityId: row.id as string,
+          action: INVENTORY_AUDIT_ACTION.PROPOSAL_STATUS_CHANGED,
+          oldValue: { reviewStatus: row.review_status }, newValue: { reviewStatus: parsed.targetStatus },
+        })
+        await this.writeAudit(manager, {
+          ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_PROPOSAL, entityId: row.id as string,
+          action: INVENTORY_AUDIT_ACTION.PROPOSAL_REVIEWED,
+          newValue: {
+            targetStatus: parsed.targetStatus, reviewNote: parsed.reviewNote ?? null,
+            rejectionReason: parsed.targetStatus === INVENTORY_PROPOSAL_REVIEW_STATUS.REJECTED ? (parsed.rejectionReason ?? null) : null,
+          },
+        })
+        const [updated] = await manager.execute<Record<string, unknown>>(`select * from trading_card_inventory_proposal where id = ?`, [row.id])
+        saved.push(updated)
+      }
+      return saved
+    })
+  }
+
+  /**
+   * Phase A of Stage 5B.2 apply: the atomic, authoritative local stock
+   * movement for one proposal (holding upsert + ledger append + proposal
+   * status flip to APPLIED), all in a single transaction — `upsertInventoryHolding`
+   * and `appendInventoryTransaction` each open their own transaction and
+   * cannot be composed here for atomicity, so their logic is inlined.
+   *
+   * Idempotency: the proposal id is the canonical domain-level idempotency
+   * identity. Re-calling this on an already-APPLIED proposal is a no-op
+   * success (returns the existing movement, never double-posts the ledger).
+   * A caller-supplied `applicationIdempotencyKey` is only ever compared
+   * against the value already stored on *this* row — it can never be used to
+   * apply the same proposal twice under different keys.
+   *
+   * Only NEW_HOLDING/QUANTITY_CHANGE proposals are ever applied here; every
+   * other `change_kind` (PRICE_CHANGE, COST_CHANGE, NO_CHANGE, UNRESOLVED_VARIANT)
+   * is explicitly out of scope for this stage and rejected without mutation —
+   * see `docs/decisions/0011-inventory-proposal-application-and-medusa-sync.md`.
+   */
+  async applyInventoryProposal(input: ApplyInventoryProposalInput): Promise<ApplyInventoryProposalItemResult> {
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    const parsed = proposalApplySchema.parse({ id: input.id, applicationIdempotencyKey: input.applicationIdempotencyKey ?? null })
+
+    // Durable attempt record, written in its own small transaction *before*
+    // Phase A begins, so "an attempt happened" survives even if Phase A
+    // itself then rolls back (e.g. on a stale baseline).
+    await this.manager_.transactional(async (manager) => {
+      await this.writeAudit(manager, {
+        ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_PROPOSAL, entityId: parsed.id,
+        action: INVENTORY_AUDIT_ACTION.PROPOSAL_APPLICATION_ATTEMPTED,
+      })
+    })
+
+    type PhaseAOutcome =
+      | { outcome: "APPLIED"; row: Record<string, unknown> }
+      | { outcome: "ALREADY_APPLIED"; row: Record<string, unknown> }
+      | { outcome: "INVALID_STATE"; row: Record<string, unknown> }
+      | { outcome: "OUT_OF_SCOPE"; row: Record<string, unknown> }
+      | { outcome: "STALE_BASELINE"; row: Record<string, unknown>; liveQuantity: number }
+
+    const phaseAResult = await this.manager_.transactional(async (manager): Promise<PhaseAOutcome> => {
+      const [proposal] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_inventory_proposal where id = ? and deleted_at is null for update`, [parsed.id]
+      )
+      if (!proposal) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory proposal not found")
+
+      const reviewStatus = proposal.review_status as InventoryProposalReviewStatus
+      if (reviewStatus === INVENTORY_PROPOSAL_REVIEW_STATUS.APPLIED) {
+        return { outcome: "ALREADY_APPLIED", row: proposal }
+      }
+      if (reviewStatus !== INVENTORY_PROPOSAL_REVIEW_STATUS.APPROVED) {
+        return { outcome: "INVALID_STATE", row: proposal }
+      }
+
+      const changeKind = proposal.change_kind as InventoryProposalChangeKind
+      const inScope = changeKind === INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING || changeKind === INVENTORY_PROPOSAL_CHANGE_KIND.QUANTITY_CHANGE
+      if (!inScope) {
+        return { outcome: "OUT_OF_SCOPE", row: proposal }
+      }
+      if (!proposal.trading_card_variant_id || !Number.isInteger(proposal.proposed_quantity) || (proposal.proposed_quantity as number) < 0) {
+        return { outcome: "INVALID_STATE", row: proposal }
+      }
+
+      const sourceId = proposal.inventory_source_id as string
+      const variantId = proposal.trading_card_variant_id as string
+      await manager.execute(`select pg_advisory_xact_lock(hashtextextended(?::text, 0))`, [`holding:${sourceId}:${variantId}`])
+
+      const [holding] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_inventory_holding
+         where inventory_source_id = ? and trading_card_variant_id = ? and deleted_at is null for update`,
+        [sourceId, variantId]
+      )
+      const liveQuantity = holding ? (holding.quantity as number) : 0
+      const expectedBaseline = (proposal.previous_quantity as number | null) ?? 0
+      if (liveQuantity !== expectedBaseline) {
+        return { outcome: "STALE_BASELINE", row: proposal, liveQuantity }
+      }
+
+      const proposedQuantity = proposal.proposed_quantity as number
+      // Proposal identity is canonical. A legacy/internal caller may still
+      // send an application key, but it must never select a different ledger
+      // identity or collide with another proposal.
+      const idempotencyKey = parsed.id
+
+      let holdingId: string
+      if (holding) {
+        holdingId = holding.id as string
+        await manager.execute(
+          `update trading_card_inventory_holding set quantity = ?, source_observed_at = now(), updated_at = now() where id = ?`,
+          [proposedQuantity, holdingId]
+        )
+        await this.writeAudit(manager, {
+          ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_HOLDING, entityId: holdingId,
+          action: INVENTORY_AUDIT_ACTION.HOLDING_QUANTITY_CHANGED,
+          oldValue: { quantity: liveQuantity }, newValue: { quantity: proposedQuantity },
+        })
+      } else {
+        holdingId = generateEntityId(undefined, "tcihold")
+        await manager.execute(
+          `insert into trading_card_inventory_holding
+           (id, inventory_source_id, trading_card_variant_id, status, quantity, currency_code, source_observed_at)
+           values (?, ?, ?, ?, ?, ?, now())`,
+          [holdingId, sourceId, variantId, INVENTORY_HOLDING_STATUS.DRAFT, proposedQuantity, proposal.currency_code ?? null]
+        )
+        await this.writeAudit(manager, {
+          ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_HOLDING, entityId: holdingId,
+          action: INVENTORY_AUDIT_ACTION.HOLDING_CREATED,
+          newValue: { quantity: proposedQuantity, tradingCardVariantId: variantId },
+        })
+      }
+
+      const transactionId = generateEntityId(undefined, "tcitxn")
+      await manager.execute(
+        `insert into trading_card_inventory_transaction
+         (id, trading_card_variant_id, inventory_source_id, inventory_holding_id, inventory_snapshot_id,
+          quantity_before, quantity_after, quantity_delta, reason, originating_reference, actor, idempotency_key, note)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          transactionId, variantId, sourceId, holdingId, proposal.inventory_snapshot_id ?? null,
+          liveQuantity, proposedQuantity, proposedQuantity - liveQuantity, INVENTORY_TRANSACTION_REASON.APPROVED_SOURCE_SNAPSHOT,
+          parsed.id, input.actor, idempotencyKey, null,
+        ]
+      )
+
+      await manager.execute(
+        `update trading_card_inventory_proposal
+         set review_status = ?, applied_at = now(), applied_transaction_id = ?, applied_holding_id = ?,
+             medusa_sync_status = ?, application_idempotency_key = ?, updated_at = now()
+         where id = ?`,
+        [INVENTORY_PROPOSAL_REVIEW_STATUS.APPLIED, transactionId, holdingId, MEDUSA_SYNC_STATUS.PENDING, idempotencyKey, parsed.id]
+      )
+      await this.writeAudit(manager, {
+        ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_PROPOSAL, entityId: parsed.id,
+        action: INVENTORY_AUDIT_ACTION.PROPOSAL_APPLIED,
+        oldValue: { quantity: liveQuantity }, newValue: { quantity: proposedQuantity, transactionId, holdingId },
+      })
+
+      const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_inventory_proposal where id = ?`, [parsed.id])
+      return { outcome: "APPLIED", row: saved }
+    })
+
+    if (phaseAResult.outcome === "STALE_BASELINE") {
+      await this.manager_.transactional(async (manager) => {
+        await this.writeAudit(manager, {
+          ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_PROPOSAL, entityId: parsed.id,
+          action: INVENTORY_AUDIT_ACTION.PROPOSAL_APPLICATION_REJECTED_STALE_BASELINE,
+          oldValue: { expectedBaseline: phaseAResult.row.previous_quantity }, newValue: { liveQuantity: phaseAResult.liveQuantity },
+        })
+      })
+      return {
+        proposalId: parsed.id, localApplicationStatus: "STALE_BASELINE", transactionId: null,
+        priorQuantity: phaseAResult.liveQuantity, resultingQuantity: null,
+        medusaSyncStatus: phaseAResult.row.medusa_sync_status as MedusaSyncStatus,
+        errorCode: "STALE_BASELINE", errorMessage: "The proposal's expected baseline quantity no longer matches the current holding.",
+      }
+    }
+
+    if (phaseAResult.outcome === "ALREADY_APPLIED") {
+      await this.manager_.transactional(async (manager) => {
+        await this.writeAudit(manager, {
+          ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_PROPOSAL, entityId: parsed.id,
+          action: INVENTORY_AUDIT_ACTION.PROPOSAL_APPLICATION_RETRIED,
+        })
+      })
+      return {
+        proposalId: parsed.id, localApplicationStatus: "ALREADY_APPLIED",
+        transactionId: (phaseAResult.row.applied_transaction_id as string) ?? null,
+        priorQuantity: null, resultingQuantity: (phaseAResult.row.proposed_quantity as number) ?? null,
+        medusaSyncStatus: phaseAResult.row.medusa_sync_status as MedusaSyncStatus,
+        errorCode: null, errorMessage: null,
+      }
+    }
+
+    if (phaseAResult.outcome === "INVALID_STATE") {
+      const isApproved = phaseAResult.row.review_status === INVENTORY_PROPOSAL_REVIEW_STATUS.APPROVED
+      return {
+        proposalId: parsed.id, localApplicationStatus: "INVALID_STATE", transactionId: null,
+        priorQuantity: null, resultingQuantity: null, medusaSyncStatus: MEDUSA_SYNC_STATUS.NOT_APPLICABLE,
+        errorCode: "INVALID_STATE",
+        errorMessage: isApproved
+          ? "The approved proposal is missing a valid variant or proposed quantity."
+          : `Proposal is ${phaseAResult.row.review_status}; only an APPROVED proposal can be applied.`,
+      }
+    }
+
+    if (phaseAResult.outcome === "OUT_OF_SCOPE") {
+      return {
+        proposalId: parsed.id, localApplicationStatus: "OUT_OF_SCOPE", transactionId: null,
+        priorQuantity: null, resultingQuantity: null, medusaSyncStatus: MEDUSA_SYNC_STATUS.NOT_APPLICABLE,
+        errorCode: "OUT_OF_SCOPE",
+        errorMessage: "This proposal's change kind is not applied by Stage 5B.2 (price/cost changes, no-change, or an unresolved variant).",
+      }
+    }
+
+    return {
+      proposalId: parsed.id, localApplicationStatus: "APPLIED",
+      transactionId: phaseAResult.row.applied_transaction_id as string,
+      priorQuantity: null, resultingQuantity: phaseAResult.row.proposed_quantity as number,
+      medusaSyncStatus: phaseAResult.row.medusa_sync_status as MedusaSyncStatus,
+      errorCode: null, errorMessage: null,
+    }
+  }
+
+  /** Loops `applyInventoryProposal` per id — each its own transaction, so one stale/invalid proposal never blocks the others. */
+  async applyInventoryProposals(input: AuditContext & { ids: string[] }): Promise<{ results: ApplyInventoryProposalItemResult[] }> {
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    const parsed = proposalApplyBatchSchema.parse({ ids: input.ids })
+    const results: ApplyInventoryProposalItemResult[] = []
+    for (const id of parsed.ids) {
+      results.push(await this.applyInventoryProposal({ ...input, id }))
+    }
+    return { results }
+  }
+
+  /**
+   * Marks the start of a Medusa sync attempt for a locally-APPLIED proposal,
+   * minting a fresh attempt token the caller must round-trip back through
+   * `recordMedusaSyncResult`. Refuses (no-ops, returns the current row) if
+   * the proposal isn't APPLIED, or is already SYNCED — a synced proposal
+   * needs no new attempt, which is what stops the retry endpoint from
+   * spawning parallel uncontrolled retries at the source.
+   */
+  async beginMedusaSyncAttempt(input: AuditContext & { proposalId: string }): Promise<{ proposal: Record<string, unknown>; attemptToken: string | null }> {
+    idSchema.parse(input.proposalId)
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    return this.manager_.transactional(async (manager) => {
+      const [proposal] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_inventory_proposal where id = ? and deleted_at is null for update`, [input.proposalId]
+      )
+      if (!proposal) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory proposal not found")
+      if (proposal.review_status !== INVENTORY_PROPOSAL_REVIEW_STATUS.APPLIED) {
+        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Only a locally-applied proposal can be synced to Medusa")
+      }
+      if (proposal.medusa_sync_status === MEDUSA_SYNC_STATUS.SYNCED) {
+        return { proposal, attemptToken: null }
+      }
+      if (proposal.medusa_sync_status === MEDUSA_SYNC_STATUS.PENDING && proposal.medusa_sync_attempt_token) {
+        const attemptedAt = new Date(proposal.medusa_sync_attempted_at as string | Date).getTime()
+        if (Number.isFinite(attemptedAt) && Date.now() - attemptedAt < MEDUSA_SYNC_ATTEMPT_LEASE_MS) {
+          return { proposal, attemptToken: null }
+        }
+      }
+      const attemptToken = randomUUID()
+      const retryCount = proposal.medusa_sync_attempted_at ? ((proposal.medusa_sync_retry_count as number) + 1) : (proposal.medusa_sync_retry_count as number)
+      await manager.execute(
+        `update trading_card_inventory_proposal
+         set medusa_sync_status = ?, medusa_sync_attempt_token = ?, medusa_sync_attempted_at = now(),
+             medusa_sync_retry_count = ?, medusa_sync_last_error = null, updated_at = now()
+         where id = ?`,
+        [MEDUSA_SYNC_STATUS.PENDING, attemptToken, retryCount, input.proposalId]
+      )
+      if (proposal.medusa_sync_attempted_at) {
+        await this.writeAudit(manager, {
+          ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_PROPOSAL, entityId: input.proposalId,
+          action: INVENTORY_AUDIT_ACTION.MEDUSA_SYNC_RETRIED,
+          oldValue: { retryCount: proposal.medusa_sync_retry_count }, newValue: { retryCount },
+        })
+      }
+      const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_inventory_proposal where id = ?`, [input.proposalId])
+      return { proposal: saved, attemptToken }
+    })
+  }
+
+  /**
+   * Records the outcome of a Medusa sync attempt, guarding against stale or
+   * out-of-order results: a result whose `attemptToken` no longer matches
+   * the row's current token is discarded (a newer attempt has superseded
+   * it); once SYNCED, a late FAILED result can never regress the status; a
+   * duplicate SYNCED callback is a no-op. Never touches the ledger/holding —
+   * those are already final by the time this runs.
+   */
+  async recordMedusaSyncResult(input: RecordMedusaSyncResultInput) {
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    const parsed = recordMedusaSyncResultSchema.parse({
+      proposalId: input.proposalId, attemptToken: input.attemptToken, outcome: input.outcome,
+      medusaInventoryItemId: input.medusaInventoryItemId ?? null, medusaStockLocationId: input.medusaStockLocationId ?? null,
+      error: input.error ?? null,
+    })
+    return this.manager_.transactional(async (manager) => {
+      const [proposal] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_inventory_proposal where id = ? and deleted_at is null for update`, [parsed.proposalId]
+      )
+      if (!proposal) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory proposal not found")
+      if (proposal.review_status !== INVENTORY_PROPOSAL_REVIEW_STATUS.APPLIED) return proposal
+      if (proposal.medusa_sync_attempt_token !== parsed.attemptToken) return proposal
+      if (parsed.outcome === MEDUSA_SYNC_STATUS.FAILED && proposal.medusa_sync_status === MEDUSA_SYNC_STATUS.SYNCED) return proposal
+      if (parsed.outcome === MEDUSA_SYNC_STATUS.SYNCED && proposal.medusa_sync_status === MEDUSA_SYNC_STATUS.SYNCED) return proposal
+
+      if (parsed.outcome === MEDUSA_SYNC_STATUS.SYNCED) {
+        await manager.execute(
+          `update trading_card_inventory_proposal
+           set medusa_sync_status = ?, medusa_sync_succeeded_at = now(), medusa_inventory_item_id = ?,
+               medusa_stock_location_id = ?, medusa_sync_attempt_token = null, medusa_sync_last_error = null, updated_at = now()
+           where id = ?`,
+          [MEDUSA_SYNC_STATUS.SYNCED, parsed.medusaInventoryItemId ?? null, parsed.medusaStockLocationId ?? null, parsed.proposalId]
+        )
+        await this.writeAudit(manager, {
+          ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_PROPOSAL, entityId: parsed.proposalId,
+          action: INVENTORY_AUDIT_ACTION.MEDUSA_SYNC_SUCCEEDED,
+          newValue: { medusaInventoryItemId: parsed.medusaInventoryItemId ?? null, medusaStockLocationId: parsed.medusaStockLocationId ?? null },
+        })
+      } else {
+        await manager.execute(
+          `update trading_card_inventory_proposal
+           set medusa_sync_status = ?, medusa_sync_attempt_token = null, medusa_sync_last_error = ?::jsonb, updated_at = now()
+           where id = ?`,
+          [MEDUSA_SYNC_STATUS.FAILED, JSON.stringify({ ...parsed.error, occurredAt: new Date().toISOString() }), parsed.proposalId]
+        )
+        await this.writeAudit(manager, {
+          ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_PROPOSAL, entityId: parsed.proposalId,
+          action: INVENTORY_AUDIT_ACTION.MEDUSA_SYNC_FAILED, newValue: { error: parsed.error },
+        })
+      }
+      const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_inventory_proposal where id = ?`, [parsed.proposalId])
       return saved
     })
   }

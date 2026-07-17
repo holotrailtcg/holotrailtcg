@@ -186,13 +186,16 @@ page's summary, tables, filters, and retry/reconcile actions.
 
 ## Deferred Stage 5B.2 work
 
-Unchanged from Slice 2's own out-of-scope list, still fully out of scope
-here:
+Delivered in Stage 5B.2 — see
+[ADR 0011](../decisions/0011-inventory-proposal-application-and-medusa-sync.md)
+and [the Stage 5B.2 operations guide](stage-5b2-review-approval.md):
 
-- Proposal approval, rejection, or application.
-- Any holding update, ledger entry, Medusa `InventoryItem` mutation,
-  `StockLocation` mutation, product creation, or product publication.
-- Automatic pricing, Pulse market-price refresh.
+- Proposal approval, rejection, and application.
+- Holding updates, ledger entries, and real Medusa `InventoryItem`/
+  `StockLocation` reflection.
+
+Still out of scope (unchanged): automatic pricing, Pulse market-price
+refresh, product creation or publication.
 
 ## Known limitations
 

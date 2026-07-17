@@ -109,6 +109,40 @@ export const INVENTORY_PROPOSAL_REVIEW_STATUS_TRANSITIONS: Record<InventoryPropo
   APPLIED: [],
 }
 
+/**
+ * Stage 5B.2 Medusa inventory sync state, tracked per proposal independently
+ * of `review_status`. A proposal reaching `review_status = APPLIED` means the
+ * authoritative local stock movement (holding + ledger) has committed — it
+ * says nothing about whether Medusa's own InventoryItem/StockLocation level
+ * reflects that yet. NOT_APPLICABLE covers every proposal that has not been
+ * locally applied; PENDING is set the instant local application commits;
+ * SYNCED/FAILED are terminal-per-attempt but FAILED may be retried (never the
+ * reverse: once SYNCED, a stale/late result must never regress it to FAILED).
+ */
+export const MEDUSA_SYNC_STATUS = {
+  NOT_APPLICABLE: "NOT_APPLICABLE",
+  PENDING: "PENDING",
+  SYNCED: "SYNCED",
+  FAILED: "FAILED",
+} as const
+export type MedusaSyncStatus = (typeof MEDUSA_SYNC_STATUS)[keyof typeof MEDUSA_SYNC_STATUS]
+/** After this lease, an interrupted PENDING attempt may be safely superseded by a retry token. */
+export const MEDUSA_SYNC_ATTEMPT_LEASE_MS = 5 * 60 * 1000
+
+/** Categorized, Admin-safe Medusa sync failure reasons — never a raw Medusa exception or stack trace. */
+export const MEDUSA_SYNC_ERROR_CATEGORY = {
+  INVALID_CONFIGURED_STOCK_LOCATION: "INVALID_CONFIGURED_STOCK_LOCATION",
+  NO_STOCK_LOCATION: "NO_STOCK_LOCATION",
+  AMBIGUOUS_STOCK_LOCATION: "AMBIGUOUS_STOCK_LOCATION",
+  NO_PRODUCT_VARIANT_LINK: "NO_PRODUCT_VARIANT_LINK",
+  NO_INVENTORY_ITEM_LINK: "NO_INVENTORY_ITEM_LINK",
+  MEDUSA_LEVEL_READ_FAILED: "MEDUSA_LEVEL_READ_FAILED",
+  MEDUSA_LEVEL_CREATE_FAILED: "MEDUSA_LEVEL_CREATE_FAILED",
+  MEDUSA_LEVEL_UPDATE_FAILED: "MEDUSA_LEVEL_UPDATE_FAILED",
+  MEDUSA_DEPENDENCY_FAILED: "MEDUSA_DEPENDENCY_FAILED",
+} as const
+export type MedusaSyncErrorCategory = (typeof MEDUSA_SYNC_ERROR_CATEGORY)[keyof typeof MEDUSA_SYNC_ERROR_CATEGORY]
+
 export function isValidInventorySnapshotTransition(from: InventorySnapshotStatus, to: InventorySnapshotStatus): boolean {
   return (INVENTORY_SNAPSHOT_STATUS_TRANSITIONS[from] ?? []).includes(to)
 }
@@ -154,6 +188,14 @@ export const INVENTORY_AUDIT_ACTION = {
   HOLDING_STATUS_CHANGED: "HOLDING_STATUS_CHANGED",
   PROPOSAL_CREATED: "PROPOSAL_CREATED",
   PROPOSAL_STATUS_CHANGED: "PROPOSAL_STATUS_CHANGED",
+  PROPOSAL_REVIEWED: "PROPOSAL_REVIEWED",
+  PROPOSAL_APPLICATION_ATTEMPTED: "PROPOSAL_APPLICATION_ATTEMPTED",
+  PROPOSAL_APPLICATION_REJECTED_STALE_BASELINE: "PROPOSAL_APPLICATION_REJECTED_STALE_BASELINE",
+  PROPOSAL_APPLIED: "PROPOSAL_APPLIED",
+  PROPOSAL_APPLICATION_RETRIED: "PROPOSAL_APPLICATION_RETRIED",
+  MEDUSA_SYNC_SUCCEEDED: "MEDUSA_SYNC_SUCCEEDED",
+  MEDUSA_SYNC_FAILED: "MEDUSA_SYNC_FAILED",
+  MEDUSA_SYNC_RETRIED: "MEDUSA_SYNC_RETRIED",
   IMPORT_STARTED: "IMPORT_STARTED",
   IMPORT_DUPLICATE_DETECTED: "IMPORT_DUPLICATE_DETECTED",
   IMPORT_VALIDATION_FAILED: "IMPORT_VALIDATION_FAILED",
