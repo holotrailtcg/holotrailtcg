@@ -1,9 +1,9 @@
 import { MedusaApp } from "@medusajs/framework/modules-sdk"
 import { ContainerRegistrationKeys, createPgConnection } from "@medusajs/framework/utils"
 import { TRADING_CARD_INVENTORY_MODULE } from "../index"
-import { Migration20260716150000 } from "../migrations/Migration20260716150000"
 
 let pgConnection: ReturnType<typeof createPgConnection>
+let rootConnection: ReturnType<typeof createPgConnection>
 let medusaApp: Awaited<ReturnType<typeof MedusaApp>>
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let service: any
@@ -11,10 +11,8 @@ let service: any
 const suffix = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 9)}`
 
 beforeAll(async () => {
-  pgConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
-  const migration = new Migration20260716150000(undefined as never, undefined as never)
-  await migration.up()
-  for (const query of migration.getQueries().map(String)) await pgConnection.raw(query)
+  rootConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
+  pgConnection = await rootConnection.transaction() as never
   medusaApp = await MedusaApp({
     modulesConfig: { [TRADING_CARD_INVENTORY_MODULE]: { resolve: "./src/modules/trading-card-inventory" } },
     injectedDependencies: { [ContainerRegistrationKeys.PG_CONNECTION]: pgConnection },
@@ -25,11 +23,11 @@ beforeAll(async () => {
 }, 60000)
 
 afterAll(async () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  await (pgConnection as any)?.context?.destroy()
-  await pgConnection?.destroy()
   await medusaApp?.onApplicationPrepareShutdown()
   await medusaApp?.onApplicationShutdown()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (pgConnection as any)?.rollback()
+  await rootConnection?.destroy()
 })
 
 async function createSource(overrides: Record<string, unknown> = {}) {
@@ -124,6 +122,31 @@ describe("snapshot reconciliation", () => {
     expect(refreshed.status).toBe("VALIDATED")
     const [, count] = await service.listAndCountInventoryProposals({ inventory_snapshot_id: current.id })
     expect(count).toBe(0)
+  }, 30000)
+
+  it("automatically chooses the latest eligible approved baseline and skips superseded snapshots", async () => {
+    const source = await createSource()
+    const approve = async (snapshot: Record<string, unknown>) => {
+      await service.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "PENDING_REVIEW", actor: "reviewer", source: "MANUAL" })
+      await service.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "APPROVED", actor: "reviewer", source: "MANUAL" })
+    }
+    const first = await snapshotWithRows(source.id, [entry(`first-${suffix()}`)])
+    await approve(first)
+    const second = await snapshotWithRows(source.id, [entry(`second-${suffix()}`)])
+    await approve(second)
+
+    const current = await snapshotWithRows(source.id, [entry(`current-${suffix()}`)])
+    const latestSummary = await service.reconcileInventorySnapshot({
+      inventorySourceId: source.id, snapshotId: current.id, actor: "reconciler", source: "SYSTEM",
+    })
+    expect(latestSummary.baselineSnapshotId).toBe(second.id)
+
+    await service.transitionInventorySnapshotStatus({ id: second.id, targetStatus: "SUPERSEDED", actor: "reviewer", source: "MANUAL" })
+    const next = await snapshotWithRows(source.id, [entry(`next-${suffix()}`)])
+    const fallbackSummary = await service.reconcileInventorySnapshot({
+      inventorySourceId: source.id, snapshotId: next.id, actor: "reconciler", source: "SYSTEM",
+    })
+    expect(fallbackSummary.baselineSnapshotId).toBe(first.id)
   }, 30000)
 })
 

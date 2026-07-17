@@ -1671,23 +1671,23 @@ describe("Admin trading-card-inventory", () => {
         displayName: `Reconciliation HTTP ${marker}`, provider: "PULSE", actor: "http-test", source: "MANUAL",
       })
       const snapshot = await inventory.createInventorySnapshot({
-        inventorySourceId: source.id, actor: "http-test", source: "MANUAL",
+        inventorySourceId: source.id as string, actor: "http-test", source: "MANUAL",
       })
       await inventory.addInventorySnapshotEntries({
-        snapshotId: snapshot.id, actor: "http-test", source: "MANUAL", entries: [
+        snapshotId: snapshot.id as string, actor: "http-test", source: "MANUAL", entries: [
           { providerReference: `${marker}-a`, providerReferenceType: "PULSE_PRODUCT_ID", tradingCardVariantId: `tcvar_${marker}_a`, quantity: 1, currencyCode: "GBP", unitAcquisitionCost: "1", unitMarketPrice: "2", unitSellingPrice: "3" },
           { providerReference: `${marker}-b`, providerReferenceType: "PULSE_PRODUCT_ID", tradingCardVariantId: null, quantity: 2, currencyCode: "GBP", unitAcquisitionCost: "1", unitMarketPrice: "2", unitSellingPrice: "3" },
         ],
       })
-      await inventory.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "VALIDATED", actor: "http-test", source: "MANUAL" })
-      await inventory.reconcileInventorySnapshot({ inventorySourceId: source.id, snapshotId: snapshot.id, actor: "http-test", source: "SYSTEM" })
+      await inventory.transitionInventorySnapshotStatus({ id: snapshot.id as string, targetStatus: "VALIDATED", actor: "http-test", source: "MANUAL" })
+      await inventory.reconcileInventorySnapshot({ inventorySourceId: source.id as string, snapshotId: snapshot.id as string, actor: "http-test", source: "SYSTEM" })
       return { source, snapshot }
     }
 
     it("returns authenticated, paginated, filtered, allow-listed proposal reads", async () => {
       const { snapshot } = await createReconciledSnapshot()
       const response = await app.getInventoryProposals({
-        inventorySnapshotId: snapshot.id, changeKind: "UNRESOLVED_VARIANT", limit: "1", offset: "0",
+        inventorySnapshotId: snapshot.id as string, changeKind: "UNRESOLVED_VARIANT", limit: "1", offset: "0",
       }, adminToken)
       expect(response.status).toBe(200)
       const body = await response.json()
@@ -1706,11 +1706,11 @@ describe("Admin trading-card-inventory", () => {
 
     it("returns reconciliation and proposal count summaries", async () => {
       const { snapshot } = await createReconciledSnapshot()
-      const reconciliationResponse = await app.getInventoryReconciliationSummary(snapshot.id, adminToken)
+      const reconciliationResponse = await app.getInventoryReconciliationSummary(snapshot.id as string, adminToken)
       expect(reconciliationResponse.status).toBe(200)
       expect(await reconciliationResponse.json()).toMatchObject({ snapshotId: snapshot.id, status: "PENDING_REVIEW", proposalCount: 2 })
 
-      const proposalResponse = await app.getInventoryProposalSummary({ inventorySnapshotId: snapshot.id }, adminToken)
+      const proposalResponse = await app.getInventoryProposalSummary({ inventorySnapshotId: snapshot.id as string }, adminToken)
       expect(proposalResponse.status).toBe(200)
       expect(await proposalResponse.json()).toMatchObject({
         inventorySnapshotId: snapshot.id, count: 2,
@@ -1729,6 +1729,335 @@ describe("Admin trading-card-inventory", () => {
       expect(body.blockers).toEqual(expect.arrayContaining([
         "NO_APPROVED_TCGDEX_DATA", "NO_READY_IMAGE", "NO_LINKED_PRODUCT", "ZERO_APPROVED_QUANTITY",
       ]))
+    })
+  })
+})
+
+describe("Admin trading-card-inventory Pulse import", () => {
+  if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required for HTTP integration tests")
+  const adminToken = generateJwtToken({
+    actor_id: "user_pulse_import_http_test",
+    actor_type: "user",
+    auth_identity_id: "auth_pulse_import_http_test",
+  }, { secret: process.env.JWT_SECRET, expiresIn: 3600 })
+
+  const uniqueMarker = (label: string) =>
+    `${label}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`
+
+  const CSV_HEADER =
+    "Product Name,Set,Card Number,Material,Promo Info,Rarity,Graded By,Grade,Item Type,Product ID,Quantity,Avg Cost,Market Price,Sticker Price,Total Cost,Total Market Value,Total Sticker Value,Profit,Margin %,Markup vs Market %"
+
+  function csvRow(productId: string, overrides: Record<string, string> = {}): string {
+    const fields: Record<string, string> = {
+      "Product Name": "Gengar", "Set": "Lost Origin", "Card Number": "066/196", "Material": "Holo",
+      "Promo Info": "", "Rarity": "Rare", "Graded By": "", "Grade": "", "Item Type": "",
+      "Product ID": productId, "Quantity": "2", "Avg Cost": "1.50", "Market Price": "3.00",
+      "Sticker Price": "4.00", "Total Cost": "3.00", "Total Market Value": "6.00",
+      "Total Sticker Value": "8.00", "Profit": "5.00", "Markup vs Market %": "50%",
+      ...overrides,
+    }
+    const headers = CSV_HEADER.split(",")
+    return headers.map((header) => fields[header] ?? "").join(",")
+  }
+
+  function csvContent(rows: string[]): string {
+    return [CSV_HEADER, ...rows].join("\n")
+  }
+
+  async function createSource(displayName: string, overrides: Record<string, unknown> = {}) {
+    const inventory = app.container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
+    return inventory.createInventorySource({
+      displayName, provider: "PULSE", actor: "http-test", source: "MANUAL", ...overrides,
+    }) as Promise<Record<string, unknown>>
+  }
+
+  describe("authentication", () => {
+    it("requires Admin authentication for every route", async () => {
+      const responses = await Promise.all([
+        app.postUploadCsv({ content: csvContent([csvRow(uniqueMarker("auth"))]), filename: "f.csv", mimeType: "text/csv" }, {}),
+        app.getImportSnapshotSummary("tcisnap_missing"),
+        app.getImportSnapshotEntries("tcisnap_missing", {}),
+        app.getImportSnapshotDiagnostics("tcisnap_missing", {}),
+        app.postRetryMatching("tcisnap_missing", {}),
+        app.postReconcileSnapshot("tcisnap_missing", {}),
+      ])
+      expect(responses.map((response) => response.status)).toEqual([401, 401, 401, 401, 401, 401])
+    })
+  })
+
+  describe("upload", () => {
+    it("imports a fresh CSV against an existing active source", async () => {
+      const marker = uniqueMarker("upload")
+      const source = await createSource(`Upload Source ${marker}`)
+      const response = await app.postUploadCsv(
+        { content: csvContent([csvRow(`card:sv1|066/196|holo|nm-${marker}`)]), filename: "import.csv", mimeType: "text/csv" },
+        { inventorySourceId: source.id as string },
+        adminToken,
+      )
+      expect(response.status).toBe(201)
+      const body = await response.json()
+      expect(body.kind).toBe("IMPORTED")
+      expect(body.inventorySourceId).toBe(source.id)
+      expect(body.importSummary.rowCount).toBe(1)
+    })
+
+    it("creates a new source as part of the same upload request", async () => {
+      const marker = uniqueMarker("newsource")
+      const response = await app.postUploadCsv(
+        { content: csvContent([csvRow(`card:sv1|066/196|holo|nm-${marker}`)]), filename: "import.csv", mimeType: "text/csv" },
+        { newSourceDisplayName: `Pulse Export ${marker}`, newSourceProvider: "PULSE" },
+        adminToken,
+      )
+      expect(response.status).toBe(201)
+      const body = await response.json()
+      expect(body.kind).toBe("IMPORTED")
+      expect(typeof body.inventorySourceId).toBe("string")
+    })
+
+    it("detects a duplicate upload of the same file content against the same source", async () => {
+      const marker = uniqueMarker("dup")
+      const source = await createSource(`Duplicate Source ${marker}`)
+      const content = csvContent([csvRow(`card:sv1|066/196|holo|nm-${marker}`)])
+      const firstResponse = await app.postUploadCsv(
+        { content, filename: "import.csv", mimeType: "text/csv" }, { inventorySourceId: source.id as string }, adminToken,
+      )
+      expect(firstResponse.status).toBe(201)
+      const first = await firstResponse.json()
+
+      const secondResponse = await app.postUploadCsv(
+        { content, filename: "import.csv", mimeType: "text/csv" }, { inventorySourceId: source.id as string }, adminToken,
+      )
+      expect(secondResponse.status).toBe(200)
+      const second = await secondResponse.json()
+      expect(second).toMatchObject({ kind: "DUPLICATE", snapshotId: first.snapshotId })
+    })
+
+    it("converges concurrent duplicate uploads without duplicate rows, proposals, or diagnostics", async () => {
+      const marker = uniqueMarker("concurrent-dup")
+      const source = await createSource(`Concurrent Duplicate Source ${marker}`)
+      const content = csvContent([csvRow(`card:sv1|066/196|holo|nm-${marker}`)])
+      const responses = await Promise.all(Array.from({ length: 3 }, () => app.postUploadCsv(
+        { content, filename: "import.csv", mimeType: "text/csv" }, { inventorySourceId: source.id as string }, adminToken,
+      )))
+      expect(responses.every((response) => [200, 201].includes(response.status))).toBe(true)
+      const bodies = await Promise.all(responses.map((response) => response.json()))
+      expect(new Set(bodies.map((body) => body.snapshotId)).size).toBe(1)
+      const snapshotId = bodies[0].snapshotId as string
+
+      const entries = await (await app.getImportSnapshotEntries(snapshotId, { limit: "100" }, adminToken)).json()
+      expect(entries.count).toBe(1)
+      const proposals = await (await app.getInventoryProposalSummary({ inventorySnapshotId: snapshotId }, adminToken)).json()
+      expect(proposals.count).toBe(1)
+      const diagnostics = await (await app.getImportSnapshotDiagnostics(snapshotId, { limit: "100" }, adminToken)).json()
+      const identities = diagnostics.diagnostics.map((diagnostic: Record<string, unknown>) => JSON.stringify([
+        diagnostic.snapshotEntryId, diagnostic.phase, diagnostic.code, diagnostic.severity, diagnostic.fieldRef, diagnostic.message,
+      ]))
+      expect(new Set(identities).size).toBe(identities.length)
+    }, 60_000)
+
+    it("rejects a malformed CSV before any snapshot is created", async () => {
+      const marker = uniqueMarker("malformed")
+      const source = await createSource(`Malformed Source ${marker}`)
+      const response = await app.postUploadCsv(
+        { content: "Product Name,Set\nGengar,Lost Origin", filename: "bad.csv", mimeType: "text/csv" },
+        { inventorySourceId: source.id as string },
+        adminToken,
+      )
+      expect(response.status).toBe(422)
+      const body = await response.json()
+      expect(body.kind).toBe("VALIDATION_FAILED")
+    })
+
+    it("rejects an unsupported MIME type", async () => {
+      const marker = uniqueMarker("mime")
+      const source = await createSource(`MIME Source ${marker}`)
+      const response = await app.postUploadCsv(
+        { content: csvContent([csvRow(`card:sv1|066/196|holo|nm-${marker}`)]), filename: "import.csv", mimeType: "application/pdf" },
+        { inventorySourceId: source.id as string },
+        adminToken,
+      )
+      expect(response.status).toBe(422)
+      expect((await response.json()).kind).toBe("VALIDATION_FAILED")
+    })
+
+    it("rejects a file over the 10 MB limit before it reaches the workflow", async () => {
+      const marker = uniqueMarker("oversized")
+      const source = await createSource(`Oversized Source ${marker}`)
+      const oversizedRow = csvRow(`card:sv1|066/196|holo|nm-${marker}`, { "Product Name": "G".repeat(11 * 1024 * 1024) })
+      const response = await app.postUploadCsv(
+        { content: csvContent([oversizedRow]), filename: "big.csv", mimeType: "text/csv" },
+        { inventorySourceId: source.id as string },
+        adminToken,
+      )
+      expect(response.status).toBe(413)
+    }, 60_000)
+
+    it("bounds multipart field count and field size", async () => {
+      const file = { content: csvContent([csvRow(uniqueMarker("multipart"))]), filename: "import.csv", mimeType: "text/csv" }
+      const tooManyFields = Object.fromEntries(Array.from({ length: 9 }, (_, index) => [`field${index}`, "x"]))
+      const countResponse = await app.postUploadCsv(file, tooManyFields, adminToken)
+      expect(countResponse.status).toBe(400)
+      expect((await countResponse.json()).code).toMatch(/LIMIT_(FIELD_COUNT|PART_COUNT)/)
+
+      const sizeResponse = await app.postUploadCsv(file, { inventorySourceId: "x".repeat(1_025) }, adminToken)
+      expect(sizeResponse.status).toBe(400)
+      expect((await sizeResponse.json()).code).toBe("LIMIT_FIELD_VALUE")
+    })
+
+    it("rejects an upload against an archived source", async () => {
+      const marker = uniqueMarker("archived")
+      const source = await createSource(`Archived Source ${marker}`)
+      const inventory = app.container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
+      await inventory.archiveInventorySource({ id: source.id as string, actor: "http-test", source: "MANUAL" })
+      const response = await app.postUploadCsv(
+        { content: csvContent([csvRow(`card:sv1|066/196|holo|nm-${marker}`)]), filename: "import.csv", mimeType: "text/csv" },
+        { inventorySourceId: source.id as string },
+        adminToken,
+      )
+      expect(response.status).toBe(409)
+      expect((await response.json()).kind).toBe("SOURCE_ARCHIVED")
+    })
+  })
+
+  describe("snapshot summary, entries and diagnostics", () => {
+    async function uploadFixture(marker: string) {
+      const source = await createSource(`Fixture Source ${marker}`)
+      const rows = [
+        csvRow(`card:sv1|066/196|holo|nm-${marker}-a`),
+        csvRow(`card:sv1|999/196|holo|nm-${marker}-b`, { "Rarity": "Some Unmapped Rarity" }),
+      ]
+      const response = await app.postUploadCsv(
+        { content: csvContent(rows), filename: "import.csv", mimeType: "text/csv" },
+        { inventorySourceId: source.id as string },
+        adminToken,
+      )
+      const body = await response.json()
+      return { source, snapshotId: body.snapshotId as string }
+    }
+
+    it("returns a bounded, allow-listed summary", async () => {
+      const { snapshotId } = await uploadFixture(uniqueMarker("summary"))
+      const response = await app.getImportSnapshotSummary(snapshotId, adminToken)
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      expect(body.summary).toMatchObject({ snapshotId, rowCount: 2 })
+      expect(body.summary.inventorySourceDisplayName).toMatch(/Fixture Source/)
+      expect(body.summary.raw_fields).toBeUndefined()
+    })
+
+    it("paginates and filters the entry list without leaking raw fields", async () => {
+      const { snapshotId } = await uploadFixture(uniqueMarker("entries"))
+      const allResponse = await app.getImportSnapshotEntries(snapshotId, { limit: "1", offset: "0" }, adminToken)
+      expect(allResponse.status).toBe(200)
+      const allBody = await allResponse.json()
+      expect(allBody).toMatchObject({ count: 2, limit: 1, offset: 0 })
+      expect(allBody.entries).toHaveLength(1)
+      expect(Object.keys(allBody.entries[0])).not.toContain("raw_fields")
+      expect(Object.keys(allBody.entries[0]).sort()).toEqual([
+        "conditionSource", "currencyCode", "finishCandidate", "id", "languageConflict", "matchedVia",
+        "matchingStatus", "outcome", "providerReference", "quantity", "rarityCandidate", "rarityRaw",
+        "retryCount", "rowNumber", "specialTreatmentCandidate", "tradingCardVariantId",
+        "unitAcquisitionCost", "unitMarketPrice", "unitSellingPrice",
+      ].sort())
+
+      const invalidResponse = await app.getImportSnapshotEntries(snapshotId, { limit: "not-a-number" }, adminToken)
+      expect(invalidResponse.status).toBe(400)
+    })
+
+    it("paginates and filters diagnostics by severity", async () => {
+      const { snapshotId } = await uploadFixture(uniqueMarker("diagnostics"))
+      const response = await app.getImportSnapshotDiagnostics(snapshotId, { severity: "WARNING", limit: "50" }, adminToken)
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      expect(body.count).toBeGreaterThanOrEqual(1)
+      for (const diagnostic of body.diagnostics) {
+        expect(diagnostic.severity).toBe("WARNING")
+        expect(Object.keys(diagnostic).sort()).toEqual(["code", "fieldRef", "id", "message", "phase", "rowNumber", "severity", "snapshotEntryId"])
+      }
+    })
+  })
+
+  describe("retry matching", () => {
+    it("re-runs matching for an already-persisted snapshot via the dedicated retry workflow", async () => {
+      const marker = uniqueMarker("retry")
+      const source = await createSource(`Retry Source ${marker}`)
+      const uploadResponse = await app.postUploadCsv(
+        { content: csvContent([csvRow(`card:sv1|066/196|holo|nm-${marker}`)]), filename: "import.csv", mimeType: "text/csv" },
+        { inventorySourceId: source.id as string },
+        adminToken,
+      )
+      const { snapshotId } = await uploadResponse.json()
+
+      const pgConnection = app.container.resolve<{ raw: (query: string) => Promise<{ rows: Array<Record<string, string>> }> }>(
+        ContainerRegistrationKeys.PG_CONNECTION,
+      )
+      const mutationCounts = async () => (await pgConnection.raw(
+        `select
+           (select count(*)::text from trading_card_inventory_holding where deleted_at is null) as holdings,
+           (select count(*)::text from inventory_item where deleted_at is null) as inventory_items,
+           (select count(*)::text from inventory_level where deleted_at is null) as inventory_levels,
+           (select count(*)::text from product where deleted_at is null and status = 'published') as published_products`,
+      )).rows[0]
+      const beforeRetry = await mutationCounts()
+
+      const response = await app.postRetryMatching(snapshotId, { reason: "manual retry check" }, adminToken)
+      expect(response.status).toBe(200)
+      expect((await response.json()).kind).toBe("IMPORTED")
+      expect(await mutationCounts()).toEqual(beforeRetry)
+    })
+
+    it("returns a safe not-found for a missing snapshot", async () => {
+      const response = await app.postRetryMatching("tcisnap_missing", {}, adminToken)
+      expect(response.status).toBe(404)
+    })
+  })
+
+  describe("reconciliation trigger", () => {
+    it("reconciles a VALIDATED snapshot that was never automatically reconciled", async () => {
+      const inventory = app.container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
+      const marker = uniqueMarker("reconcile")
+      const source = await createSource(`Reconcile Source ${marker}`)
+      const snapshot = await inventory.createInventorySnapshot({
+        inventorySourceId: source.id as string, actor: "http-test", source: "MANUAL",
+      }) as Record<string, unknown>
+      await inventory.addInventorySnapshotEntries({
+        snapshotId: snapshot.id as string, actor: "http-test", source: "MANUAL", entries: [
+          { providerReference: `${marker}-a`, providerReferenceType: "PULSE_PRODUCT_ID", tradingCardVariantId: null, quantity: 1, currencyCode: "GBP", unitAcquisitionCost: "1", unitMarketPrice: "2", unitSellingPrice: "3" },
+        ],
+      })
+      await inventory.transitionInventorySnapshotStatus({ id: snapshot.id as string, targetStatus: "VALIDATED", actor: "http-test", source: "MANUAL" })
+
+      const response = await app.postReconcileSnapshot(snapshot.id as string, {}, adminToken)
+      expect(response.status).toBe(200)
+      const body = await response.json()
+      expect(body.summary).toMatchObject({ snapshotId: snapshot.id, status: "PENDING_REVIEW", proposalCount: 1 })
+    })
+
+    it("rejects reconciliation for a snapshot that is not in a recoverable state", async () => {
+      const inventory = app.container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
+      const marker = uniqueMarker("reconcile-draft")
+      const source = await createSource(`Reconcile Draft Source ${marker}`)
+      const snapshot = await inventory.createInventorySnapshot({
+        inventorySourceId: source.id as string, actor: "http-test", source: "MANUAL",
+      }) as Record<string, unknown>
+
+      const response = await app.postReconcileSnapshot(snapshot.id as string, {}, adminToken)
+      expect(response.status).toBe(400)
+    })
+
+    it("rejects an invalid or unapproved baseline instead of silently ignoring it", async () => {
+      const inventory = app.container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
+      const marker = uniqueMarker("reconcile-baseline")
+      const source = await createSource(`Reconcile Baseline Source ${marker}`)
+      const snapshot = await inventory.createInventorySnapshot({
+        inventorySourceId: source.id as string, actor: "http-test", source: "MANUAL",
+      }) as Record<string, unknown>
+      await inventory.transitionInventorySnapshotStatus({ id: snapshot.id as string, targetStatus: "VALIDATED", actor: "http-test", source: "MANUAL" })
+
+      const response = await app.postReconcileSnapshot(
+        snapshot.id as string, { previousApprovedSnapshotId: "tcisnap_not_a_real_baseline" }, adminToken,
+      )
+      expect(response.status).toBe(400)
     })
   })
 })

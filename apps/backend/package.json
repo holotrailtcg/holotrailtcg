@@ -19,12 +19,14 @@
     "seed": "medusa exec ./src/scripts/initial-data-seed.ts",
     "lint": "medusa lint",
     "test:integration:http": "cross-env TEST_TYPE=integration:http NODE_OPTIONS=--experimental-vm-modules jest --silent=false --runInBand --forceExit",
-    "test:integration:modules": "cross-env TEST_TYPE=integration:modules MODULE_TESTS_EXCLUDE_MEDUSA_APP_PAIR=true NODE_OPTIONS=--experimental-vm-modules jest --silent=false --runInBand --forceExit && cross-env TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --forceExit --runInBand --runTestsByPath src/modules/trading-cards/__tests__/trading-cards-module.spec.ts && cross-env TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --forceExit --runInBand --runTestsByPath src/modules/trading-cards/__tests__/tcgdex-enrichment-persistence.integration.spec.ts && cross-env TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --forceExit --runInBand --runTestsByPath src/modules/trading-cards/__tests__/trading-card-image-confirmation.spec.ts && cross-env TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --forceExit --runInBand --runTestsByPath src/modules/trading-cards/__tests__/trading-card-image-focal-point.spec.ts && cross-env TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --forceExit --runInBand --runTestsByPath src/modules/trading-cards/__tests__/trading-card-image-expiry-sweep.spec.ts && cross-env TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --forceExit --runInBand --runTestsByPath src/modules/trading-cards/__tests__/trading-card-image-orphan-reconciliation.spec.ts",
+    "test:integration:modules": "cross-env TEST_TYPE=integration:modules MODULE_TESTS_EXCLUDE_MEDUSA_APP_PAIR=true NODE_OPTIONS=--experimental-vm-modules jest --silent=false --runInBand --forceExit && cross-env TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --forceExit --runInBand --runTestsByPath src/modules/trading-cards/__tests__/trading-cards-module.spec.ts && cross-env TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --forceExit --runInBand --runTestsByPath src/modules/trading-cards/__tests__/tcgdex-enrichment-persistence.integration.spec.ts && cross-env TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --forceExit --runInBand --runTestsByPath src/modules/trading-cards/__tests__/trading-card-image-confirmation.spec.ts && cross-env TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --forceExit --runInBand --runTestsByPath src/modules/trading-cards/__tests__/trading-card-image-focal-point.spec.ts && cross-env TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --forceExit --runInBand --runTestsByPath src/modules/trading-cards/__tests__/trading-card-image-expiry-sweep.spec.ts && cross-env TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --forceExit --runInBand --runTestsByPath src/modules/trading-cards/__tests__/trading-card-image-orphan-reconciliation.spec.ts && cross-env TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --forceExit --runInBand --runTestsByPath src/modules/trading-card-inventory/__tests__/trading-card-inventory-module.spec.ts && cross-env TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --forceExit --runInBand --runTestsByPath src/modules/trading-card-inventory/__tests__/pulse-import-service-methods.integration.spec.ts && cross-env TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --forceExit --runInBand --runTestsByPath src/modules/trading-card-inventory/__tests__/import-pulse-csv-snapshot.integration.spec.ts",
     "test:unit": "cross-env TEST_TYPE=unit NODE_OPTIONS=--experimental-vm-modules jest --silent --runInBand --forceExit"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.954.0",
     "@aws-sdk/s3-request-presigner": "^3.954.0",
+    "csv-parse": "^5.6.0",
+    "multer": "^2.0.2",
     "@medusajs/admin-sdk": "2.17.2",
     "@medusajs/admin-shared": "2.17.2",
     "@medusajs/caching": "2.17.2",
@@ -52,6 +54,7 @@
     "@testing-library/user-event": "^14.6.1",
     "@types/jest": "^29.5.13",
     "@types/node": "^20.12.11",
+    "@types/multer": "^1.4.12",
     "@types/pg": "^8.20.0",
     "@types/react": "^18.3.2",
     "@types/react-dom": "^18.2.25",

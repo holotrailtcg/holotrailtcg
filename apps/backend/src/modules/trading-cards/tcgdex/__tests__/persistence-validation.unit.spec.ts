@@ -1,4 +1,4 @@
-import { canonicalSnapshot, snapshotFingerprint, tcgdexMatchResultSchema } from "../persistence-validation"
+import { canonicalSnapshot, pulseProviderIdentifierSchema, snapshotFingerprint, tcgdexMatchResultSchema } from "../persistence-validation"
 
 const snapshot = {
   provider: "TCGDEX", providerCardId: "sv1-001", providerSetId: "sv1", name: "Bulbasaur", localId: "001", category: "Pokemon",
@@ -40,5 +40,13 @@ describe("TCGdex persistence validation", () => {
     }
     expect(() => canonicalSnapshot({ ...snapshot, unexpected: "field" })).toThrow()
     expect(() => canonicalSnapshot({ ...snapshot, rarityCandidate: { status: "MAPPED", providerValue: "Common", rarity: "COMMON", iconKey: "common", unexpected: true } })).toThrow()
+  })
+
+  it("accepts bounded Pulse references containing spaces but rejects URL/control delimiters", () => {
+    expect(pulseProviderIdentifierSchema.parse(" card:sv1|066/196|Reverse Holo|null|null|null "))
+      .toBe("card:sv1|066/196|Reverse Holo|null|null|null")
+    for (const invalid of ["card:sv1|1?query", "card:sv1|1#fragment", "card:sv1|1\u0001", " "]) {
+      expect(() => pulseProviderIdentifierSchema.parse(invalid)).toThrow()
+    }
   })
 })

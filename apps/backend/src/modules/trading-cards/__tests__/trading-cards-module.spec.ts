@@ -160,6 +160,27 @@ describe("rarity and external references", () => {
     })).rejects.toThrow()
   })
 
+  it("uses only trusted manual Pulse references and normalises surrounding whitespace", async () => {
+    const { card, variant } = await createVariant()
+    const providerIdentifier = `card:test|${suffix()}|Reverse Holo|null|null|null`
+    const automatic = await service.upsertExternalReference({
+      tradingCardId: card.id, tradingCardVariantId: variant.id, provider: "PULSE",
+      providerIdentifier: `  ${providerIdentifier}  `, provenance: "AUTOMATIC",
+      actor: "matching-test", source: "PULSE",
+    })
+    expect(automatic.provider_identifier).toBe(providerIdentifier)
+    expect(await service.findTrustedExternalReference("PULSE", providerIdentifier)).toBeNull()
+
+    await service.upsertExternalReference({
+      tradingCardId: card.id, tradingCardVariantId: variant.id, provider: "PULSE", providerIdentifier,
+      provenance: "TRUSTED_MANUAL", referenceId: automatic.id, expectedVersion: automatic.version,
+      actor: "matching-test", source: "MANUAL",
+    })
+    expect(await service.findTrustedExternalReference("PULSE", ` ${providerIdentifier} `)).toEqual({
+      tradingCardId: card.id, tradingCardVariantId: variant.id,
+    })
+  })
+
   it("makes equivalent concurrent reference creation idempotent", async () => {
     const { card } = await createCard()
     const providerIdentifier = `card:concurrent|${suffix()}`

@@ -24,11 +24,32 @@ export function parseAdminInput<T>(schema: z.ZodType<T>, value: unknown): T {
   return result.data
 }
 
+/**
+ * A `MedusaError` thrown from inside a workflow step (as every Stage 5B.1
+ * Pulse import workflow does) crosses the workflow orchestration engine's
+ * transaction-context boundary and loses its prototype chain by the time it
+ * reaches the calling route — `error instanceof MedusaError` is `false`,
+ * even though the object still carries `__isMedusaError`, `type`, `message`
+ * and `code`. `MedusaError.isMedusaError` is the framework's own duck-typed
+ * check for exactly this case; reconstruct a real `MedusaError` from the
+ * surviving fields so it still maps to the correct HTTP status rather than
+ * falling through to a generic 500.
+ */
+function reviveMedusaError(error: unknown): MedusaError | null {
+  if (error instanceof MedusaError) return error
+  if (MedusaError.isMedusaError(error)) {
+    const revived = error as { type: string; message: string; code?: string }
+    return new MedusaError(revived.type, revived.message, revived.code)
+  }
+  return null
+}
+
 export async function safeAdminRead<T>(read: () => Promise<T>): Promise<T> {
   try {
     return await read()
   } catch (error) {
-    if (error instanceof MedusaError) throw error
+    const medusaError = reviveMedusaError(error)
+    if (medusaError) throw medusaError
     throw new MedusaError(MedusaError.Types.UNEXPECTED_STATE, "The inventory data could not be loaded.")
   }
 }
@@ -37,7 +58,8 @@ export async function safeAdminWrite<T>(write: () => Promise<T>): Promise<T> {
   try {
     return await write()
   } catch (error) {
-    if (error instanceof MedusaError) throw error
+    const medusaError = reviveMedusaError(error)
+    if (medusaError) throw medusaError
     throw new MedusaError(MedusaError.Types.UNEXPECTED_STATE, "The inventory action could not be completed.")
   }
 }

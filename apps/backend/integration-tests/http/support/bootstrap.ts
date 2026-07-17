@@ -135,6 +135,22 @@ export interface NewsletterHttpTestApp {
   getInventoryReconciliationSummary: (id: string, authToken?: string) => Promise<Response>
   /** GET /admin/trading-card-inventory/variants/:variantId/publish-readiness */
   getPublishReadiness: (variantId: string, authToken?: string) => Promise<Response>
+  /** POST /admin/trading-card-inventory/imports/upload (multipart) */
+  postUploadCsv: (
+    file: { content: string; filename: string; mimeType: string },
+    fields: Record<string, string>,
+    authToken?: string,
+  ) => Promise<Response>
+  /** GET /admin/trading-card-inventory/imports/snapshots/:id/summary */
+  getImportSnapshotSummary: (id: string, authToken?: string) => Promise<Response>
+  /** GET /admin/trading-card-inventory/imports/snapshots/:id/entries */
+  getImportSnapshotEntries: (id: string, query: Record<string, string>, authToken?: string) => Promise<Response>
+  /** GET /admin/trading-card-inventory/imports/snapshots/:id/diagnostics */
+  getImportSnapshotDiagnostics: (id: string, query: Record<string, string>, authToken?: string) => Promise<Response>
+  /** POST /admin/trading-card-inventory/imports/snapshots/:id/retry-matching */
+  postRetryMatching: (id: string, body: unknown, authToken?: string) => Promise<Response>
+  /** POST /admin/trading-card-inventory/imports/snapshots/:id/reconcile */
+  postReconcileSnapshot: (id: string, body: unknown, authToken?: string) => Promise<Response>
 }
 
 /**
@@ -347,6 +363,46 @@ export async function bootstrapNewsletterHttpTestApp(): Promise<NewsletterHttpTe
     getPublishReadiness: (variantId, authToken) =>
       fetch(`${baseUrl}/admin/trading-card-inventory/variants/${encodeURIComponent(variantId)}/publish-readiness`, {
         headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    postUploadCsv: (file, fields, authToken) => {
+      const formData = new FormData()
+      formData.append("file", new Blob([file.content], { type: file.mimeType }), file.filename)
+      for (const [key, value] of Object.entries(fields)) formData.append(key, value)
+      return fetch(`${baseUrl}/admin/trading-card-inventory/imports/upload`, {
+        method: "POST",
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+        body: formData,
+      })
+    },
+    getImportSnapshotSummary: (id, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(id)}/summary`, {
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    getImportSnapshotEntries: (id, query, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(id)}/entries?${new URLSearchParams(query).toString()}`, {
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    getImportSnapshotDiagnostics: (id, query, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(id)}/diagnostics?${new URLSearchParams(query).toString()}`, {
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    postRetryMatching: (id, body, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(id)}/retry-matching`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify(body ?? {}),
+      }),
+    postReconcileSnapshot: (id, body, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(id)}/reconcile`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify(body ?? {}),
       }),
   }
 }

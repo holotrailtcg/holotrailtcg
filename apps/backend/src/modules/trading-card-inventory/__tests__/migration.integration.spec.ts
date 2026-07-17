@@ -1,7 +1,8 @@
 import { createPgConnection } from "@medusajs/framework/utils"
 import { Migration20260716090000 } from "../migrations/Migration20260716090000"
 import { Migration20260716150000 } from "../migrations/Migration20260716150000"
-
+import { Migration20260716180000 } from "../migrations/Migration20260716180000"
+let rootConnection: ReturnType<typeof createPgConnection>
 let pgConnection: ReturnType<typeof createPgConnection>
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -9,8 +10,16 @@ const rows = (result: any): any[] => Array.isArray(result) ? result : result.row
 
 const migrationQueries = async (direction: "up" | "down") => {
   const migrations = direction === "up"
-    ? [new Migration20260716090000(undefined as never, undefined as never), new Migration20260716150000(undefined as never, undefined as never)]
-    : [new Migration20260716150000(undefined as never, undefined as never), new Migration20260716090000(undefined as never, undefined as never)]
+    ? [
+        new Migration20260716090000(undefined as never, undefined as never),
+        new Migration20260716150000(undefined as never, undefined as never),
+        new Migration20260716180000(undefined as never, undefined as never),
+      ]
+    : [
+        new Migration20260716180000(undefined as never, undefined as never),
+        new Migration20260716150000(undefined as never, undefined as never),
+        new Migration20260716090000(undefined as never, undefined as never),
+      ]
   const queries: string[] = []
   for (const migration of migrations) {
     await migration[direction]()
@@ -60,17 +69,19 @@ const catalogSnapshot = async () => ({
   `, [tableNames])),
 })
 
-beforeAll(() => {
-  pgConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
+/** Migration DDL runs inside one rollback-only transaction, preserving every
+ * schema object and row that belonged to another suite before this test. */
+beforeAll(async () => {
+  rootConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
+  pgConnection = await rootConnection.transaction() as never
+  await executeMigration("down")
 })
 
 afterAll(async () => {
-  // Always leave the schema in the "up" (applied) state for other test
-  // files/module specs that expect these tables to exist.
-  await executeMigration("up")
+  await (pgConnection as unknown as { rollback: () => Promise<void> }).rollback()
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  await (pgConnection as any)?.context?.destroy()
-  await pgConnection?.destroy()
+  await (rootConnection as any)?.context?.destroy()
+  await rootConnection?.destroy()
 })
 
 describe("Stage 5A inventory domain migrations", () => {
@@ -102,10 +113,10 @@ describe("Stage 5A inventory domain migrations", () => {
       `insert into trading_card_inventory_source (id, display_name, normalized_name, provider) values (?, ?, ?, 'PULSE')`,
       [sourceId, "Migration Test Source", `migration test source ${sourceId}`]
     )
-    await expect(pgConnection.raw(
+    await expect(pgConnection.transaction((transaction) => transaction.raw(
       `insert into trading_card_inventory_holding (id, inventory_source_id, trading_card_variant_id, quantity) values (?, ?, ?, -1)`,
       [`tcihold_${Date.now().toString(36)}`, sourceId, `tcvar_${Date.now().toString(36)}`]
-    )).rejects.toThrow(/quantity_non_negative|check constraint/i)
+    ))).rejects.toThrow(/quantity_non_negative|check constraint/i)
     await pgConnection.raw(`delete from trading_card_inventory_source where id = ?`, [sourceId])
   }, 60000)
 
