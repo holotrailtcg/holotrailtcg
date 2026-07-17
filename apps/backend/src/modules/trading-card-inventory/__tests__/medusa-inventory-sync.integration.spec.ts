@@ -5,6 +5,9 @@ import type { IInventoryService, IProductModuleService, IStockLocationService } 
 import { TRADING_CARDS_MODULE } from "../../trading-cards"
 import { TRADING_CARD_INVENTORY_MODULE } from "../index"
 import { syncInventoryProposalToMedusa } from "../../../workflows/trading-card-inventory/medusa-inventory-sync"
+import { reviewInventoryProposalsWithProgress } from "../../../workflows/trading-card-inventory/review-inventory-proposals"
+import { applyInventoryProposalsWithSync } from "../../../workflows/trading-card-inventory/apply-inventory-proposals"
+import { retryInventoryProposalSync } from "../../../workflows/trading-card-inventory/retry-inventory-proposal-sync"
 import "../../../links/trading-card-product"
 import "../../../links/trading-card-variant-product-variant"
 
@@ -13,6 +16,8 @@ let rootConnection: ReturnType<typeof createPgConnection>
 let medusaApp: Awaited<ReturnType<typeof MedusaApp>>
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let cards: any
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let inventory: any
 let container: ReturnType<typeof buildContainer>
 let link: NonNullable<Awaited<ReturnType<typeof MedusaApp>>["link"]>
 
@@ -44,6 +49,7 @@ beforeAll(async () => {
   medusaApp.sharedContainer.register(ContainerRegistrationKeys.QUERY, asValue(medusaApp.query))
   link = medusaApp.link
   cards = medusaApp.modules[TRADING_CARDS_MODULE]
+  inventory = medusaApp.modules[TRADING_CARD_INVENTORY_MODULE]
   container = buildContainer()
 }, 60000)
 
@@ -233,4 +239,110 @@ describe("syncInventoryProposalToMedusa", () => {
       delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
     }
   })
+})
+
+async function createSource() {
+  const id = suffix()
+  return inventory.createInventorySource({ displayName: `Sync Workflow Source ${id}`, provider: "PULSE", actor: "test-actor", source: "MANUAL" })
+}
+
+describe("Stage 5B.2 workflows: review -> apply -> Medusa sync -> snapshot progress", () => {
+  it("approves a snapshot, reviews and applies its proposal, syncs to Medusa, and transitions the snapshot to APPLIED", async () => {
+    const { variant } = await cardVariantFixture()
+    const { productVariant } = await productVariantFixture()
+    await linkTradingCardVariantToProductVariant(variant.id, productVariant.id)
+    const item = await createInventoryItem(`ITEM-${suffix()}`)
+    await linkProductVariantToInventoryItem(productVariant.id, item.id)
+    const location = await createStockLocation(`Loc ${suffix()}`)
+    process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+
+    try {
+      const source = await createSource()
+      const snapshot = await inventory.createInventorySnapshot({ inventorySourceId: source.id, actor: "test-actor", source: "MANUAL" })
+      await inventory.addInventorySnapshotEntries({
+        snapshotId: snapshot.id, actor: "test-actor", source: "MANUAL",
+        entries: [{
+          providerReference: `ref-${suffix()}`, providerReferenceType: "PULSE_PRODUCT_ID", tradingCardVariantId: variant.id,
+          quantity: 6, currencyCode: "GBP", unitAcquisitionCost: "1.00", unitMarketPrice: "2.00", unitSellingPrice: "3.00",
+        }],
+      })
+      await inventory.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "VALIDATED", actor: "test-actor", source: "MANUAL" })
+      const summary = await inventory.reconcileInventorySnapshot({
+        inventorySourceId: source.id, snapshotId: snapshot.id, actor: "reconciler", source: "SYSTEM",
+      })
+      expect(summary.proposalCount).toBe(1)
+      await inventory.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "APPROVED", actor: "reviewer", source: "MANUAL" })
+
+      const [proposal] = await inventory.listInventoryProposals({ inventory_snapshot_id: snapshot.id })
+      expect(proposal).toMatchObject({ change_kind: "NEW_HOLDING", proposed_quantity: 6 })
+
+      const reviewed = await reviewInventoryProposalsWithProgress(container, {
+        actor: "reviewer", source: "MANUAL", ids: [proposal.id], targetStatus: "APPROVED",
+      })
+      expect(reviewed[0].review_status).toBe("APPROVED")
+      const afterReview = await inventory.retrieveInventorySnapshot(snapshot.id)
+      expect(afterReview.status).toBe("APPROVED") // not yet fully complete: the proposal itself isn't applied yet
+
+      const { results } = await applyInventoryProposalsWithSync(container, { actor: "applier", source: "MANUAL", ids: [proposal.id] })
+      expect(results).toHaveLength(1)
+      expect(results[0]).toMatchObject({ localApplicationStatus: "APPLIED", medusaSyncStatus: "SYNCED" })
+
+      const appliedProposal = await inventory.retrieveInventoryProposal(proposal.id)
+      expect(appliedProposal).toMatchObject({ review_status: "APPLIED", medusa_sync_status: "SYNCED" })
+
+      const inventoryService = container.resolve<IInventoryService>(Modules.INVENTORY)
+      const level = await inventoryService.retrieveInventoryLevelByItemAndLocation(item.id, location.id)
+      expect(level.stocked_quantity).toBe(6)
+
+      const finalSnapshot = await inventory.retrieveInventorySnapshot(snapshot.id)
+      expect(finalSnapshot.status).toBe("APPLIED")
+    } finally {
+      delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+    }
+  }, 30000)
+
+  it("retries a failed Medusa sync without duplicating the local ledger movement, and completes the snapshot once synced", async () => {
+    const { variant } = await cardVariantFixture()
+    // No product-variant link yet: the first apply/sync will fail locally-applied-but-sync-FAILED.
+    const source = await createSource()
+    const snapshot = await inventory.createInventorySnapshot({ inventorySourceId: source.id, actor: "test-actor", source: "MANUAL" })
+    await inventory.addInventorySnapshotEntries({
+      snapshotId: snapshot.id, actor: "test-actor", source: "MANUAL",
+      entries: [{
+        providerReference: `ref-${suffix()}`, providerReferenceType: "PULSE_PRODUCT_ID", tradingCardVariantId: variant.id,
+        quantity: 2, currencyCode: "GBP", unitAcquisitionCost: "1.00", unitMarketPrice: "2.00", unitSellingPrice: "3.00",
+      }],
+    })
+    await inventory.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "VALIDATED", actor: "test-actor", source: "MANUAL" })
+    await inventory.reconcileInventorySnapshot({ inventorySourceId: source.id, snapshotId: snapshot.id, actor: "reconciler", source: "SYSTEM" })
+    await inventory.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "APPROVED", actor: "reviewer", source: "MANUAL" })
+    const [proposal] = await inventory.listInventoryProposals({ inventory_snapshot_id: snapshot.id })
+    await reviewInventoryProposalsWithProgress(container, { actor: "reviewer", source: "MANUAL", ids: [proposal.id], targetStatus: "APPROVED" })
+
+    const { results } = await applyInventoryProposalsWithSync(container, { actor: "applier", source: "MANUAL", ids: [proposal.id] })
+    expect(results[0]).toMatchObject({ localApplicationStatus: "APPLIED", medusaSyncStatus: "FAILED" })
+    const afterFailedSync = await inventory.retrieveInventoryProposal(proposal.id)
+    expect(afterFailedSync.applied_transaction_id).toBeTruthy()
+    const transactionIdAfterFailure = afterFailedSync.applied_transaction_id
+    const stillApproving = await inventory.retrieveInventorySnapshot(snapshot.id)
+    expect(stillApproving.status).not.toBe("APPLIED")
+
+    // Now link the variant so the retry can succeed, without ever re-touching Phase A.
+    const { productVariant } = await productVariantFixture()
+    await linkTradingCardVariantToProductVariant(variant.id, productVariant.id)
+    const item = await createInventoryItem(`ITEM-${suffix()}`)
+    await linkProductVariantToInventoryItem(productVariant.id, item.id)
+    const location = await createStockLocation(`Retry Loc ${suffix()}`)
+    process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+    try {
+      const retried = await retryInventoryProposalSync(container, { actor: "retrier", source: "MANUAL", proposalId: proposal.id })
+      expect(retried.medusa_sync_status).toBe("SYNCED")
+      expect(retried.applied_transaction_id).toBe(transactionIdAfterFailure) // Phase A never re-ran
+
+      const finalSnapshot = await inventory.retrieveInventorySnapshot(snapshot.id)
+      expect(finalSnapshot.status).toBe("APPLIED")
+    } finally {
+      delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+    }
+  }, 30000)
 })
