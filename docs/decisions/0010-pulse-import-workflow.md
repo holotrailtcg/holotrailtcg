@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted for Stage 5B.1 Slice 2.
+Accepted for Stage 5B.1 Slice 2. Extended for Stage 5B.1 Slice 3 (Admin API
+and Admin UI) — see the addendum at the end of this document.
 
 ## Context
 
@@ -101,8 +102,9 @@ any of their logic.
 The workflow creates draft reconciliation proposals only. It never approves,
 rejects, or applies a proposal; never mutates a holding; never touches Medusa
 `InventoryItem` or `StockLocation`; never creates or publishes a product. No
-Admin route, Admin UI, or component test was added in this slice — those are
-explicitly deferred to a future Admin API slice.
+Admin route, Admin UI, or component test was added in this slice (Slice
+2) — those were added in Slice 3 (see the addendum below) but the
+out-of-scope list above still applies to both slices unchanged.
 
 Two pre-existing defects were found and fixed while wiring this workflow up
 against real data, both outside this slice's own new code but load-bearing
@@ -114,3 +116,98 @@ external-reference validation) rejected the `/` character, which every real
 Pulse `Product ID` contains as part of its card-number segment — widened to
 also accept `/` and `|` while still rejecting whitespace, control characters,
 `?`, and `#`.
+
+## Addendum: Stage 5B.1 Slice 3 — Admin API and Admin UI
+
+Slice 3 exposes the Slice 2 workflow and its read-side service methods
+through authenticated Medusa Admin routes and builds the "Upload & Import"
+step of the Admin workspace. No business logic was added to any route —
+every route validates, calls the workflow or an existing read method, and
+shapes the response.
+
+- **New source creation happens only inside the upload request.** The
+  `POST /admin/trading-card-inventory/imports/upload` route carries either
+  `inventorySourceId` (Path A) or the `newSourceDisplayName`/`newSourceProvider`
+  pair (Path B) alongside the file, matching `ImportPulseCsvSnapshotInput`'s
+  two existing paths exactly. There is no separate pre-create-source Admin
+  step in this flow; the general `POST /admin/trading-card-inventory/sources`
+  route (Stage 5A.1) is unaffected and still exists for other Admin source
+  management.
+- **A dedicated retry workflow, not the upload workflow with placeholder
+  values.** The `retryOfSnapshotId` branch that already existed inside
+  `import-pulse-csv-snapshot.ts` was extracted, unchanged in behaviour, into
+  `pulse-import-shared.ts` (shared with the main workflow, which still
+  supports its own `retryOfSnapshotId` input for backward compatibility) and
+  re-exposed as a new, narrow `retryPulseSnapshotMatchingWorkflow` taking
+  `{ snapshotId, actor, source, reason?, previousApprovedSnapshotId? }` — no
+  file/filename/mimetype fields. `POST .../snapshots/:id/retry-matching`
+  calls only this dedicated workflow.
+- **Manual reconciliation is scoped to recoverable states only.**
+  `POST .../snapshots/:id/reconcile` calls the existing
+  `reconcileInventorySnapshotWorkflow` unchanged; the Admin UI only offers
+  the action when a snapshot's summary shows `VALIDATED` (never reconciled,
+  or reconciliation didn't complete). Baseline validation is not duplicated
+  in the route — `reconcileInventorySnapshot`'s existing service query
+  already requires `previousApprovedSnapshotId` (when given) to reference an
+  approved, non-rejected/failed snapshot for the same source, and already
+  rejects any snapshot that isn't `VALIDATED` (or, idempotently,
+  `PENDING_REVIEW` with a matching baseline) before writing anything.
+- **Multer is bounded intake and safe error shaping only.** The upload route's
+  multipart middleware (`imports/upload-middleware.ts`) uses
+  `multer.memoryStorage()` capped at `PULSE_FILE_LIMITS.MAX_FILE_SIZE_BYTES`
+  and maps a Multer error to a clean JSON response — it does not re-validate
+  CSV extension, MIME type, or content. `validatePulseFile` inside the
+  workflow remains the sole authority for that.
+- **A workflow-orchestration boundary bug, found and fixed while wiring the
+  first real caller of `.run()` for these workflows.** Neither
+  `importPulseCsvSnapshotWorkflow` nor `reconcileInventorySnapshotWorkflow`
+  had ever been invoked through their wrapped `.run()` form before this
+  slice (every existing test called the underlying plain function directly).
+  Doing so for the first time revealed that Medusa's workflow orchestration
+  engine clones step input for its transaction context in a way that turns a
+  real `Buffer` into its JSON shape (`{ type: "Buffer", data: number[] }`) by
+  the time it reaches the step handler, and turns a thrown `MedusaError` into
+  a plain object that still carries `MedusaError`'s own `__isMedusaError`
+  duck-typing marker but fails `instanceof MedusaError`. Fixed at the two
+  points these boundaries are actually crossed: `import-pulse-csv-snapshot.ts`
+  now rebuilds a real `Buffer` from `input.fileBuffer` inside the step
+  handler before calling the plain function (`reviveFileBuffer`), and
+  `trading-card-inventory/shared.ts`'s `safeAdminRead`/`safeAdminWrite` now
+  check `MedusaError.isMedusaError(error)` (not only `instanceof`) and
+  reconstruct a real `MedusaError` from the surviving `type`/`message`/`code`
+  fields before deciding whether to pass it through or wrap it generically.
+- **A Pulse-specific matching robustness fix, not a shared-validator
+  change.** `findTrustedExternalReference` validates its identifier against
+  `providerIdentifierSchema` — a TCGdex-oriented, URL-safe-slug validator
+  that rejects whitespace. A real Pulse provider reference legitimately
+  embeds a verbatim CSV material token (e.g. "Reverse Holo", "Poké Ball")
+  that contains a space, which previously crashed the entire import request
+  the first time a real, representative row reached the trusted-reference
+  lookup. Rather than loosen `providerIdentifierSchema` itself (shared with
+  TCGdex card/set identifier validation elsewhere), `buildTradingCardMatchLookup`
+  in `pulse-import-shared.ts` now treats a validation failure from that one
+  lookup the same as "no trusted reference found" — the row still proceeds
+  to attribute-based candidate matching / `REVIEW_REQUIRED` instead of the
+  request failing outright.
+- **Test-database isolation across suite types.** This project uses one
+  persistent Neon Postgres database for both the `integration:modules` and
+  `integration:http` Jest test types (see `docs/decisions/0001`); there is no
+  per-run reset. `migration.integration.spec.ts` (Stage 5A) reapplies its own
+  three migrations' original, narrower `trading_card_inventory_audit_entry`
+  action CHECK constraint as part of its normal up/down cycle, but doesn't
+  own `Migration20260716190000` (the Stage 5B.1 widening that adds the
+  `IMPORT_*` actions). Once any suite performs a real Pulse import — which
+  Slice 3's own HTTP tests are the first to do outside an isolated module
+  spec — real `IMPORT_*` audit rows exist in that shared table, and
+  `migration.integration.spec.ts`'s constraint reapplication then fails
+  against them regardless of run order. Fixed without weakening any
+  constraint or changing application behaviour: the migration test now (a)
+  truncates only the tables its own three migrations create, once, before
+  its first assertion, so residual rows from other suites can never violate
+  its narrower constraint reapplication, and (b) its `afterAll` now also
+  reapplies `Migration20260716190000` after its own migration cycle, so it
+  always leaves the fully-current (widened) schema behind for sibling
+  suites — matching production, where all migrations stay applied. Verified
+  order-independent by running the migration test, the full broad module
+  pass, the three isolated Pulse module specs, and the full HTTP suite in
+  varying orders.

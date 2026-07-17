@@ -1,6 +1,7 @@
 import { defineMiddlewares, validateAndTransformBody } from "@medusajs/framework/http"
 import { subscribeBodySchema } from "./store/newsletter/shared/validation"
 import { redactNewsletterTokenQueryFromRequestLog } from "./store/newsletter/shared/request-logging"
+import { pulseCsvUploadMiddleware } from "./admin/trading-card-inventory/imports/upload-middleware"
 
 /**
  * Route-level middleware for the public newsletter routes (Stage 2C.6, see
@@ -93,6 +94,31 @@ export default defineMiddlewares({
       matcher: "/admin/trading-card-inventory/sources/*/restore",
       methods: ["POST"],
       bodyParser: { sizeLimit: "1kb" },
+    },
+    // Stage 5B.1 Slice 3 Pulse CSV upload: this is the first multipart route
+    // in this backend. Medusa's built-in JSON body parser is disabled for
+    // this exact path so Multer can read the raw multipart stream itself;
+    // Multer is configured with `memoryStorage()` and a 10 MB limit (see
+    // `imports/upload-middleware.ts`) — no temp file, no filesystem path, no
+    // R2. Everything else about the uploaded bytes (extension, MIME,
+    // content) is validated by the import workflow, not here.
+    {
+      matcher: "/admin/trading-card-inventory/imports/upload",
+      methods: ["POST"],
+      bodyParser: false,
+      middlewares: [pulseCsvUploadMiddleware],
+    },
+    // Small bounded JSON bodies only (an optional free-text reason, and for
+    // reconcile an optional baseline snapshot id) — no CSV or bulk payload.
+    {
+      matcher: "/admin/trading-card-inventory/imports/snapshots/*/retry-matching",
+      methods: ["POST"],
+      bodyParser: { sizeLimit: "2kb" },
+    },
+    {
+      matcher: "/admin/trading-card-inventory/imports/snapshots/*/reconcile",
+      methods: ["POST"],
+      bodyParser: { sizeLimit: "2kb" },
     },
   ],
 })

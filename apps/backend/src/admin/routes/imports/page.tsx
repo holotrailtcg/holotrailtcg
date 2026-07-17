@@ -41,8 +41,8 @@ const ImportsOverviewPage = () => {
       <Container className="flex flex-col gap-2 p-6">
         <Heading level="h1">Import cards</Heading>
         <Text size="small" className="text-ui-fg-subtle">
-          This page shows the four steps for bringing new cards into Holo Trail. Three steps
-          are connected to real data now. One step is not connected yet.
+          This page shows the four steps for bringing new cards into Holo Trail. All four steps
+          are connected to real data now.
         </Text>
       </Container>
 
@@ -53,7 +53,7 @@ const ImportsOverviewPage = () => {
           title="1. Upload and import"
           description="Upload a Pulse CSV file and start an import."
           href="/imports/new"
-          connected={false}
+          connected
         />
         <OverviewCard
           title="2. Sync with TCGdex"

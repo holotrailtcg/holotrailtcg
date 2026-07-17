@@ -10,7 +10,7 @@ export const IMPORT_STEPS: ImportStep[] = [
   {
     label: "1. Upload and import",
     description: "Upload a Pulse CSV file and start an import.",
-    state: "not_connected",
+    state: "connected",
   },
   {
     label: "2. Sync with TCGdex",

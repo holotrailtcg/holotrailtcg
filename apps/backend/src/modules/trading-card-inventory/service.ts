@@ -858,12 +858,31 @@ class TradingCardInventoryModuleService extends MedusaService({
   }
 
   /** Stage 5B.1: paginated, filterable entry listing for the Admin preview screen. */
-  async listSnapshotEntriesForAdmin(snapshotId: string, filters: { outcome?: string; matchingStatus?: string }, pagination: { limit: number; offset: number }) {
+  async listSnapshotEntriesForAdmin(
+    snapshotId: string,
+    filters: {
+      outcome?: string; matchingStatus?: string; finishCandidate?: string; specialTreatmentCandidate?: string
+      rarityCandidate?: string; duplicateReferenceOnly?: boolean
+    },
+    pagination: { limit: number; offset: number },
+  ) {
     idSchema.parse(snapshotId)
     const conditions = ["e.inventory_snapshot_id = ?", "e.deleted_at is null"]
     const params: unknown[] = [snapshotId]
     if (filters.outcome) { conditions.push("e.outcome = ?"); params.push(filters.outcome) }
     if (filters.matchingStatus) { conditions.push("m.matching_status = ?"); params.push(filters.matchingStatus) }
+    if (filters.finishCandidate) { conditions.push("e.finish_candidate = ?"); params.push(filters.finishCandidate) }
+    if (filters.specialTreatmentCandidate) { conditions.push("e.special_treatment_candidate = ?"); params.push(filters.specialTreatmentCandidate) }
+    if (filters.rarityCandidate) { conditions.push("e.rarity_candidate = ?"); params.push(filters.rarityCandidate) }
+    if (filters.duplicateReferenceOnly) {
+      conditions.push(
+        `e.provider_reference in (
+          select provider_reference from trading_card_inventory_snapshot_entry
+          where inventory_snapshot_id = ? and deleted_at is null group by provider_reference having count(*) > 1
+        )`,
+      )
+      params.push(snapshotId)
+    }
     const where = conditions.join(" and ")
     const [{ count }] = await this.manager_.execute<{ count: string }>(
       `select count(*)::text as count from trading_card_inventory_snapshot_entry e
