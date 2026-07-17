@@ -18,6 +18,12 @@ export const providerIdentifierSchema = z.string().trim().min(1).max(MAX_PROVIDE
   "Invalid provider identifier"
 )
 
+/** Pulse Product IDs contain verbatim material tokens, including spaces. */
+export const pulseProviderIdentifierSchema = z.string().trim().min(1).max(255).refine(
+  (value) => ![...value].some((character) => character.charCodeAt(0) < 0x20 || character.charCodeAt(0) === 0x7f) && !/[?#]/u.test(value),
+  "Invalid Pulse provider identifier"
+)
+
 export const actorSchema = z.string().trim().min(1).max(MAX_ACTOR_LENGTH).refine(
   (value) => ![...value].some((character) => character.charCodeAt(0) < 0x20 || character.charCodeAt(0) === 0x7f),
   "Invalid actor identity"

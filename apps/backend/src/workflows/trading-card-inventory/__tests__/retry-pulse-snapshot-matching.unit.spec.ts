@@ -19,14 +19,24 @@ function fakeInventory(overrides: Partial<Record<string, unknown>> = {}) {
     recordSnapshotEntryMatches: jest.fn(async () => ({ inventorySnapshotId: "tcisnap_1", processedCount: 1 })),
     recordImportLifecycleAudit: jest.fn(async () => undefined),
     transitionInventorySnapshotStatus: jest.fn(async () => ({ id: "tcisnap_1" })),
-    getSnapshotImportSummary: jest.fn(async () => ({
-      snapshotId: "tcisnap_1", inventorySourceId: "tcisrc_1", status: "PENDING_REVIEW", originalFilename: "f.csv",
-      contentHash: "hash", rowCount: 1, byOutcome: { VALID: 1 }, byMatchingStatus: { MATCHED: 1 },
-      byDiagnosticSeverity: {}, uniqueProviderReferences: 1, duplicateRowCount: 0,
-    })),
+    getSnapshotImportSummary: jest.fn()
+      .mockResolvedValueOnce({
+        snapshotId: "tcisnap_1", inventorySourceId: "tcisrc_1", status: "DRAFT", originalFilename: "f.csv",
+        contentHash: "hash", rowCount: 1, byOutcome: { VALID: 1 }, byMatchingStatus: { MATCHED: 1 },
+        byDiagnosticSeverity: {}, uniqueProviderReferences: 1, duplicateRowCount: 0,
+      })
+      .mockResolvedValue({
+        snapshotId: "tcisnap_1", inventorySourceId: "tcisrc_1", status: "PENDING_REVIEW", originalFilename: "f.csv",
+        contentHash: "hash", rowCount: 1, byOutcome: { VALID: 1 }, byMatchingStatus: { MATCHED: 1 },
+        byDiagnosticSeverity: {}, uniqueProviderReferences: 1, duplicateRowCount: 0,
+      }),
     listSnapshotEntryDiagnostics: jest.fn(async () => ({ rows: [], count: 0 })),
     listSnapshotVariantIds: jest.fn(async () => []),
     reconcileInventorySnapshot: jest.fn(async () => ({
+      snapshotId: "tcisnap_1", inventorySourceId: "tcisrc_1", status: "PENDING_REVIEW",
+      baselineSnapshotId: null, comparedAt: new Date(), proposalCount: 1, proposalCounts: { NEW_HOLDING: 1 },
+    })),
+    getReconciliationSummary: jest.fn(async () => ({
       snapshotId: "tcisnap_1", inventorySourceId: "tcisrc_1", status: "PENDING_REVIEW",
       baselineSnapshotId: null, comparedAt: new Date(), proposalCount: 1, proposalCounts: { NEW_HOLDING: 1 },
     })),
@@ -88,7 +98,7 @@ describe("retryPulseSnapshotMatching", () => {
     expect(result.kind).toBe("IMPORTED")
     expect(inventory.transitionInventorySnapshotStatus).not.toHaveBeenCalled()
     expect(inventory.recordSnapshotEntryMatches).not.toHaveBeenCalled()
-    expect(inventory.reconcileInventorySnapshot).toHaveBeenCalledTimes(1)
+    expect(inventory.getReconciliationSummary).toHaveBeenCalledTimes(1)
   })
 
   it("rejects retrying a snapshot with no persisted entries", async () => {
@@ -99,6 +109,31 @@ describe("retryPulseSnapshotMatching", () => {
     })
     const cards = fakeCards()
     await expect(retryPulseSnapshotMatching(fakeContainer(inventory, cards), baseInput)).rejects.toThrow(MedusaError)
+  })
+
+  it.each(["FAILED", "REJECTED", "APPLIED", "SUPERSEDED"])("rejects terminal snapshot status %s", async (status) => {
+    const inventory = fakeInventory({
+      retrieveInventorySnapshot: jest.fn(async (id: string) => ({
+        id, inventory_source_id: "tcisrc_1", status, row_count: 1,
+      })),
+    })
+    await expect(retryPulseSnapshotMatching(fakeContainer(inventory, fakeCards()), baseInput)).rejects.toThrow(/status/i)
+    expect(inventory.recordSnapshotEntryMatches).not.toHaveBeenCalled()
+  })
+
+  it("refreshes pending proposals as part of the match write", async () => {
+    const inventory = fakeInventory({
+      retrieveInventorySnapshot: jest.fn(async (id: string) => ({
+        id, inventory_source_id: "tcisrc_1", status: "PENDING_REVIEW", row_count: 1,
+        reconciled_against_snapshot_id: "tcisnap_baseline",
+      })),
+    })
+    await retryPulseSnapshotMatching(fakeContainer(inventory, fakeCards()), baseInput)
+    expect(inventory.recordSnapshotEntryMatches).toHaveBeenCalledWith(expect.objectContaining({
+      refreshPendingProposals: true,
+      inventorySnapshotId: "tcisnap_1",
+    }))
+    expect(inventory.transitionInventorySnapshotStatus).not.toHaveBeenCalled()
   })
 
   it("returns NO_USABLE_ROWS and skips reconciliation when a DRAFT snapshot still has no usable rows", async () => {

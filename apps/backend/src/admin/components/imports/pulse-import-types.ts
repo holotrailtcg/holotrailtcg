@@ -17,6 +17,8 @@ export interface InventorySourceListResponse {
 export interface ImportSummary {
   snapshotId: string
   inventorySourceId: string
+  inventorySourceDisplayName: string
+  inventorySourceLanguage: string | null
   status: string
   originalFilename: string
   contentHash: string
@@ -107,6 +109,7 @@ export interface SnapshotEntryListResponse {
 
 export interface SnapshotDiagnosticListItem {
   id: string
+  snapshotEntryId: string
   rowNumber: number
   phase: "PARSE" | "MATCHING"
   code: string

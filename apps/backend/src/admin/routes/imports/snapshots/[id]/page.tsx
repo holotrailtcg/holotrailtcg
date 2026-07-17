@@ -31,6 +31,7 @@ const ImportsSnapshotDetailPage = () => {
   const [entryOffset, setEntryOffset] = useState(0)
   const [outcomeFilter, setOutcomeFilter] = useState("")
   const [matchingStatusFilter, setMatchingStatusFilter] = useState("")
+  const [entryIdFilter, setEntryIdFilter] = useState("")
   const [diagnosticOffset, setDiagnosticOffset] = useState(0)
   const [severityFilter, setSeverityFilter] = useState("")
 
@@ -41,11 +42,12 @@ const ImportsSnapshotDetailPage = () => {
   })
 
   const entriesQuery = useQuery({
-    queryKey: ["pulse-import-entries", snapshotId, { entryOffset, outcomeFilter, matchingStatusFilter }],
+    queryKey: ["pulse-import-entries", snapshotId, { entryOffset, outcomeFilter, matchingStatusFilter, entryIdFilter }],
     queryFn: () => {
       const searchParams = new URLSearchParams({ limit: String(ENTRY_PAGE_SIZE), offset: String(entryOffset) })
       if (outcomeFilter) searchParams.set("outcome", outcomeFilter)
       if (matchingStatusFilter) searchParams.set("matchingStatus", matchingStatusFilter)
+      if (entryIdFilter) searchParams.set("snapshotEntryId", entryIdFilter)
       return fetchJson<SnapshotEntryListResponse>(
         `/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/entries?${searchParams.toString()}`,
       )
@@ -99,7 +101,8 @@ const ImportsSnapshotDetailPage = () => {
   const outstandingMatches = summary
     ? OUTSTANDING_MATCHING_STATUSES.reduce((sum, status) => sum + (summary.byMatchingStatus[status] ?? 0), 0)
     : 0
-  const canRetryMatching = outstandingMatches > 0
+  const canRetryMatching = outstandingMatches > 0 &&
+    ["DRAFT", "VALIDATED", "PENDING_REVIEW"].includes(summary?.status ?? "")
   const canReconcile = summary?.status === "VALIDATED"
 
   const entryColumns: ReviewTableColumn<SnapshotEntryListItem>[] = [
@@ -115,7 +118,12 @@ const ImportsSnapshotDetailPage = () => {
   ]
 
   const diagnosticColumns: ReviewTableColumn<SnapshotDiagnosticListItem>[] = [
-    { header: "Row", cell: (row) => row.rowNumber },
+    { header: "Row", cell: (row) => (
+      <button className="text-ui-fg-interactive" onClick={() => {
+        setEntryIdFilter(row.snapshotEntryId)
+        setEntryOffset(0)
+      }}>{row.rowNumber}</button>
+    ) },
     { header: "Severity", cell: (row) => row.severity },
     { header: "Field", cell: (row) => row.fieldRef ?? "—" },
     { header: "Message", cell: (row) => row.message },
@@ -151,6 +159,10 @@ const ImportsSnapshotDetailPage = () => {
                 <Text size="small">{summary.originalFilename}</Text>
               </div>
               <div>
+                <Text size="xsmall" className="text-ui-fg-subtle">Inventory source</Text>
+                <Text size="small">{summary.inventorySourceDisplayName}{summary.inventorySourceLanguage ? ` (${summary.inventorySourceLanguage})` : ""}</Text>
+              </div>
+              <div>
                 <Text size="xsmall" className="text-ui-fg-subtle">Status</Text>
                 <Text size="small">{summary.status}</Text>
               </div>
@@ -160,7 +172,7 @@ const ImportsSnapshotDetailPage = () => {
               </div>
               <div>
                 <Text size="xsmall" className="text-ui-fg-subtle">Content hash</Text>
-                <Text size="small" className="truncate" title={summary.contentHash}>{summary.contentHash}</Text>
+                <Text size="small" className="truncate" title={summary.contentHash}>{summary.contentHash.slice(0, 12)}…</Text>
               </div>
               <div>
                 <Text size="xsmall" className="text-ui-fg-subtle">Unique references</Text>
@@ -197,6 +209,9 @@ const ImportsSnapshotDetailPage = () => {
           <Container className="flex flex-col gap-3 p-0">
             <div className="flex flex-wrap items-center gap-3 p-4">
               <Heading level="h2">Rows</Heading>
+              {entryIdFilter && (
+                <Button size="small" variant="secondary" onClick={() => setEntryIdFilter("")}>Show all rows</Button>
+              )}
               <select
                 aria-label="Filter by outcome"
                 value={outcomeFilter}

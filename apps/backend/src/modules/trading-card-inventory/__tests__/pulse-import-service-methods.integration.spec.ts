@@ -1,32 +1,20 @@
 import { MedusaApp } from "@medusajs/framework/modules-sdk"
 import { ContainerRegistrationKeys, createPgConnection } from "@medusajs/framework/utils"
 import { TRADING_CARD_INVENTORY_MODULE } from "../index"
-import { Migration20260716190000 } from "../migrations/Migration20260716190000"
 import { DuplicateSnapshotError } from "../service"
 
 let pgConnection: ReturnType<typeof createPgConnection>
+let rootConnection: ReturnType<typeof createPgConnection>
 let medusaApp: Awaited<ReturnType<typeof MedusaApp>>
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let service: any
 
 const suffix = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 9)}`
 
-async function applyMigration(migrationClass: new (a: never, b: never) => { up(): Promise<void>; getQueries(): unknown[] }) {
-  const migration = new migrationClass(undefined as never, undefined as never)
-  await migration.up()
-  for (const query of migration.getQueries().map(String)) await pgConnection.raw(query)
-}
-
 beforeAll(async () => {
-  pgConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
-  // Only the newest migration this slice adds is re-applied here (matching
-  // the existing single-migration convention in this test suite) — earlier
-  // migrations (150000/180000) are assumed already applied via a normal
-  // `db:migrate` run and must not be blindly re-run here: their `up()`
-  // unconditionally re-narrows the audit-action CHECK constraint, which
-  // fails once any row uses a newer action value this constraint doesn't
-  // yet know about.
-  await applyMigration(Migration20260716190000)
+  rootConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
+  pgConnection = await rootConnection.transaction() as never
+  // Roll back the suite as one unit so it cannot pollute the shared test database.
   medusaApp = await MedusaApp({
     modulesConfig: { [TRADING_CARD_INVENTORY_MODULE]: { resolve: "./src/modules/trading-card-inventory" } },
     injectedDependencies: { [ContainerRegistrationKeys.PG_CONNECTION]: pgConnection },
@@ -37,11 +25,11 @@ beforeAll(async () => {
 }, 60000)
 
 afterAll(async () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  await (pgConnection as any)?.context?.destroy()
-  await pgConnection?.destroy()
   await medusaApp?.onApplicationPrepareShutdown()
   await medusaApp?.onApplicationShutdown()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (pgConnection as any)?.rollback()
+  await rootConnection?.destroy()
 })
 
 async function createSource(overrides: Record<string, unknown> = {}) {
@@ -121,6 +109,14 @@ describe("findLiveSnapshotByContentHash and createDraftSnapshot", () => {
     const retried = await service.createDraftSnapshot({ actor: "test-actor", source: "PULSE", inventorySourceId: source.id, contentHash })
     expect(retried.id).not.toBe(snapshot.id)
   })
+
+  it("refuses snapshot creation after the source is archived", async () => {
+    const source = await createSource()
+    await service.archiveInventorySource({ id: source.id, actor: "test-actor", source: "MANUAL" })
+    await expect(service.createDraftSnapshot({
+      actor: "test-actor", source: "PULSE", inventorySourceId: source.id, contentHash: `hash-${suffix()}`,
+    })).rejects.toThrow(/archived/i)
+  })
 })
 
 describe("recordSnapshotEntryMatches", () => {
@@ -151,7 +147,8 @@ describe("recordSnapshotEntryMatches", () => {
     })
     const { rows } = await service.listSnapshotEntriesForAdmin(snapshot.id, {}, { limit: 10, offset: 0 })
     const matched = rows.find((row: Record<string, unknown>) => row.id === entryIds[0])
-    expect(matched.trading_card_variant_id).toBe("tcvar_1")
+    expect(matched.trading_card_variant_id).toBeNull()
+    expect(matched.matched_trading_card_variant_id).toBe("tcvar_1")
     expect(matched.matching_status).toBe("MATCHED")
     const { rows: diagnostics } = await service.listSnapshotEntryDiagnostics(snapshot.id, {}, { limit: 10, offset: 0 })
     expect(diagnostics).toHaveLength(1)
@@ -173,5 +170,71 @@ describe("recordSnapshotEntryMatches", () => {
       actor: "test-actor", source: "PULSE", inventorySnapshotId: snapshotA.id,
       entries: [{ snapshotEntryId: entryIdsB[0], matchingStatus: "UNMATCHED", tradingCardVariantId: null, matchedVia: "NONE", diagnostics: [] }],
     })).rejects.toThrow(/not found/i)
+  })
+
+  it("atomically refreshes only affected pending proposals and blocks actioned proposals", async () => {
+    const { source, snapshot, entryIds } = await snapshotWithEntries(2)
+    const unmatchedEntries = entryIds.map((snapshotEntryId) => ({
+      snapshotEntryId, matchingStatus: "UNMATCHED", tradingCardVariantId: null, matchedVia: "NONE", diagnostics: [],
+    }))
+    await service.recordSnapshotEntryMatches({
+      actor: "test-actor", source: "PULSE", inventorySnapshotId: snapshot.id, entries: unmatchedEntries,
+    })
+    await service.transitionInventorySnapshotStatus({
+      id: snapshot.id, targetStatus: "VALIDATED", actor: "test-actor", source: "PULSE",
+    })
+    await service.reconcileInventorySnapshot({
+      inventorySourceId: source.id, snapshotId: snapshot.id, actor: "test-actor", source: "SYSTEM",
+    })
+
+    const before = await pgConnection("trading_card_inventory_proposal")
+      .where({ inventory_snapshot_id: snapshot.id }).whereNull("deleted_at").orderBy("reconciliation_key")
+    expect(before).toHaveLength(2)
+    const affected = before.find((proposal) => proposal.provider_reference.includes("|0"))!
+    const unaffected = before.find((proposal) => proposal.id !== affected.id)!
+    const [{ count: holdingsBefore }] = await pgConnection("trading_card_inventory_holding")
+      .where({ inventory_source_id: source.id }).whereNull("deleted_at").count<{ count: string }[]>("* as count")
+
+    const diagnostic = {
+      rowNumber: 1, phase: "MATCHING", code: "MATCH_RETRY_RESOLVED", severity: "INFO",
+      fieldRef: "provider_reference", message: "Retry resolved the previously unmatched row",
+    }
+    await service.recordSnapshotEntryMatches({
+      actor: "test-actor", source: "PULSE", reason: "new trusted reference", inventorySnapshotId: snapshot.id,
+      refreshPendingProposals: true,
+      entries: [{
+        snapshotEntryId: entryIds[0], matchingStatus: "MATCHED", tradingCardVariantId: "tcvar_retry_1",
+        matchedVia: "TRUSTED_REFERENCE", diagnostics: [diagnostic, diagnostic],
+      }],
+    })
+
+    const after = await pgConnection("trading_card_inventory_proposal")
+      .where({ inventory_snapshot_id: snapshot.id }).whereNull("deleted_at").orderBy("reconciliation_key")
+    expect(after).toHaveLength(2)
+    expect(after.find((proposal) => proposal.id === affected.id)).toMatchObject({
+      id: affected.id, trading_card_variant_id: "tcvar_retry_1", change_kind: "NEW_HOLDING", review_status: "PENDING",
+    })
+    expect(after.find((proposal) => proposal.id === unaffected.id)).toEqual(unaffected)
+    expect(await pgConnection("trading_card_inventory_snapshot_entry_diagnostic")
+      .where({ snapshot_entry_id: entryIds[0], code: "MATCH_RETRY_RESOLVED" }).whereNull("deleted_at")).toHaveLength(1)
+    expect(await pgConnection("trading_card_inventory_audit_entry")
+      .where({ entity_id: snapshot.id, action: "IMPORT_PROPOSALS_REFRESHED" })).toHaveLength(1)
+    const [{ count: holdingsAfter }] = await pgConnection("trading_card_inventory_holding")
+      .where({ inventory_source_id: source.id }).whereNull("deleted_at").count<{ count: string }[]>("* as count")
+    expect(holdingsAfter).toBe(holdingsBefore)
+
+    await service.transitionInventoryProposalStatus({
+      id: affected.id, targetStatus: "REJECTED", rejectionReason: "reviewed", actor: "reviewer", source: "MANUAL",
+    })
+    await expect(service.recordSnapshotEntryMatches({
+      actor: "test-actor", source: "PULSE", inventorySnapshotId: snapshot.id, refreshPendingProposals: true,
+      entries: [{
+        snapshotEntryId: entryIds[0], matchingStatus: "UNMATCHED", tradingCardVariantId: null,
+        matchedVia: "NONE", diagnostics: [],
+      }],
+    })).rejects.toThrow(/actioned/i)
+    const [matchAfterRejectedRetry] = await pgConnection("trading_card_inventory_snapshot_entry_match")
+      .where({ snapshot_entry_id: entryIds[0] }).whereNull("deleted_at")
+    expect(matchAfterRejectedRetry).toMatchObject({ matching_status: "MATCHED", trading_card_variant_id: "tcvar_retry_1" })
   })
 })

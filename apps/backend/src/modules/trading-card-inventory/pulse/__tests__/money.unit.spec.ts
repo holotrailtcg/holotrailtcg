@@ -35,4 +35,9 @@ describe("parseMoneyField", () => {
   it("strips thousands separators defensively", () => {
     expect(parseMoneyField("£1,234.50")).toEqual({ status: "value", canonical: "1234.50" })
   })
+
+  it("rejects malformed comma grouping instead of silently changing the amount", () => {
+    expect(parseMoneyField("£1,00")).toEqual({ status: "invalid", canonical: null })
+    expect(parseMoneyField("12,34,567.89")).toEqual({ status: "invalid", canonical: null })
+  })
 })

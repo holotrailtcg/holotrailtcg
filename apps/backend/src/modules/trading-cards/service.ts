@@ -13,7 +13,7 @@ import { rarityComparisonForm } from "./rarity/normalise-rarity"
 import {
   AUDIT_ACTION, AUDIT_ENTITY_TYPE, type CardCondition, type CardFinish,
   type CardLanguage, type ConditionSource, type ExternalProvider, RECORD_ORIGIN, type RecordOrigin, type SpecialTreatment,
-  EXTERNAL_REFERENCE_PROVENANCE, type ExternalReferenceProvenance, IMAGE_STATUS,
+  EXTERNAL_PROVIDER, EXTERNAL_REFERENCE_PROVENANCE, type ExternalReferenceProvenance, IMAGE_STATUS,
   MAX_CARD_IMAGE_BYTE_SIZE, CARD_IMAGE_UPLOAD_EXPIRY_MINUTES, CARD_IMAGE_CLEANUP_ACTOR, SUPPORTED_IMAGE_MIME_TYPES,
 } from "./types"
 import { generateStagingObjectKey, generateFinalObjectKey, sanitiseOriginalFilename, derivePublicImageUrl } from "./images/object-keys"
@@ -25,7 +25,7 @@ import { runOrphanReconciliation, type OrphanReconciliationCounts } from "./imag
 import type { TcgDexMatchInput, TcgDexMatchResult } from "./tcgdex/matching-types"
 import type { TcgDexLookupDependency } from "./tcgdex/matching"
 import { matchTcgdexCard } from "./tcgdex/matching"
-import { auditContextSchema, canonicalSnapshot, diagnosticFingerprint, enrichmentSnapshotSchema, providerIdentifierSchema, snapshotFingerprint, tcgdexMatchResultSchema, tradingCardIdSchema } from "./tcgdex/persistence-validation"
+import { auditContextSchema, canonicalSnapshot, diagnosticFingerprint, enrichmentSnapshotSchema, providerIdentifierSchema, pulseProviderIdentifierSchema, snapshotFingerprint, tcgdexMatchResultSchema, tradingCardIdSchema } from "./tcgdex/persistence-validation"
 import {
   listTcgdexAttempts,
   listTcgdexReviews,
@@ -397,11 +397,12 @@ class TradingCardsModuleService extends MedusaService({
    * method rather than exposing generated CRUD to a cross-module caller.
    */
   async findTrustedExternalReference(provider: ExternalProvider, providerIdentifier: string) {
-    providerIdentifierSchema.parse(providerIdentifier)
+    const identifierSchema = provider === EXTERNAL_PROVIDER.PULSE ? pulseProviderIdentifierSchema : providerIdentifierSchema
+    const normalizedIdentifier = identifierSchema.parse(providerIdentifier)
     const [reference] = await this.manager_.execute<Record<string, unknown>>(
       `select trading_card_id, trading_card_variant_id from trading_card_external_reference
-       where provider = ? and provider_identifier = ? and deleted_at is null`,
-      [provider, providerIdentifier],
+       where provider = ? and provider_identifier = ? and provenance = 'TRUSTED_MANUAL' and deleted_at is null`,
+      [provider, normalizedIdentifier],
     )
     if (!reference || !reference.trading_card_id) return null
     return {
@@ -619,7 +620,9 @@ class TradingCardsModuleService extends MedusaService({
   }
 
   private async upsertExternalReferenceInTransaction(manager: TxManager, input: UpsertExternalReferenceInput) {
-    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason }); providerIdentifierSchema.parse(input.providerIdentifier)
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    const identifierSchema = input.provider === EXTERNAL_PROVIDER.PULSE ? pulseProviderIdentifierSchema : providerIdentifierSchema
+    const providerIdentifier = identifierSchema.parse(input.providerIdentifier)
     if (input.tradingCardId) tradingCardIdSchema.parse(input.tradingCardId)
     if (input.cardSetId) tradingCardIdSchema.parse(input.cardSetId)
     if (input.tradingCardVariantId) tradingCardIdSchema.parse(input.tradingCardVariantId)
@@ -638,7 +641,7 @@ class TradingCardsModuleService extends MedusaService({
       // backend processes without weakening the active-row unique index.
       await manager.execute(
         `select pg_advisory_xact_lock(hashtextextended(?::text, 0))`,
-        [`${input.provider}:${input.providerIdentifier}`]
+        [`${input.provider}:${providerIdentifier}`]
       )
       if (input.tradingCardVariantId) {
         const [variant] = await manager.execute<{ trading_card_id: string }>(
@@ -651,11 +654,11 @@ class TradingCardsModuleService extends MedusaService({
       if (!input.tradingCardId && !input.cardSetId) throw new MedusaError(MedusaError.Types.INVALID_DATA, "An external reference needs a trading card or card set")
       const [current] = await manager.execute<Record<string, unknown>>(
         `select *, xmin::text as version from trading_card_external_reference where provider = ? and provider_identifier = ?
-         and deleted_at is null for update`, [input.provider, input.providerIdentifier]
+         and deleted_at is null for update`, [input.provider, providerIdentifier]
       )
       const next = {
         trading_card_id: input.tradingCardId || null, card_set_id: input.cardSetId ?? null, trading_card_variant_id: input.tradingCardVariantId ?? null,
-        provider: input.provider, provider_identifier: input.providerIdentifier, language: input.language ?? null,
+        provider: input.provider, provider_identifier: providerIdentifier, language: input.language ?? null,
         region: input.region ?? null, raw_payload_note: input.rawPayloadNote ?? null,
         provenance: input.provenance ?? EXTERNAL_REFERENCE_PROVENANCE.AUTOMATIC,
       }

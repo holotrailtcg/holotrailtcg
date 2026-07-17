@@ -1,4 +1,4 @@
-import { Select, Text } from "@medusajs/ui"
+import { Label, Select, Text } from "@medusajs/ui"
 import { keepPreviousData, useQuery } from "@tanstack/react-query"
 import { fetchJson } from "./fetch-json"
 import type { InventorySourceListResponse } from "./pulse-import-types"
@@ -31,18 +31,21 @@ const SourceSelect = ({ value, onChange }: SourceSelectProps) => {
   }
 
   return (
-    <Select value={value} onValueChange={onChange}>
-      <Select.Trigger>
-        <Select.Value placeholder="Choose an inventory source" />
-      </Select.Trigger>
-      <Select.Content>
-        {sources.map((source) => (
-          <Select.Item key={source.id} value={source.id}>
-            {source.displayName}
-          </Select.Item>
-        ))}
-      </Select.Content>
-    </Select>
+    <div className="flex flex-col gap-1">
+      <Label htmlFor="inventory-source">Inventory source</Label>
+      <Select value={value} onValueChange={onChange}>
+        <Select.Trigger id="inventory-source">
+          <Select.Value placeholder="Choose an inventory source" />
+        </Select.Trigger>
+        <Select.Content>
+          {sources.map((source) => (
+            <Select.Item key={source.id} value={source.id}>
+              {source.displayName}{source.language ? ` (${source.language})` : ""}
+            </Select.Item>
+          ))}
+        </Select.Content>
+      </Select>
+    </div>
   )
 }
 

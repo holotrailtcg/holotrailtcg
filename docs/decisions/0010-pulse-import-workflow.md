@@ -176,19 +176,11 @@ shapes the response.
   check `MedusaError.isMedusaError(error)` (not only `instanceof`) and
   reconstruct a real `MedusaError` from the surviving `type`/`message`/`code`
   fields before deciding whether to pass it through or wrap it generically.
-- **A Pulse-specific matching robustness fix, not a shared-validator
-  change.** `findTrustedExternalReference` validates its identifier against
-  `providerIdentifierSchema` — a TCGdex-oriented, URL-safe-slug validator
-  that rejects whitespace. A real Pulse provider reference legitimately
-  embeds a verbatim CSV material token (e.g. "Reverse Holo", "Poké Ball")
-  that contains a space, which previously crashed the entire import request
-  the first time a real, representative row reached the trusted-reference
-  lookup. Rather than loosen `providerIdentifierSchema` itself (shared with
-  TCGdex card/set identifier validation elsewhere), `buildTradingCardMatchLookup`
-  in `pulse-import-shared.ts` now treats a validation failure from that one
-  lookup the same as "no trusted reference found" — the row still proceeds
-  to attribute-based candidate matching / `REVIEW_REQUIRED` instead of the
-  request failing outright.
+- **Pulse references have a provider-specific validation contract.** Pulse
+  identifiers may contain bounded internal whitespace (for material tokens
+  such as "Reverse Holo" or "Poké Ball"), while TCGdex identifiers retain
+  their stricter URL-safe schema. Trusted-reference lookup filters explicitly
+  to `TRUSTED_MANUAL`; malformed identifiers are not hidden as a lookup miss.
 - **Test-database isolation across suite types.** This project uses one
   persistent Neon Postgres database for both the `integration:modules` and
   `integration:http` Jest test types (see `docs/decisions/0001`); there is no
@@ -201,13 +193,19 @@ shapes the response.
   spec — real `IMPORT_*` audit rows exist in that shared table, and
   `migration.integration.spec.ts`'s constraint reapplication then fails
   against them regardless of run order. Fixed without weakening any
-  constraint or changing application behaviour: the migration test now (a)
-  truncates only the tables its own three migrations create, once, before
-  its first assertion, so residual rows from other suites can never violate
-  its narrower constraint reapplication, and (b) its `afterAll` now also
-  reapplies `Migration20260716190000` after its own migration cycle, so it
-  always leaves the fully-current (widened) schema behind for sibling
-  suites — matching production, where all migrations stay applied. Verified
-  order-independent by running the migration test, the full broad module
-  pass, the three isolated Pulse module specs, and the full HTTP suite in
-  varying orders.
+  constraint or changing application behaviour: inventory module and
+  migration suites now run against rollback-only transactions. Expected
+  constraint failures use nested savepoints, and each suite restores the
+  exact schema and rows it found without truncating sibling-suite data.
+
+## Addendum: confirmed-review retry policy
+
+Matching retry is permitted for `PENDING_REVIEW` only while every affected
+proposal is still `PENDING`. The service locks the snapshot and affected
+proposals before writing, recomputes affected groups through the existing
+Stage 5A.2 engine, updates or removes only those draft proposals, preserves
+unaffected proposals, and emits `IMPORT_PROPOSALS_REFRESHED`. Any reviewed or
+otherwise actioned affected proposal rejects the whole transaction. Terminal
+snapshot states are never retryable. This does not approve/apply proposals or
+mutate holdings, Medusa inventory, or product publication; Stage 5B.2 remains
+out of scope.

@@ -1,11 +1,11 @@
 import { MedusaApp } from "@medusajs/framework/modules-sdk"
 import { ContainerRegistrationKeys, createPgConnection } from "@medusajs/framework/utils"
 import { TRADING_CARD_INVENTORY_MODULE } from "../index"
-import { Migration20260716190000 } from "../migrations/Migration20260716190000"
 import { TRADING_CARDS_MODULE } from "../../trading-cards"
 import { importPulseCsvSnapshot } from "../../../workflows/trading-card-inventory/import-pulse-csv-snapshot"
 
 let pgConnection: ReturnType<typeof createPgConnection>
+let rootConnection: ReturnType<typeof createPgConnection>
 let medusaApp: Awaited<ReturnType<typeof MedusaApp>>
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let container: any
@@ -16,17 +16,9 @@ let cards: any
 
 const suffix = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 9)}`
 
-async function applyMigration(migrationClass: new (a: never, b: never) => { up(): Promise<void>; getQueries(): unknown[] }) {
-  const migration = new migrationClass(undefined as never, undefined as never)
-  await migration.up()
-  for (const query of migration.getQueries().map(String)) await pgConnection.raw(query)
-}
-
 beforeAll(async () => {
-  pgConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
-  // Only the newest migration this slice adds is re-applied here — see the
-  // same note in pulse-import-service-methods.integration.spec.ts.
-  await applyMigration(Migration20260716190000)
+  rootConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
+  pgConnection = await rootConnection.transaction() as never
   medusaApp = await MedusaApp({
     modulesConfig: {
       [TRADING_CARD_INVENTORY_MODULE]: { resolve: "./src/modules/trading-card-inventory" },
@@ -42,18 +34,11 @@ beforeAll(async () => {
 }, 60000)
 
 afterAll(async () => {
-  // Other integration specs in this shared, persistent test database (e.g.
-  // migration.integration.spec.ts) unconditionally re-run Stage 5A.2's
-  // Migration20260716150000, whose `up()` re-narrows the audit-action CHECK
-  // constraint to its pre-Slice-2 value list. Leaving an IMPORT_* audit row
-  // behind would make that constraint re-add fail for every later test file
-  // in the same run — clean up before closing the connection.
-  await pgConnection.raw(`delete from trading_card_inventory_audit_entry where action like 'IMPORT_%'`)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  await (pgConnection as any)?.context?.destroy()
-  await pgConnection?.destroy()
   await medusaApp?.onApplicationPrepareShutdown()
   await medusaApp?.onApplicationShutdown()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (pgConnection as any)?.rollback()
+  await rootConnection?.destroy()
 })
 
 async function createSource(overrides: Record<string, unknown> = {}) {
@@ -128,7 +113,8 @@ describe("importPulseCsvSnapshot (cross-module integration)", () => {
     expect(result.reconciliationSummary?.proposalCount).toBe(1)
 
     const { rows: matchRows } = await inventory.listSnapshotEntriesForAdmin(result.snapshotId, {}, { limit: 10, offset: 0 })
-    expect(matchRows[0].trading_card_variant_id).toBe(variant.id)
+    expect(matchRows[0].trading_card_variant_id).toBeNull()
+    expect(matchRows[0].matched_trading_card_variant_id).toBe(variant.id)
     expect(matchRows[0].matching_status).toBe("MATCHED")
 
     const trusted = await cards.findTrustedExternalReference("PULSE", fullProductId)

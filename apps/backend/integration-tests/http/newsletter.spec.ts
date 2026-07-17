@@ -1671,23 +1671,23 @@ describe("Admin trading-card-inventory", () => {
         displayName: `Reconciliation HTTP ${marker}`, provider: "PULSE", actor: "http-test", source: "MANUAL",
       })
       const snapshot = await inventory.createInventorySnapshot({
-        inventorySourceId: source.id, actor: "http-test", source: "MANUAL",
+        inventorySourceId: source.id as string, actor: "http-test", source: "MANUAL",
       })
       await inventory.addInventorySnapshotEntries({
-        snapshotId: snapshot.id, actor: "http-test", source: "MANUAL", entries: [
+        snapshotId: snapshot.id as string, actor: "http-test", source: "MANUAL", entries: [
           { providerReference: `${marker}-a`, providerReferenceType: "PULSE_PRODUCT_ID", tradingCardVariantId: `tcvar_${marker}_a`, quantity: 1, currencyCode: "GBP", unitAcquisitionCost: "1", unitMarketPrice: "2", unitSellingPrice: "3" },
           { providerReference: `${marker}-b`, providerReferenceType: "PULSE_PRODUCT_ID", tradingCardVariantId: null, quantity: 2, currencyCode: "GBP", unitAcquisitionCost: "1", unitMarketPrice: "2", unitSellingPrice: "3" },
         ],
       })
-      await inventory.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "VALIDATED", actor: "http-test", source: "MANUAL" })
-      await inventory.reconcileInventorySnapshot({ inventorySourceId: source.id, snapshotId: snapshot.id, actor: "http-test", source: "SYSTEM" })
+      await inventory.transitionInventorySnapshotStatus({ id: snapshot.id as string, targetStatus: "VALIDATED", actor: "http-test", source: "MANUAL" })
+      await inventory.reconcileInventorySnapshot({ inventorySourceId: source.id as string, snapshotId: snapshot.id as string, actor: "http-test", source: "SYSTEM" })
       return { source, snapshot }
     }
 
     it("returns authenticated, paginated, filtered, allow-listed proposal reads", async () => {
       const { snapshot } = await createReconciledSnapshot()
       const response = await app.getInventoryProposals({
-        inventorySnapshotId: snapshot.id, changeKind: "UNRESOLVED_VARIANT", limit: "1", offset: "0",
+        inventorySnapshotId: snapshot.id as string, changeKind: "UNRESOLVED_VARIANT", limit: "1", offset: "0",
       }, adminToken)
       expect(response.status).toBe(200)
       const body = await response.json()
@@ -1706,11 +1706,11 @@ describe("Admin trading-card-inventory", () => {
 
     it("returns reconciliation and proposal count summaries", async () => {
       const { snapshot } = await createReconciledSnapshot()
-      const reconciliationResponse = await app.getInventoryReconciliationSummary(snapshot.id, adminToken)
+      const reconciliationResponse = await app.getInventoryReconciliationSummary(snapshot.id as string, adminToken)
       expect(reconciliationResponse.status).toBe(200)
       expect(await reconciliationResponse.json()).toMatchObject({ snapshotId: snapshot.id, status: "PENDING_REVIEW", proposalCount: 2 })
 
-      const proposalResponse = await app.getInventoryProposalSummary({ inventorySnapshotId: snapshot.id }, adminToken)
+      const proposalResponse = await app.getInventoryProposalSummary({ inventorySnapshotId: snapshot.id as string }, adminToken)
       expect(proposalResponse.status).toBe(200)
       expect(await proposalResponse.json()).toMatchObject({
         inventorySnapshotId: snapshot.id, count: 2,
@@ -1832,6 +1832,29 @@ describe("Admin trading-card-inventory Pulse import", () => {
       expect(second).toMatchObject({ kind: "DUPLICATE", snapshotId: first.snapshotId })
     })
 
+    it("converges concurrent duplicate uploads without duplicate rows, proposals, or diagnostics", async () => {
+      const marker = uniqueMarker("concurrent-dup")
+      const source = await createSource(`Concurrent Duplicate Source ${marker}`)
+      const content = csvContent([csvRow(`card:sv1|066/196|holo|nm-${marker}`)])
+      const responses = await Promise.all(Array.from({ length: 3 }, () => app.postUploadCsv(
+        { content, filename: "import.csv", mimeType: "text/csv" }, { inventorySourceId: source.id as string }, adminToken,
+      )))
+      expect(responses.every((response) => [200, 201].includes(response.status))).toBe(true)
+      const bodies = await Promise.all(responses.map((response) => response.json()))
+      expect(new Set(bodies.map((body) => body.snapshotId)).size).toBe(1)
+      const snapshotId = bodies[0].snapshotId as string
+
+      const entries = await (await app.getImportSnapshotEntries(snapshotId, { limit: "100" }, adminToken)).json()
+      expect(entries.count).toBe(1)
+      const proposals = await (await app.getInventoryProposalSummary({ inventorySnapshotId: snapshotId }, adminToken)).json()
+      expect(proposals.count).toBe(1)
+      const diagnostics = await (await app.getImportSnapshotDiagnostics(snapshotId, { limit: "100" }, adminToken)).json()
+      const identities = diagnostics.diagnostics.map((diagnostic: Record<string, unknown>) => JSON.stringify([
+        diagnostic.snapshotEntryId, diagnostic.phase, diagnostic.code, diagnostic.severity, diagnostic.fieldRef, diagnostic.message,
+      ]))
+      expect(new Set(identities).size).toBe(identities.length)
+    }, 60_000)
+
     it("rejects a malformed CSV before any snapshot is created", async () => {
       const marker = uniqueMarker("malformed")
       const source = await createSource(`Malformed Source ${marker}`)
@@ -1868,6 +1891,18 @@ describe("Admin trading-card-inventory Pulse import", () => {
       )
       expect(response.status).toBe(413)
     }, 60_000)
+
+    it("bounds multipart field count and field size", async () => {
+      const file = { content: csvContent([csvRow(uniqueMarker("multipart"))]), filename: "import.csv", mimeType: "text/csv" }
+      const tooManyFields = Object.fromEntries(Array.from({ length: 9 }, (_, index) => [`field${index}`, "x"]))
+      const countResponse = await app.postUploadCsv(file, tooManyFields, adminToken)
+      expect(countResponse.status).toBe(400)
+      expect((await countResponse.json()).code).toMatch(/LIMIT_(FIELD_COUNT|PART_COUNT)/)
+
+      const sizeResponse = await app.postUploadCsv(file, { inventorySourceId: "x".repeat(1_025) }, adminToken)
+      expect(sizeResponse.status).toBe(400)
+      expect((await sizeResponse.json()).code).toBe("LIMIT_FIELD_VALUE")
+    })
 
     it("rejects an upload against an archived source", async () => {
       const marker = uniqueMarker("archived")
@@ -1906,6 +1941,7 @@ describe("Admin trading-card-inventory Pulse import", () => {
       expect(response.status).toBe(200)
       const body = await response.json()
       expect(body.summary).toMatchObject({ snapshotId, rowCount: 2 })
+      expect(body.summary.inventorySourceDisplayName).toMatch(/Fixture Source/)
       expect(body.summary.raw_fields).toBeUndefined()
     })
 
@@ -1936,7 +1972,7 @@ describe("Admin trading-card-inventory Pulse import", () => {
       expect(body.count).toBeGreaterThanOrEqual(1)
       for (const diagnostic of body.diagnostics) {
         expect(diagnostic.severity).toBe("WARNING")
-        expect(Object.keys(diagnostic).sort()).toEqual(["code", "fieldRef", "id", "message", "phase", "rowNumber", "severity"])
+        expect(Object.keys(diagnostic).sort()).toEqual(["code", "fieldRef", "id", "message", "phase", "rowNumber", "severity", "snapshotEntryId"])
       }
     })
   })
@@ -1952,9 +1988,22 @@ describe("Admin trading-card-inventory Pulse import", () => {
       )
       const { snapshotId } = await uploadResponse.json()
 
+      const pgConnection = app.container.resolve<{ raw: (query: string) => Promise<{ rows: Array<Record<string, string>> }> }>(
+        ContainerRegistrationKeys.PG_CONNECTION,
+      )
+      const mutationCounts = async () => (await pgConnection.raw(
+        `select
+           (select count(*)::text from trading_card_inventory_holding where deleted_at is null) as holdings,
+           (select count(*)::text from inventory_item where deleted_at is null) as inventory_items,
+           (select count(*)::text from inventory_level where deleted_at is null) as inventory_levels,
+           (select count(*)::text from product where deleted_at is null and status = 'published') as published_products`,
+      )).rows[0]
+      const beforeRetry = await mutationCounts()
+
       const response = await app.postRetryMatching(snapshotId, { reason: "manual retry check" }, adminToken)
       expect(response.status).toBe(200)
       expect((await response.json()).kind).toBe("IMPORTED")
+      expect(await mutationCounts()).toEqual(beforeRetry)
     })
 
     it("returns a safe not-found for a missing snapshot", async () => {
@@ -1972,11 +2021,11 @@ describe("Admin trading-card-inventory Pulse import", () => {
         inventorySourceId: source.id as string, actor: "http-test", source: "MANUAL",
       }) as Record<string, unknown>
       await inventory.addInventorySnapshotEntries({
-        snapshotId: snapshot.id, actor: "http-test", source: "MANUAL", entries: [
+        snapshotId: snapshot.id as string, actor: "http-test", source: "MANUAL", entries: [
           { providerReference: `${marker}-a`, providerReferenceType: "PULSE_PRODUCT_ID", tradingCardVariantId: null, quantity: 1, currencyCode: "GBP", unitAcquisitionCost: "1", unitMarketPrice: "2", unitSellingPrice: "3" },
         ],
       })
-      await inventory.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "VALIDATED", actor: "http-test", source: "MANUAL" })
+      await inventory.transitionInventorySnapshotStatus({ id: snapshot.id as string, targetStatus: "VALIDATED", actor: "http-test", source: "MANUAL" })
 
       const response = await app.postReconcileSnapshot(snapshot.id as string, {}, adminToken)
       expect(response.status).toBe(200)
@@ -2003,7 +2052,7 @@ describe("Admin trading-card-inventory Pulse import", () => {
       const snapshot = await inventory.createInventorySnapshot({
         inventorySourceId: source.id as string, actor: "http-test", source: "MANUAL",
       }) as Record<string, unknown>
-      await inventory.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "VALIDATED", actor: "http-test", source: "MANUAL" })
+      await inventory.transitionInventorySnapshotStatus({ id: snapshot.id as string, targetStatus: "VALIDATED", actor: "http-test", source: "MANUAL" })
 
       const response = await app.postReconcileSnapshot(
         snapshot.id as string, { previousApprovedSnapshotId: "tcisnap_not_a_real_baseline" }, adminToken,

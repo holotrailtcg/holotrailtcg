@@ -126,13 +126,14 @@ const ImportsNewPage = () => {
           ) : (
             <div className="flex flex-col gap-3">
               <Input
+                aria-label="Source name"
                 placeholder="Source name (e.g. Pulse export — July 2026)"
                 value={newSourceDisplayName}
                 onChange={(event) => setNewSourceDisplayName(event.target.value)}
                 disabled={isUploading}
               />
               <Select value={newSourceProvider} onValueChange={setNewSourceProvider}>
-                <Select.Trigger>
+                <Select.Trigger aria-label="Provider">
                   <Select.Value placeholder="Provider" />
                 </Select.Trigger>
                 <Select.Content>
@@ -144,7 +145,7 @@ const ImportsNewPage = () => {
                 </Select.Content>
               </Select>
               <Select value={newSourceLanguage} onValueChange={setNewSourceLanguage}>
-                <Select.Trigger>
+                <Select.Trigger aria-label="Language (optional)">
                   <Select.Value placeholder="Language (optional)" />
                 </Select.Trigger>
                 <Select.Content>
@@ -156,6 +157,7 @@ const ImportsNewPage = () => {
                 </Select.Content>
               </Select>
               <Input
+                aria-label="Default currency code (optional)"
                 placeholder="Default currency code (optional, e.g. GBP)"
                 value={newSourceDefaultCurrencyCode}
                 onChange={(event) => setNewSourceDefaultCurrencyCode(event.target.value.toUpperCase())}

@@ -34,8 +34,9 @@ transaction spans the whole run:
    before a snapshot row ever exists.
 3. **Create or return the draft snapshot** — a workflow-level decision (not a
    service decision): looks up a live snapshot by `(source, content_hash)`
-   first; only creates one if nothing was found. A duplicate short-circuits
-   to `DUPLICATE` before any entry/diagnostic/match/proposal work runs.
+   first; only creates one if nothing was found. A complete live duplicate
+   returns `DUPLICATE`; an interrupted `DRAFT` resumes idempotently and an
+   interrupted `VALIDATED` snapshot continues through file-free retry.
 4. **Parse and persist entries** — pure per-row parsing, then one atomic
    batch insert of immutable entries plus their parse-time diagnostics.
 5. **Match entries** — batched (~250 rows per persistence transaction), not
@@ -98,6 +99,11 @@ A retry against an already-partially-imported snapshot
 rewrites a persisted entry, and only re-runs matching for entries whose
 match is missing or not `MATCHED`.
 
+`PENDING_REVIEW` is retryable only while every affected proposal remains
+`PENDING`. Match writes and affected Stage 5A.2 proposal refreshes share one
+transaction and are refused before mutation if an affected proposal has been
+reviewed or otherwise actioned. Terminal snapshot states are never retryable.
+
 ## Reconciliation hand-off
 
 The existing Stage 5A.2 `reconcileInventorySnapshotWithPriceLocks` function is
@@ -116,7 +122,8 @@ whenever the snapshot reaches `VALIDATED` and trusts its existing behaviour.
   create-or-update, with `retry_count`/`last_retried_at` bookkeeping.
 - `InventorySnapshotEntryDiagnostic` is append-only in both directions:
   parse-time diagnostics are never revisited, and matching-time diagnostics
-  are only ever appended, never replaced.
+  are appended only when their semantic identity is new, so retry cannot
+  duplicate an existing diagnostic.
 
 ## Trusted-reference policy
 

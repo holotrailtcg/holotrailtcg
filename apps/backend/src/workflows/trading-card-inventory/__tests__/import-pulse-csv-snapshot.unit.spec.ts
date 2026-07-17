@@ -15,6 +15,7 @@ function csvBuffer(rows: string[] = [VALID_CSV_ROW]): Buffer {
 function fakeInventory(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     retrieveInventorySource: jest.fn(async (id: string) => ({ id, status: "ACTIVE", language: "EN" })),
+    retrieveInventorySnapshot: jest.fn(async (id: string) => ({ id, inventory_source_id: "tcisrc_1", status: "VALIDATED", row_count: 1 })),
     createOrGetInventorySource: jest.fn(async () => ({ source: { id: "tcisrc_new", status: "ACTIVE", language: "EN" }, created: true })),
     findLiveSnapshotByContentHash: jest.fn(async () => null),
     createDraftSnapshot: jest.fn(async () => ({ id: "tcisnap_1" })),
@@ -33,6 +34,10 @@ function fakeInventory(overrides: Partial<Record<string, unknown>> = {}) {
     listSnapshotEntriesForAdmin: jest.fn(async () => ({ rows: [], count: 0 })),
     listSnapshotVariantIds: jest.fn(async () => []),
     reconcileInventorySnapshot: jest.fn(async () => ({
+      snapshotId: "tcisnap_1", inventorySourceId: "tcisrc_1", status: "PENDING_REVIEW",
+      baselineSnapshotId: null, comparedAt: new Date(), proposalCount: 1, proposalCounts: { NEW_HOLDING: 1 },
+    })),
+    getReconciliationSummary: jest.fn(async () => ({
       snapshotId: "tcisnap_1", inventorySourceId: "tcisrc_1", status: "PENDING_REVIEW",
       baselineSnapshotId: null, comparedAt: new Date(), proposalCount: 1, proposalCounts: { NEW_HOLDING: 1 },
     })),
@@ -69,7 +74,15 @@ const baseInput = {
 
 describe("importPulseCsvSnapshot", () => {
   it("imports a fresh upload against an existing active source through to reconciliation", async () => {
-    const inventory = fakeInventory()
+    const inventory = fakeInventory({
+      getSnapshotImportSummary: jest.fn()
+        .mockResolvedValueOnce({ status: "DRAFT", byOutcome: { VALID: 1 } })
+        .mockResolvedValue({
+          snapshotId: "tcisnap_1", inventorySourceId: "tcisrc_1", status: "PENDING_REVIEW", originalFilename: "f.csv",
+          contentHash: "hash", rowCount: 1, byOutcome: { VALID: 1 }, byMatchingStatus: { MATCHED: 1 },
+          byDiagnosticSeverity: {}, uniqueProviderReferences: 1, duplicateRowCount: 0,
+        }),
+    })
     const cards = fakeCards()
     const result = await importPulseCsvSnapshot(fakeContainer(inventory, cards), baseInput)
     expect(result.kind).toBe("IMPORTED")
@@ -97,6 +110,14 @@ describe("importPulseCsvSnapshot", () => {
     expect(inventory.findLiveSnapshotByContentHash).not.toHaveBeenCalled()
   })
 
+  it("rejects supplying both source-selection paths", async () => {
+    const inventory = fakeInventory()
+    const input = { ...baseInput, newSourceDisplayName: "Also New", newSourceProvider: "PULSE" }
+    await expect(importPulseCsvSnapshot(fakeContainer(inventory, fakeCards()), input)).rejects.toThrow(/exactly one/i)
+    expect(inventory.retrieveInventorySource).not.toHaveBeenCalled()
+    expect(inventory.createOrGetInventorySource).not.toHaveBeenCalled()
+  })
+
   it("short-circuits to SOURCE_ARCHIVED and never touches file validation or snapshot creation", async () => {
     const inventory = fakeInventory({
       retrieveInventorySource: jest.fn(async (id: string) => ({ id, status: "ARCHIVED", language: "EN" })),
@@ -116,6 +137,17 @@ describe("importPulseCsvSnapshot", () => {
     expect(result.kind).toBe("VALIDATION_FAILED")
     expect(inventory.findLiveSnapshotByContentHash).not.toHaveBeenCalled()
     expect(inventory.createDraftSnapshot).not.toHaveBeenCalled()
+  })
+
+  it("does not create a new source when file validation fails", async () => {
+    const inventory = fakeInventory()
+    const input = {
+      ...baseInput, inventorySourceId: undefined, newSourceDisplayName: "Unused Source", newSourceProvider: "PULSE",
+      mimeType: "application/pdf",
+    }
+    const result = await importPulseCsvSnapshot(fakeContainer(inventory, fakeCards()), input)
+    expect(result.kind).toBe("VALIDATION_FAILED")
+    expect(inventory.createOrGetInventorySource).not.toHaveBeenCalled()
   })
 
   it("returns VALIDATION_FAILED for a missing required header", async () => {
@@ -149,6 +181,40 @@ describe("importPulseCsvSnapshot", () => {
     const result = await importPulseCsvSnapshot(fakeContainer(inventory, cards), baseInput)
     expect(result).toMatchObject({ kind: "DUPLICATE", snapshotId: "tcisnap_raced" })
     expect(inventory.addInventorySnapshotEntriesWithDiagnostics).not.toHaveBeenCalled()
+  })
+
+  it("resumes a partially persisted DRAFT duplicate", async () => {
+    const inventory = fakeInventory({
+      findLiveSnapshotByContentHash: jest.fn(async () => ({ id: "tcisnap_1", status: "DRAFT" })),
+      getSnapshotImportSummary: jest.fn()
+        .mockResolvedValueOnce({ status: "DRAFT" })
+        .mockResolvedValue({
+          snapshotId: "tcisnap_1", inventorySourceId: "tcisrc_1", status: "PENDING_REVIEW", originalFilename: "f.csv",
+          contentHash: "hash", rowCount: 1, byOutcome: { VALID: 1 }, byMatchingStatus: { UNMATCHED: 1 },
+          byDiagnosticSeverity: {}, uniqueProviderReferences: 1, duplicateRowCount: 0,
+        }),
+    })
+    const result = await importPulseCsvSnapshot(fakeContainer(inventory, fakeCards()), baseInput)
+    expect(result.kind).toBe("IMPORTED")
+    expect(inventory.createDraftSnapshot).not.toHaveBeenCalled()
+    expect(inventory.addInventorySnapshotEntriesWithDiagnostics).toHaveBeenCalledTimes(1)
+  })
+
+  it("continues a VALIDATED duplicate through file-free retry", async () => {
+    const inventory = fakeInventory({
+      findLiveSnapshotByContentHash: jest.fn(async () => ({ id: "tcisnap_1", status: "VALIDATED" })),
+      getSnapshotImportSummary: jest.fn()
+        .mockResolvedValueOnce({ status: "VALIDATED" })
+        .mockResolvedValue({
+          snapshotId: "tcisnap_1", inventorySourceId: "tcisrc_1", status: "PENDING_REVIEW", originalFilename: "f.csv",
+          contentHash: "hash", rowCount: 1, byOutcome: { VALID: 1 }, byMatchingStatus: { MATCHED: 1 },
+          byDiagnosticSeverity: {}, uniqueProviderReferences: 1, duplicateRowCount: 0,
+        }),
+    })
+    const result = await importPulseCsvSnapshot(fakeContainer(inventory, fakeCards()), baseInput)
+    expect(result.kind).toBe("IMPORTED")
+    expect(inventory.addInventorySnapshotEntriesWithDiagnostics).not.toHaveBeenCalled()
+    expect(inventory.reconcileInventorySnapshot).toHaveBeenCalledTimes(1)
   })
 
   it("moves a snapshot with zero usable rows to FAILED and never invokes reconciliation", async () => {

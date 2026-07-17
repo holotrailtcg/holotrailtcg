@@ -59,7 +59,9 @@ export function aggregateSnapshotEntries(entries: SnapshotEntryInput[]): Map<str
       throw new MedusaError(MedusaError.Types.INVALID_DATA, "Snapshot quantity must be a non-negative safe integer")
     }
     const key = groupKey(entry)
-    buckets.set(key, [...(buckets.get(key) ?? []), entry])
+    const bucket = buckets.get(key)
+    if (bucket) bucket.push(entry)
+    else buckets.set(key, [entry])
   }
 
   return new Map([...buckets.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([key, rows]) => {

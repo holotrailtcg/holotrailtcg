@@ -12,9 +12,8 @@ export interface ParseMoneyOptions {
  * Cleans and validates a Pulse money cell (e.g. `£1.00`, `£-0.05`, blank) into
  * Stage 5A.2's decimal-string grammar. Blank is tracked as "missing", never
  * silently coerced to zero; `£0.00` is a legitimate "zero" value. Rejects
- * anything with unexpected symbols, thousands separators are stripped
- * (Pulse exports have not been observed to use them, but stripping is
- * harmless and defensive), and caps fractional precision at 6 places to
+ * anything with unexpected symbols, validates conventional thousands
+ * grouping before stripping separators, and caps fractional precision at 6 places to
  * match the reconciliation engine's own minimum output scale.
  */
 export function parseMoneyField(raw: string | undefined | null, options: ParseMoneyOptions = {}): ParsedMoney {
@@ -22,9 +21,12 @@ export function parseMoneyField(raw: string | undefined | null, options: ParseMo
   if (trimmed === "") return { status: "missing", canonical: null }
 
   const withoutSymbol = trimmed.replace(CURRENCY_SYMBOL_PATTERN, "").trim()
-  const withoutCommas = withoutSymbol.replace(/,/g, "")
-  const negative = withoutCommas.startsWith("-")
-  const magnitude = negative ? withoutCommas.slice(1) : withoutCommas
+  const negative = withoutSymbol.startsWith("-")
+  const unsigned = negative ? withoutSymbol.slice(1) : withoutSymbol
+  if (unsigned.includes(",") && !/^\d{1,3}(,\d{3})*(\.\d+)?$/.test(unsigned)) {
+    return { status: "invalid", canonical: null }
+  }
+  const magnitude = unsigned.replace(/,/g, "")
 
   if (!/^\d+(\.\d+)?$/.test(magnitude)) return { status: "invalid", canonical: null }
   const [, fraction = ""] = magnitude.split(".")

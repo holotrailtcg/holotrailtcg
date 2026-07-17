@@ -22,6 +22,7 @@ function mockResponse(body: unknown, status = 200) {
 
 const BASE_SUMMARY = {
   snapshotId: "tcisnap_1", inventorySourceId: "tcisrc_1", status: "VALIDATED",
+  inventorySourceDisplayName: "Pulse London", inventorySourceLanguage: "EN",
   originalFilename: "import.csv", contentHash: "abc123", rowCount: 2,
   byOutcome: { VALID: 2 } as Record<string, number>,
   byMatchingStatus: { UNMATCHED: 1, MATCHED: 1 } as Record<string, number>,
@@ -44,7 +45,7 @@ const BASE_ENTRIES = {
 
 const BASE_DIAGNOSTICS = {
   diagnostics: [
-    { id: "tcisediag_1", rowNumber: 1, phase: "MATCHING", code: "NO_CANDIDATE", severity: "WARNING", fieldRef: null, message: "No candidate variant found" },
+    { id: "tcisediag_1", snapshotEntryId: "tcisentry_1", rowNumber: 1, phase: "MATCHING", code: "NO_CANDIDATE", severity: "WARNING", fieldRef: null, message: "No candidate variant found" },
   ],
   count: 1, limit: 20, offset: 0,
 }
@@ -108,6 +109,12 @@ describe("ImportsSnapshotDetailPage", () => {
     expect(screen.queryByRole("button", { name: "Trigger reconciliation" })).not.toBeInTheDocument()
   })
 
+  it("hides retry for a terminal snapshot even when rows remain outstanding", async () => {
+    renderPage({ status: "FAILED" })
+    await screen.findByText("import.csv")
+    expect(screen.queryByRole("button", { name: /Retry matching/ })).not.toBeInTheDocument()
+  })
+
   it("retries matching and shows a success toast", async () => {
     const user = userEvent.setup()
     const { fetchMock } = renderPage()
@@ -147,6 +154,20 @@ describe("ImportsSnapshotDetailPage", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("outcome=INVALID"),
       { credentials: "include" }
+    ))
+  })
+
+  it("links a diagnostic row back to its snapshot entry", async () => {
+    const user = userEvent.setup()
+    const { fetchMock } = renderPage()
+    await screen.findByText("No candidate variant found")
+    fetchMock.mockClear()
+
+    await user.click(screen.getAllByRole("button", { name: "1" })[0])
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("snapshotEntryId=tcisentry_1"),
+      { credentials: "include" },
     ))
   })
 })

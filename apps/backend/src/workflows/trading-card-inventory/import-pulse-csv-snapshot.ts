@@ -206,29 +206,76 @@ export async function importPulseCsvSnapshot(
     })
   }
 
+  const hasExistingSource = Boolean(input.inventorySourceId)
+  const hasAnyNewSourceField = Boolean(input.newSourceDisplayName || input.newSourceProvider || input.newSourceLanguage || input.newSourceDefaultCurrencyCode)
+  const hasCompleteNewSource = Boolean(input.newSourceDisplayName && input.newSourceProvider)
+  if (hasExistingSource === hasCompleteNewSource || (hasAnyNewSourceField && !hasCompleteNewSource)) {
+    throw new MedusaError(
+      MedusaError.Types.INVALID_DATA,
+      "Provide exactly one inventory source path: an existing source ID or complete new-source details",
+    )
+  }
+
   let inventorySourceId: string
   let sourceLanguage: string | null
-  try {
-    const resolved = await resolveInventorySource(inventory, input)
-    inventorySourceId = resolved.inventorySourceId
-    sourceLanguage = resolved.sourceLanguage
-  } catch (error) {
-    if (error instanceof SourceArchivedError) return { kind: "SOURCE_ARCHIVED", inventorySourceId: input.inventorySourceId }
-    throw error
-  }
-
   let file: ValidatedFile
+  const validateFile = () => {
+    try {
+      return validatePulseFile(input)
+    } catch (error) {
+      if (error instanceof ValidationFailedError) return error
+      throw error
+    }
+  }
+
   try {
-    file = validatePulseFile(input)
+    if (hasExistingSource) {
+      const resolved = await resolveInventorySource(inventory, input)
+      inventorySourceId = resolved.inventorySourceId
+      sourceLanguage = resolved.sourceLanguage
+      const validated = validateFile()
+      if (validated instanceof ValidationFailedError) return { kind: "VALIDATION_FAILED", reason: validated.message, diagnostics: [] }
+      file = validated
+    } else {
+      const validated = validateFile()
+      if (validated instanceof ValidationFailedError) return { kind: "VALIDATION_FAILED", reason: validated.message, diagnostics: [] }
+      file = validated
+      const resolved = await resolveInventorySource(inventory, input)
+      inventorySourceId = resolved.inventorySourceId
+      sourceLanguage = resolved.sourceLanguage
+    }
   } catch (error) {
-    if (error instanceof ValidationFailedError) return { kind: "VALIDATION_FAILED", reason: error.message, diagnostics: [] }
+    if (error instanceof SourceArchivedError || (MedusaError.isMedusaError(error) && error.type === MedusaError.Types.NOT_ALLOWED)) {
+      return { kind: "SOURCE_ARCHIVED", inventorySourceId: input.inventorySourceId }
+    }
     throw error
   }
 
-  const { snapshotId, created } = await createOrReturnDraftSnapshot(inventory, input, inventorySourceId, file.contentHash)
+  let snapshotResult: { snapshotId: string; created: boolean }
+  try {
+    snapshotResult = await createOrReturnDraftSnapshot(inventory, input, inventorySourceId, file.contentHash)
+  } catch (error) {
+    if (MedusaError.isMedusaError(error) && error.type === MedusaError.Types.NOT_ALLOWED) {
+      return { kind: "SOURCE_ARCHIVED", inventorySourceId }
+    }
+    throw error
+  }
+  const { snapshotId, created } = snapshotResult
   if (!created) {
     const summary = await inventory.getSnapshotImportSummary(snapshotId)
-    return { kind: "DUPLICATE", snapshotId, inventorySourceId, snapshotStatus: String(summary.status), importSummary: summary as ImportSummary }
+    if (summary.status === INVENTORY_SNAPSHOT_STATUS.VALIDATED) {
+      return retryPulseSnapshotMatching(container, {
+        actor: input.actor, source: input.source, reason: input.reason, snapshotId,
+        previousApprovedSnapshotId: input.previousApprovedSnapshotId ?? null,
+      })
+    }
+    if (summary.status === INVENTORY_SNAPSHOT_STATUS.DRAFT) {
+      // Resume below using the same validated bytes. Entry persistence is
+      // create-or-return under the snapshot lock, so concurrent resumptions
+      // converge on the same immutable row set.
+    } else {
+      return { kind: "DUPLICATE", snapshotId, inventorySourceId, snapshotStatus: String(summary.status), importSummary: summary as ImportSummary }
+    }
   }
 
   const { rows, entryIds } = await parseAndPersistEntries(inventory, input, snapshotId, file, sourceLanguage)

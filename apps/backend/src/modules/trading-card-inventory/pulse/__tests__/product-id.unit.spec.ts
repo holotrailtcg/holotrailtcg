@@ -17,6 +17,11 @@ describe("parseProductId", () => {
     expect(result.conditionCandidate).toBe("lp")
   })
 
+  it("preserves an unknown trailing condition for validation diagnostics", () => {
+    const result = parseProductId("card:base3|53/62|null|null|null|null|shopworn")
+    expect(result.conditionCandidate).toBe("shopworn")
+  })
+
   it("does not trust segment 4 as always null (promo text observed there in real exports)", () => {
     const result = parseProductId("card:wc23cl|139/195|null|Colorless Lugia: Gabriel Fernandez|null|null")
     expect(result.wellFormed).toBe(true)

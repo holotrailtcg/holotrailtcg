@@ -2,8 +2,7 @@ import { createPgConnection } from "@medusajs/framework/utils"
 import { Migration20260716090000 } from "../migrations/Migration20260716090000"
 import { Migration20260716150000 } from "../migrations/Migration20260716150000"
 import { Migration20260716180000 } from "../migrations/Migration20260716180000"
-import { Migration20260716190000 } from "../migrations/Migration20260716190000"
-
+let rootConnection: ReturnType<typeof createPgConnection>
 let pgConnection: ReturnType<typeof createPgConnection>
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -70,56 +69,19 @@ const catalogSnapshot = async () => ({
   `, [tableNames])),
 })
 
-/**
- * This file's migration list intentionally excludes
- * `Migration20260716190000` (the audit-action CHECK-constraint widener that
- * adds the Stage 5B.1 `IMPORT_*` actions — covered separately by
- * `import-audit-action-migration.integration.spec.ts`). Every other suite
- * that performs a real Pulse import (the HTTP integration suite, the Pulse
- * workflow/service module specs) applies that widening and leaves genuine
- * `IMPORT_*` rows in the shared `trading_card_inventory_audit_entry` table
- * behind — there is no per-suite database in this project (Neon-backed,
- * single persistent test database; see docs/decisions/0001). Reapplying
- * this file's own (narrower, pre-widening) `action` CHECK constraint via its
- * `up()` then fails against those rows, even though nothing this suite does
- * is wrong. Truncating only the tables this file's own three migrations
- * create/own, once, before any assertion runs, makes the whole-schema
- * equality assertions below independent of whatever any other suite has
- * already run against this same database — a table-scoped cleanup, not a
- * database reset (see docs/operations/environment-variables.md's "never
- * reset, drop or reseed a database" guidance, which this respects: the
- * tables themselves are untouched, and this file's own `down()` already
- * drops every one of them unconditionally as part of its normal cycle).
- */
-async function truncateOwnedTablesIfPresent(): Promise<void> {
-  for (const tableName of tableNames) {
-    const [{ to_regclass: exists }] = rows(await pgConnection.raw(`select to_regclass('public.${tableName}') as to_regclass`))
-    if (exists) await pgConnection.raw(`truncate table "${tableName}" cascade`)
-  }
-}
-
+/** Migration DDL runs inside one rollback-only transaction, preserving every
+ * schema object and row that belonged to another suite before this test. */
 beforeAll(async () => {
-  pgConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
-  await truncateOwnedTablesIfPresent()
+  rootConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
+  pgConnection = await rootConnection.transaction() as never
+  await executeMigration("down")
 })
 
 afterAll(async () => {
-  // Always leave the schema in the fully-current "up" (applied) state for
-  // other test files/module specs that expect these tables to exist —
-  // including `Migration20260716190000`'s audit-action CHECK-constraint
-  // widening, which this file's own migration list doesn't own or assert on
-  // (see `import-audit-action-migration.integration.spec.ts` for that), but
-  // whose absence would otherwise leave every sibling suite's real Pulse
-  // imports unable to insert their own `IMPORT_*` audit rows after this file
-  // runs.
-  await executeMigration("up")
-  const widenAuditAction = new Migration20260716190000(undefined as never, undefined as never)
-  await widenAuditAction.up()
-  for (const query of widenAuditAction.getQueries().map(String)) await pgConnection.raw(query)
-  widenAuditAction.reset()
+  await (pgConnection as unknown as { rollback: () => Promise<void> }).rollback()
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  await (pgConnection as any)?.context?.destroy()
-  await pgConnection?.destroy()
+  await (rootConnection as any)?.context?.destroy()
+  await rootConnection?.destroy()
 })
 
 describe("Stage 5A inventory domain migrations", () => {
@@ -151,10 +113,10 @@ describe("Stage 5A inventory domain migrations", () => {
       `insert into trading_card_inventory_source (id, display_name, normalized_name, provider) values (?, ?, ?, 'PULSE')`,
       [sourceId, "Migration Test Source", `migration test source ${sourceId}`]
     )
-    await expect(pgConnection.raw(
+    await expect(pgConnection.transaction((transaction) => transaction.raw(
       `insert into trading_card_inventory_holding (id, inventory_source_id, trading_card_variant_id, quantity) values (?, ?, ?, -1)`,
       [`tcihold_${Date.now().toString(36)}`, sourceId, `tcvar_${Date.now().toString(36)}`]
-    )).rejects.toThrow(/quantity_non_negative|check constraint/i)
+    ))).rejects.toThrow(/quantity_non_negative|check constraint/i)
     await pgConnection.raw(`delete from trading_card_inventory_source where id = ?`, [sourceId])
   }, 60000)
 

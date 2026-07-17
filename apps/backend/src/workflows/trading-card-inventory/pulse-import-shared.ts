@@ -45,24 +45,15 @@ export function toCardsRecordOrigin(source: string): "MANUAL" | "TCGDEX" | "PULS
  * not modified here) — any batching happens inside the trading-cards read
  * methods themselves.
  *
- * `findTrustedExternalReference` validates its identifier against
- * `providerIdentifierSchema` (a TCGdex-oriented, URL-safe-slug validator
- * that rejects whitespace) — but a Pulse provider reference legitimately
- * embeds verbatim CSV tokens like a material name ("Reverse Holo", "Poké
- * Ball") that contain spaces. Rather than loosen that shared, cross-module
- * validator (used for TCGdex card/set identifiers elsewhere), a Pulse
- * reference that fails it is treated the same as "no trusted reference
- * found" here — the row still proceeds to attribute-based candidate
- * matching / `REVIEW_REQUIRED` instead of the request failing outright.
+ * `findTrustedExternalReference` applies a bounded Pulse-specific identifier
+ * schema, since real references embed material names such as "Reverse Holo".
+ * Malformed references remain validation errors; only a genuine lookup miss
+ * proceeds to attribute-based matching.
  */
 export function buildTradingCardMatchLookup(cards: TradingCardsModuleService): TradingCardMatchLookup {
   return {
     findTrustedPulseReference: async (productId) => {
-      try {
-        return await cards.findTrustedExternalReference(EXTERNAL_PROVIDER.PULSE, productId)
-      } catch {
-        return null
-      }
+      return cards.findTrustedExternalReference(EXTERNAL_PROVIDER.PULSE, productId)
     },
     findCandidateVariants: (input) => cards.findVariantCandidatesForPulseMatch(input),
   }
@@ -112,8 +103,11 @@ export async function matchAndPersistEntries(
   input: AuditContext,
   snapshotId: string,
   items: Array<{ entryId: string; row: ParsedPulseRow }>,
+  options: { refreshPendingProposals?: boolean; baselineSnapshotId?: string | null } = {},
 ): Promise<void> {
   const lookup = buildTradingCardMatchLookup(cards)
+  const pendingBatchItems: RecordSnapshotEntryMatchBatchItem[] = []
+  const pendingTrustedReferences: Array<{ row: ParsedPulseRow; tradingCardVariantId: string }> = []
   for (let offset = 0; offset < items.length; offset += MATCH_CHUNK_SIZE) {
     const chunk = items.slice(offset, offset + MATCH_CHUNK_SIZE)
     const matchable = chunk.filter(({ row }) => MATCHABLE_OUTCOMES.includes(row.outcome))
@@ -122,6 +116,10 @@ export async function matchAndPersistEntries(
     for (let index = 0; index < matchable.length; index += 1) {
       const outcome = outcomes[index]
       if (outcome.shouldPersistTrustedReference && outcome.tradingCardVariantId) {
+        if (options.refreshPendingProposals) {
+          pendingTrustedReferences.push({ row: matchable[index].row, tradingCardVariantId: outcome.tradingCardVariantId })
+          continue
+        }
         const variant = await cards.retrieveTradingCardVariant(outcome.tradingCardVariantId)
         await cards.upsertExternalReference({
           actor: input.actor, source: toCardsRecordOrigin(input.source), reason: input.reason,
@@ -141,10 +139,35 @@ export async function matchAndPersistEntries(
         severity: diagnostic.severity, fieldRef: diagnostic.fieldRef, message: diagnostic.message,
       })),
     }))
+    if (options.refreshPendingProposals) pendingBatchItems.push(...batchItems)
+    else {
+      await inventory.recordSnapshotEntryMatches({
+        actor: input.actor, source: input.source, reason: input.reason,
+        inventorySnapshotId: snapshotId, entries: batchItems,
+      })
+    }
+  }
+  if (options.refreshPendingProposals && pendingBatchItems.length > 0) {
+    const snapshotIds = [snapshotId, options.baselineSnapshotId].filter((id): id is string => Boolean(id))
+    const variantIds = new Set(await inventory.listSnapshotVariantIds(snapshotIds))
+    for (const item of pendingBatchItems) {
+      if (item.tradingCardVariantId) variantIds.add(item.tradingCardVariantId)
+    }
+    const variants = variantIds.size > 0 ? await cards.listTradingCardVariants({ id: [...variantIds] }) : []
     await inventory.recordSnapshotEntryMatches({
       actor: input.actor, source: input.source, reason: input.reason,
-      inventorySnapshotId: snapshotId, entries: batchItems,
+      inventorySnapshotId: snapshotId, entries: pendingBatchItems, refreshPendingProposals: true,
+      priceLockedVariantIds: variants.filter((variant) => variant.price_locked).map((variant) => variant.id),
     })
+    for (const reference of pendingTrustedReferences) {
+      const variant = await cards.retrieveTradingCardVariant(reference.tradingCardVariantId)
+      await cards.upsertExternalReference({
+        actor: input.actor, source: toCardsRecordOrigin(input.source), reason: input.reason,
+        tradingCardId: variant.trading_card_id as string, tradingCardVariantId: reference.tradingCardVariantId,
+        provider: EXTERNAL_PROVIDER.PULSE, providerIdentifier: reference.row.providerReference,
+        provenance: EXTERNAL_REFERENCE_PROVENANCE.TRUSTED_MANUAL,
+      })
+    }
   }
   await inventory.recordImportLifecycleAudit({
     actor: input.actor, source: input.source, reason: input.reason,
@@ -158,6 +181,9 @@ export async function transitionSnapshotStatus(
   snapshotId: string,
 ): Promise<{ status: string }> {
   const summary = await inventory.getSnapshotImportSummary(snapshotId)
+  if (summary.status !== INVENTORY_SNAPSHOT_STATUS.DRAFT) {
+    return { status: String(summary.status) }
+  }
   const usableRowCount = Object.entries(summary.byOutcome)
     .filter(([outcome]) => outcome !== INVENTORY_SNAPSHOT_ENTRY_OUTCOME.INVALID && outcome !== INVENTORY_SNAPSHOT_ENTRY_OUTCOME.SKIPPED)
     .reduce((sum, [, count]) => sum + count, 0)
@@ -252,13 +278,21 @@ export async function retryPulseSnapshotMatching(
   const sourceRow = await inventory.retrieveInventorySource(inventorySourceId)
   const sourceLanguage = (sourceRow.language as string | null) ?? null
 
+  if (![INVENTORY_SNAPSHOT_STATUS.DRAFT, INVENTORY_SNAPSHOT_STATUS.VALIDATED, INVENTORY_SNAPSHOT_STATUS.PENDING_REVIEW]
+    .includes(snapshot.status as never)) {
+    throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Matching cannot be retried for this snapshot status")
+  }
+
   if (!snapshot.row_count) {
     throw new MedusaError(MedusaError.Types.INVALID_DATA, "Cannot retry a snapshot with no persisted entries; re-upload the file")
   }
 
   const itemsNeedingMatch = await loadEntriesNeedingMatch(inventory, snapshotId, sourceLanguage)
   if (itemsNeedingMatch.length > 0) {
-    await matchAndPersistEntries(inventory, cards, input, snapshotId, itemsNeedingMatch)
+    await matchAndPersistEntries(inventory, cards, input, snapshotId, itemsNeedingMatch, {
+      refreshPendingProposals: snapshot.status === INVENTORY_SNAPSHOT_STATUS.PENDING_REVIEW,
+      baselineSnapshotId: (snapshot.reconciled_against_snapshot_id as string | null) ?? null,
+    })
   }
 
   if (snapshot.status === INVENTORY_SNAPSHOT_STATUS.DRAFT) {
@@ -270,8 +304,10 @@ export async function retryPulseSnapshotMatching(
 
   const current = await inventory.retrieveInventorySnapshot(snapshotId)
   let reconciliationSummary: ReconciliationSummary | undefined
-  if (current.status === INVENTORY_SNAPSHOT_STATUS.VALIDATED || current.status === INVENTORY_SNAPSHOT_STATUS.PENDING_REVIEW) {
+  if (current.status === INVENTORY_SNAPSHOT_STATUS.VALIDATED) {
     reconciliationSummary = await invokeReconciliation(container, inventory, input, inventorySourceId, snapshotId)
+  } else if (current.status === INVENTORY_SNAPSHOT_STATUS.PENDING_REVIEW) {
+    reconciliationSummary = await inventory.getReconciliationSummary(snapshotId) as ReconciliationSummary
   }
 
   const importSummary = await inventory.getSnapshotImportSummary(snapshotId)

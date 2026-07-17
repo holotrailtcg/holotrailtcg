@@ -4,7 +4,15 @@ import { PULSE_FILE_LIMITS } from "../../../../modules/trading-card-inventory/pu
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: PULSE_FILE_LIMITS.MAX_FILE_SIZE_BYTES, files: 1 },
+  limits: {
+    fileSize: PULSE_FILE_LIMITS.MAX_FILE_SIZE_BYTES,
+    files: 1,
+    fields: 8,
+    parts: 9,
+    fieldSize: 1_024,
+    fieldNameSize: 64,
+    headerPairs: 32,
+  },
 }).single("file")
 
 /**

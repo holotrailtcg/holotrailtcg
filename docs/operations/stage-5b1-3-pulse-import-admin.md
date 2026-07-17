@@ -60,24 +60,25 @@ calls a **dedicated, file-free** `retryPulseSnapshotMatchingWorkflow` with a
 narrow input (`{ snapshotId, actor, source, reason?,
 previousApprovedSnapshotId? }`) — never the upload workflow with placeholder
 file values. This workflow re-runs matching only for entries whose match is
-missing or not `MATCHED`, then re-invokes reconciliation if the snapshot
-reaches `VALIDATED`/`PENDING_REVIEW`. The underlying logic is unchanged from
-Slice 2's original `retryOfSnapshotId` input path (still supported on the
-main workflow for backward compatibility) — both call the same extracted,
-shared implementation in `pulse-import-shared.ts`.
+missing or not `MATCHED`. For `PENDING_REVIEW`, it atomically recomputes the
+affected Stage 5A.2 groups and updates/removes only still-pending draft
+proposals, preserving unaffected proposals. It refuses the retry before any
+match write when an affected proposal has been reviewed or otherwise
+actioned; terminal snapshot states are also refused. Both retry entry points
+call the same shared implementation in `pulse-import-shared.ts`.
 
 The Admin UI shows a "Retry matching" action only when the snapshot summary
-reports outstanding `UNMATCHED`/`AMBIGUOUS`/`REVIEW_REQUIRED` rows.
+reports outstanding `UNMATCHED`/`AMBIGUOUS`/`REVIEW_REQUIRED` rows and the
+snapshot is `DRAFT`, `VALIDATED`, or `PENDING_REVIEW`.
 
 ## Duplicate handling
 
-Re-uploading the exact same file content against the same source returns
-`kind: "DUPLICATE"` with the existing snapshot's identifiers (HTTP 200, not
-an error) — the Admin UI shows an informational banner and navigates to the
-existing snapshot's preview, exactly as if the upload had run for the first
-time. See the Slice 2 operations guide for the full duplicate-detection
-semantics (advisory-locked race handling, `REJECTED`/`FAILED` snapshots never
-counted as live duplicates).
+Re-uploading the exact same file content against the same source normally
+returns `kind: "DUPLICATE"` with the completed live snapshot's identifiers
+(HTTP 200, not an error). If the existing snapshot is an interrupted `DRAFT`
+or `VALIDATED`, the upload resumes its remaining idempotent phases instead.
+Concurrent uploads converge on one snapshot, row set, diagnostic set, and
+proposal set. `REJECTED`/`FAILED` snapshots never count as live duplicates.
 
 ## Admin UI
 
@@ -137,8 +138,8 @@ route bodies/queries are validated with `.strict()` zod schemas
   for the exact mechanism and fix.
 - A Pulse provider reference containing whitespace (a real, common case —
   Pulse material tokens like "Reverse Holo" or "Poké Ball" are embedded
-  verbatim) no longer crashes the request; see the same addendum for the
-  narrow, Pulse-scoped fix.
+  verbatim) is validated by a bounded Pulse-specific schema. Only
+  `TRUSTED_MANUAL` references participate in trusted-reference matching.
 
 ## Security
 
@@ -208,13 +209,10 @@ here:
   follow-up slice could instead have the backend persist and expose those
   specific fields as additional allow-listed, non-raw columns.
 - Local-environment test isolation: this project uses one persistent Neon
-  Postgres test database shared by every Jest test type, with no per-run
-  reset (a deliberate, documented constraint — see
-  `docs/operations/environment-variables.md`). Running a full local
-  regression pass surfaced (and this slice fixed, without weakening any
-  constraint or changing application behaviour) a schema-drift hazard in
-  `migration.integration.spec.ts` caused by this shared database; see the
-  ADR 0010 addendum for the fix. A separate, pre-existing, unrelated flake
+  Postgres test database shared by every Jest test type. Inventory module and
+  migration suites now run their DDL/data changes inside rollback-only
+  transactions, so they restore the exact pre-suite schema and data without
+  truncating another suite's rows. A separate, pre-existing, unrelated flake
   in the Stage 4B trading-card image upload HTTP tests was also observed
   during heavy local regression testing and confirmed (via `git stash`) to
   reproduce identically on the pre-Slice-3 commit — out of scope for this

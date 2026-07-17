@@ -1,6 +1,7 @@
 import { createPgConnection } from "@medusajs/framework/utils"
 import { Migration20260716180000 } from "../migrations/Migration20260716180000"
 
+let rootConnection: ReturnType<typeof createPgConnection>
 let pgConnection: ReturnType<typeof createPgConnection>
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -38,15 +39,17 @@ const catalogSnapshot = async () => ({
   `, [newTableNames])),
 })
 
-beforeAll(() => {
-  pgConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
+beforeAll(async () => {
+  rootConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
+  pgConnection = await rootConnection.transaction() as never
+  await runMigration("down")
 })
 
 afterAll(async () => {
-  await runMigration("up")
+  await (pgConnection as unknown as { rollback: () => Promise<void> }).rollback()
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  await (pgConnection as any)?.context?.destroy()
-  await pgConnection?.destroy()
+  await (rootConnection as any)?.context?.destroy()
+  await rootConnection?.destroy()
 })
 
 describe("Stage 5B.1 Pulse import migration", () => {
@@ -85,11 +88,11 @@ describe("Stage 5B.1 Pulse import migration", () => {
       `insert into trading_card_inventory_snapshot (id, inventory_source_id, sequence_number, created_by) values (?, ?, 1, 'test')`,
       [snapshotId, sourceId],
     )
-    await expect(pgConnection.raw(
+    await expect(pgConnection.transaction((transaction) => transaction.raw(
       `insert into trading_card_inventory_snapshot_entry (id, inventory_snapshot_id, provider_reference, provider_reference_type, quantity, outcome)
        values (?, ?, 'card:test|1', 'PULSE_PRODUCT_ID', 1, 'NOT_A_REAL_OUTCOME')`,
       [`tcisentry_${Date.now().toString(36)}`, snapshotId],
-    )).rejects.toThrow(/CK_tci_snapshot_entry_outcome|check constraint/i)
+    ))).rejects.toThrow(/CK_tci_snapshot_entry_outcome|check constraint/i)
 
     const entryId1 = `tcisentry_${Date.now().toString(36)}_a`
     const entryId2 = `tcisentry_${Date.now().toString(36)}_b`
@@ -98,11 +101,11 @@ describe("Stage 5B.1 Pulse import migration", () => {
        values (?, ?, 'card:test|1', 'PULSE_PRODUCT_ID', 1, 1, 'VALID')`,
       [entryId1, snapshotId],
     )
-    await expect(pgConnection.raw(
+    await expect(pgConnection.transaction((transaction) => transaction.raw(
       `insert into trading_card_inventory_snapshot_entry (id, inventory_snapshot_id, provider_reference, provider_reference_type, quantity, row_number, outcome)
        values (?, ?, 'card:test|2', 'PULSE_PRODUCT_ID', 1, 1, 'VALID')`,
       [entryId2, snapshotId],
-    )).rejects.toThrow(/IDX_tci_snapshot_entry_row_number|duplicate key/i)
+    ))).rejects.toThrow(/IDX_tci_snapshot_entry_row_number|duplicate key/i)
 
     await pgConnection.raw(`delete from trading_card_inventory_snapshot_entry where inventory_snapshot_id = ?`, [snapshotId])
     await pgConnection.raw(`delete from trading_card_inventory_snapshot where id = ?`, [snapshotId])

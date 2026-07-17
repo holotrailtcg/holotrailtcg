@@ -35,7 +35,9 @@ contain at most eight changed-field names and small scalar flags.
 - Concurrent attempts for one inventory source serialize on a
   transaction-scoped advisory lock; a database uniqueness constraint is the
   final duplicate-proposal guard.
-- Rejected or failed snapshots cannot be baselines.
+- Rejected, failed, or superseded snapshots cannot be baselines. When the
+  caller omits a baseline, reconciliation selects the latest eligible
+  approved prior snapshot; an explicit older baseline is rejected.
 - Missing holdings produce quantity-zero draft proposals; they are not deleted.
 - Price locks are reported and remain authoritative. No public price changes.
 - No CSV upload/parser, approval action, holding mutation, Medusa stock write,

@@ -1,7 +1,5 @@
 import type { ParsedProductId } from "./types"
 
-const CONDITION_TOKENS = new Set(["lp", "nm", "mp", "hp", "dmg", "dm"])
-
 /**
  * Parses a Pulse `Product ID` such as `card:swsh4pt5|044/072|Holo|null|null|null`
  * or `card:base3|53/62|null|null|null|null|lp`.
@@ -30,9 +28,10 @@ export function parseProductId(raw: string): ParsedProductId {
   const rawMaterial = segments[2]
   const materialCandidate = rawMaterial && rawMaterial.toLowerCase() !== "null" ? rawMaterial : null
   const lastSegment = segments[segments.length - 1]
+  const normalizedLastSegment = lastSegment?.toLowerCase()
   const conditionCandidate =
-    segments.length > 6 && lastSegment && CONDITION_TOKENS.has(lastSegment.toLowerCase())
-      ? lastSegment.toLowerCase()
+    segments.length > 6 && normalizedLastSegment && normalizedLastSegment !== "null"
+      ? normalizedLastSegment
       : null
   const wellFormed = providerPrefixPresent && Boolean(setCodeCandidate) && Boolean(cardNumberCandidate)
   return {

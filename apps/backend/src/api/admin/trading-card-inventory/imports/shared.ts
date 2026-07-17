@@ -36,6 +36,7 @@ export const snapshotEntriesQuerySchema = z.object({
   specialTreatmentCandidate: z.enum(Object.values(INVENTORY_SPECIAL_TREATMENT) as [string, ...string[]]).optional(),
   rarityCandidate: z.enum(Object.values(INVENTORY_RARITY) as [string, ...string[]]).optional(),
   duplicateReferenceOnly: z.coerce.boolean().optional(),
+  snapshotEntryId: z.string().min(1).optional(),
 }).strict()
 
 export const snapshotDiagnosticsQuerySchema = z.object({
@@ -72,7 +73,7 @@ export function toSafeSnapshotEntryDto(row: Record<string, unknown>) {
     rarityRaw: row.rarity_raw ?? null,
     languageConflict: Boolean(row.language_conflict),
     outcome: row.outcome ?? null,
-    tradingCardVariantId: row.trading_card_variant_id ?? null,
+    tradingCardVariantId: row.matched_trading_card_variant_id ?? row.trading_card_variant_id ?? null,
     matchingStatus: row.matching_status ?? null,
     matchedVia: row.matched_via ?? null,
     retryCount: row.retry_count ?? 0,
@@ -83,6 +84,7 @@ export function toSafeSnapshotEntryDto(row: Record<string, unknown>) {
 export function toSafeDiagnosticDto(row: Record<string, unknown>) {
   return {
     id: row.id,
+    snapshotEntryId: row.snapshot_entry_id,
     rowNumber: row.row_number,
     phase: row.phase,
     code: row.code,

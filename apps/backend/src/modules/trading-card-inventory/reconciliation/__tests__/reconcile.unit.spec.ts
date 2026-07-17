@@ -29,6 +29,13 @@ describe("snapshot aggregation", () => {
     expect(aggregateSnapshotEntries([row({ tradingCardVariantId: null })]).values().next().value.unresolvedReason).toMatch(/No approved/)
     expect(aggregateSnapshotEntries([row(), row({ tradingCardVariantId: "tcvar_2" })]).values().next().value.tradingCardVariantId).toBeNull()
   })
+
+  it("aggregates a large duplicate group without losing rows", () => {
+    const entries = Array.from({ length: 10_000 }, () => row())
+    const grouped = aggregateSnapshotEntries(entries).get("PULSE_PRODUCT_ID:product-1")!
+    expect(grouped.quantity).toBe(10_000)
+    expect(grouped.duplicateRowCount).toBe(10_000)
+  })
 })
 
 describe("snapshot comparison", () => {
