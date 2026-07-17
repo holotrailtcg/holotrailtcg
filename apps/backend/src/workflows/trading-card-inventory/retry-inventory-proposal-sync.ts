@@ -18,22 +18,19 @@ export interface RetryInventoryProposalSyncInput {
  * Retries Phase B (Medusa sync) only, for one already-locally-`APPLIED`
  * proposal. `beginMedusaSyncAttempt` is the sole concurrency guard: it
  * refuses (returns a null token) if the proposal is already `SYNCED` or a
- * concurrent attempt already holds the current attempt token, so at most one
- * retry ever proceeds past that point.
+ * concurrent attempt holds a non-expired token, so at most one retry proceeds
+ * during the lease while an interrupted attempt remains recoverable.
  */
 export async function retryInventoryProposalSync(container: MedusaContainer, input: RetryInventoryProposalSyncInput) {
   const inventory = container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
   const auditContext = { actor: input.actor, source: input.source, reason: input.reason }
 
-  const proposal = await inventory.retrieveInventoryProposal(input.proposalId)
-  if (proposal.medusa_sync_status !== "FAILED") {
-    throw new MedusaError(MedusaError.Types.CONFLICT, "Only a proposal with a FAILED Medusa sync can be retried")
-  }
-
   const { attemptToken } = await inventory.beginMedusaSyncAttempt({ ...auditContext, proposalId: input.proposalId })
   if (!attemptToken) {
-    throw new MedusaError(MedusaError.Types.CONFLICT, "This proposal is already synced or a sync attempt is already in flight")
+    throw new MedusaError(MedusaError.Types.CONFLICT, "This proposal is already synced or a non-expired sync attempt is in flight")
   }
+
+  const proposal = await inventory.retrieveInventoryProposal(input.proposalId)
 
   const syncResult = await syncInventoryProposalToMedusa(container, {
     proposalId: input.proposalId,

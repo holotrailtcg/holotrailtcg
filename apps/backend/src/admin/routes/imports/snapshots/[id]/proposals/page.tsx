@@ -14,6 +14,14 @@ import type {
 import "../../../../../styles/imports.css"
 
 const PAGE_SIZE = 20
+const APPLICABLE_CHANGE_KINDS = new Set(["NEW_HOLDING", "QUANTITY_CHANGE"])
+
+function selectionKind(row: InventoryProposalListItem): "REVIEW" | "APPLY" | null {
+  if (row.reviewStatus === "PENDING") return "REVIEW"
+  if (row.reviewStatus === "APPROVED" && row.tradingCardVariantId && row.proposedQuantity !== null &&
+    APPLICABLE_CHANGE_KINDS.has(row.changeKind)) return "APPLY"
+  return null
+}
 
 function summaryQueryKey(snapshotId: string) {
   return ["pulse-import-summary", snapshotId]
@@ -123,11 +131,20 @@ const InventoryProposalsPage = () => {
     onError: () => toast.error("The Medusa sync retry did not succeed. Please try again."),
   })
 
-  const toggleSelected = (id: string) => {
+  const toggleSelected = (row: InventoryProposalListItem) => {
     setSelected((current) => {
       const next = new Set(current)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
+      if (next.has(row.id)) {
+        next.delete(row.id)
+      } else {
+        const rows = proposalsQuery.data?.proposals ?? []
+        const kind = selectionKind(row)
+        for (const selectedId of next) {
+          const selectedRow = rows.find((candidate) => candidate.id === selectedId)
+          if (!selectedRow || selectionKind(selectedRow) !== kind) next.delete(selectedId)
+        }
+        next.add(row.id)
+      }
       return next
     })
   }
@@ -169,6 +186,9 @@ const InventoryProposalsPage = () => {
   }
 
   const progress = summaryQuery.data?.progress
+  const visibleRows = proposalsQuery.data?.proposals ?? []
+  const selectedRows = visibleRows.filter((row) => selected.has(row.id))
+  const selectedKind = selectedRows.length > 0 ? selectionKind(selectedRows[0]) : null
 
   const columns: ReviewTableColumn<InventoryProposalListItem>[] = [
     {
@@ -178,7 +198,8 @@ const InventoryProposalsPage = () => {
           type="checkbox"
           aria-label={`Select proposal ${row.id}`}
           checked={selected.has(row.id)}
-          onChange={() => toggleSelected(row.id)}
+          disabled={selectionKind(row) === null}
+          onChange={() => toggleSelected(row)}
           onClick={(event) => event.stopPropagation()}
         />
       ),
@@ -202,7 +223,7 @@ const InventoryProposalsPage = () => {
               </Button>
             </>
           )}
-          {row.reviewStatus === "APPROVED" && (
+          {selectionKind(row) === "APPLY" && (
             <Button size="small" variant="primary" isLoading={applyOneMutation.isPending} onClick={() => applyOneMutation.mutate(row.id)}>
               Apply
             </Button>
@@ -263,15 +284,21 @@ const InventoryProposalsPage = () => {
           {selected.size > 0 && (
             <div className="flex flex-wrap items-center gap-2">
               <Text size="small" className="text-ui-fg-subtle">{selected.size} selected</Text>
-              <Button size="small" variant="primary" isLoading={bulkReviewMutation.isPending} onClick={() => handleBulkReview("APPROVED")}>
-                Approve selected
-              </Button>
-              <Button size="small" variant="danger" isLoading={bulkReviewMutation.isPending} onClick={() => handleBulkReview("REJECTED")}>
-                Reject selected
-              </Button>
-              <Button size="small" variant="secondary" isLoading={bulkApplyMutation.isPending} onClick={handleBulkApply}>
-                Apply selected
-              </Button>
+              {selectedKind === "REVIEW" && (
+                <>
+                  <Button size="small" variant="primary" isLoading={bulkReviewMutation.isPending} onClick={() => handleBulkReview("APPROVED")}>
+                    Approve selected
+                  </Button>
+                  <Button size="small" variant="danger" isLoading={bulkReviewMutation.isPending} onClick={() => handleBulkReview("REJECTED")}>
+                    Reject selected
+                  </Button>
+                </>
+              )}
+              {selectedKind === "APPLY" && (
+                <Button size="small" variant="secondary" isLoading={bulkApplyMutation.isPending} onClick={handleBulkApply}>
+                  Apply selected
+                </Button>
+              )}
             </div>
           )}
         </div>

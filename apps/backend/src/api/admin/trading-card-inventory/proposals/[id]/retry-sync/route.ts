@@ -4,8 +4,8 @@ import { adminActor, idParamsSchema, parseAdminInput, safeAdminRead, safeAdminWr
 
 /**
  * Retries Phase B (Medusa sync) only. 409 when there's nothing eligible to
- * retry (not `FAILED`, or a concurrent attempt already claimed the current
- * attempt token) — thrown as `MedusaError.Types.CONFLICT` inside the
+ * retry (already synced, or a concurrent attempt holds a non-expired token)
+ * — thrown as `MedusaError.Types.CONFLICT` inside the
  * workflow. 502 when the retry itself reaches Medusa but fails; 200 on a
  * successful sync.
  */

@@ -125,8 +125,8 @@ describe("InventoryProposalsPage", () => {
 
     const checkboxes = screen.getAllByRole("checkbox")
     await user.click(checkboxes[0])
-    await user.click(checkboxes[1])
-    expect(await screen.findByText("2 selected")).toBeInTheDocument()
+    expect(checkboxes[1]).not.toBeDisabled()
+    expect(await screen.findByText("1 selected")).toBeInTheDocument()
 
     await user.click(screen.getByRole("button", { name: "Approve selected" }))
 
@@ -135,9 +135,17 @@ describe("InventoryProposalsPage", () => {
       "/admin/trading-card-inventory/proposals/review",
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ ids: ["tciprop_1", "tciprop_2"], targetStatus: "APPROVED" }),
+        body: JSON.stringify({ ids: ["tciprop_1"], targetStatus: "APPROVED" }),
       })
     )
+  })
+
+  it("does not offer apply or bulk selection for out-of-scope approved proposals", async () => {
+    const outOfScope = { ...APPROVED_PROPOSAL, changeKind: "PRICE_CHANGE" }
+    renderPage([outOfScope])
+    await screen.findByRole("checkbox")
+    expect(screen.queryByRole("button", { name: "Apply" })).not.toBeInTheDocument()
+    expect(screen.getByRole("checkbox")).toBeDisabled()
   })
 
   it("shows a retry-sync action only for an applied proposal with a failed Medusa sync", async () => {

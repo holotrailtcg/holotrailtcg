@@ -48,11 +48,10 @@ Re-calling `applyInventoryProposal` on an already-`APPLIED` proposal is an
 idempotent success: it returns the existing `applied_transaction_id`/
 `applied_holding_id`/current `medusa_sync_status`, writes
 `PROPOSAL_APPLICATION_RETRIED` (never `PROPOSAL_APPLIED` again), and creates
-no new ledger row or holding movement. A caller-supplied
-`applicationIdempotencyKey` is only ever compared against the value already
-stored on *that* row — it can never be used to apply the same proposal twice
-under different keys, and a mismatched key on an already-`APPLIED` proposal
-is silently ignored (the idempotent-success path still applies).
+no new ledger row or holding movement. A legacy/internal caller-supplied
+`applicationIdempotencyKey` is ignored: the proposal id is always persisted
+as the proposal and ledger transaction idempotency key, so callers cannot
+select a different identity or collide with another proposal.
 
 Before Phase A begins, `PROPOSAL_APPLICATION_ATTEMPTED` is written durably in
 its own small transaction, so "an attempt happened" survives even if Phase A
@@ -103,22 +102,27 @@ falling back), otherwise auto-picked only if exactly one Medusa stock
 location exists (`NO_STOCK_LOCATION` / `AMBIGUOUS_STOCK_LOCATION`
 otherwise). A stock location is never auto-created.
 
-Every failure path returns one of eight categorized
+Every failure path returns a categorized
 `MEDUSA_SYNC_ERROR_CATEGORY` values with a short, Admin-safe message; the raw
 Medusa exception is logged server-side only and never persisted into
 `medusa_sync_last_error` or returned through the Admin API.
 
 **Concurrency.** `beginMedusaSyncAttempt` mints a fresh attempt token,
 persists it on the proposal row (`medusa_sync_attempt_token`), and refuses
-(returns a null token) if the proposal is already `SYNCED` or not `APPLIED` —
+(returns a null token) if the proposal is already `SYNCED` or already has an
+active, non-expired `PENDING` token; non-`APPLIED` proposals are rejected —
 this is the sole guard against the retry endpoint spawning parallel
 uncontrolled retries. `recordMedusaSyncResult` discards any result whose
 `attemptToken` no longer matches the row's *current* token (a superseded
 attempt's late result), never regresses `SYNCED` back to `FAILED`, and no-ops
-a duplicate `SYNCED` callback. Two concurrent sync/retry calls each mint
-their own token under a `for update` lock; whichever result lands last
-against the *current* token wins, and a stale first-caller result is
-discarded.
+a duplicate `SYNCED` callback. Recording either success or failure clears
+the active token. Two concurrent sync/retry calls serialize under the row
+lock, so exactly one mints a token and performs the downstream write; the
+other receives a null token and stops.
+An attempt token has a five-minute lease. If a worker terminates after
+claiming an attempt but before recording its result, a later retry may mint a
+new token after the lease; any late result from the interrupted worker is then
+stale and ignored.
 
 ### Deterministic snapshot-progress aggregation
 

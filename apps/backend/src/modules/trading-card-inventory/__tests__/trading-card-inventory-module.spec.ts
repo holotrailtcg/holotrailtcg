@@ -453,6 +453,40 @@ describe("Stage 5B.2 proposal review and application", () => {
       expect(count).toBe(1)
     }, 30000)
 
+    it("serialises two concurrent apply attempts for one proposal", async () => {
+      const source = await createSource()
+      const variantId = `tcvar_${suffix()}`
+      const proposal = await approvedProposal(source.id, variantId, { previousQuantity: 0, proposedQuantity: 4 })
+
+      const results = await Promise.all([
+        service.applyInventoryProposal({ id: proposal.id, actor: "applier-a", source: "MANUAL" }),
+        service.applyInventoryProposal({ id: proposal.id, actor: "applier-b", source: "MANUAL" }),
+      ])
+
+      expect(results.map((result: Record<string, unknown>) => result.localApplicationStatus).sort()).toEqual(["ALREADY_APPLIED", "APPLIED"])
+      expect(new Set(results.map((result: Record<string, unknown>) => result.transactionId)).size).toBe(1)
+      const [, transactionCount] = await service.listAndCountInventoryTransactions({ trading_card_variant_id: variantId })
+      expect(transactionCount).toBe(1)
+    }, 30000)
+
+    it("serialises different proposals sharing one baseline so only one can move the holding", async () => {
+      const source = await createSource()
+      const variantId = `tcvar_${suffix()}`
+      await service.upsertInventoryHolding({ inventorySourceId: source.id, tradingCardVariantId: variantId, quantity: 2, actor: "test-actor", source: "MANUAL" })
+      const first = await approvedProposal(source.id, variantId, { previousQuantity: 2, proposedQuantity: 5 })
+      const second = await approvedProposal(source.id, variantId, { previousQuantity: 2, proposedQuantity: 7 })
+
+      const results = await Promise.all([
+        service.applyInventoryProposal({ id: first.id, actor: "applier-a", source: "MANUAL" }),
+        service.applyInventoryProposal({ id: second.id, actor: "applier-b", source: "MANUAL" }),
+      ])
+
+      expect(results.filter((result: Record<string, unknown>) => result.localApplicationStatus === "APPLIED")).toHaveLength(1)
+      expect(results.filter((result: Record<string, unknown>) => result.localApplicationStatus === "STALE_BASELINE")).toHaveLength(1)
+      const [, transactionCount] = await service.listAndCountInventoryTransactions({ trading_card_variant_id: variantId })
+      expect(transactionCount).toBe(1)
+    }, 30000)
+
     it("different caller-supplied idempotency keys cannot double-apply the same proposal", async () => {
       const source = await createSource()
       const variantId = `tcvar_${suffix()}`
@@ -461,6 +495,10 @@ describe("Stage 5B.2 proposal review and application", () => {
       const second = await service.applyInventoryProposal({ id: proposal.id, applicationIdempotencyKey: "key-b", actor: "applier", source: "MANUAL" })
       expect(second.localApplicationStatus).toBe("ALREADY_APPLIED")
       expect(second.transactionId).toBe(first.transactionId)
+      const saved = await service.retrieveInventoryProposal(proposal.id)
+      const transaction = await service.retrieveInventoryTransaction(first.transactionId)
+      expect(saved.application_idempotency_key).toBe(proposal.id)
+      expect(transaction.idempotency_key).toBe(proposal.id)
     }, 30000)
 
     it("rejects PENDING and REJECTED proposals as INVALID_STATE without mutation", async () => {
@@ -573,6 +611,50 @@ describe("Stage 5B.2 proposal review and application", () => {
       const second = await service.beginMedusaSyncAttempt({ proposalId: proposal.id, actor: "syncer", source: "SYSTEM" })
       expect(second.attemptToken).toBeNull()
       expect(second.proposal.medusa_sync_status).toBe("SYNCED")
+    }, 30000)
+
+    it("allows only one active sync attempt when retries begin concurrently", async () => {
+      const source = await createSource()
+      const variantId = `tcvar_${suffix()}`
+      const proposal = await approvedProposal(source.id, variantId, { previousQuantity: 0, proposedQuantity: 2 })
+      await service.applyInventoryProposal({ id: proposal.id, actor: "applier", source: "MANUAL" })
+      const initial = await service.beginMedusaSyncAttempt({ proposalId: proposal.id, actor: "syncer", source: "SYSTEM" })
+      await service.recordMedusaSyncResult({
+        proposalId: proposal.id, attemptToken: initial.attemptToken, outcome: "FAILED",
+        error: { category: "NO_STOCK_LOCATION", message: "none configured" }, actor: "syncer", source: "SYSTEM",
+      })
+
+      const attempts = await Promise.all([
+        service.beginMedusaSyncAttempt({ proposalId: proposal.id, actor: "syncer-a", source: "SYSTEM" }),
+        service.beginMedusaSyncAttempt({ proposalId: proposal.id, actor: "syncer-b", source: "SYSTEM" }),
+      ])
+
+      expect(attempts.filter((attempt: Record<string, unknown>) => attempt.attemptToken !== null)).toHaveLength(1)
+      expect(attempts.filter((attempt: Record<string, unknown>) => attempt.attemptToken === null)).toHaveLength(1)
+      const audits = await service.listInventoryAuditEntries({ entity_type: "INVENTORY_PROPOSAL", entity_id: proposal.id, action: "MEDUSA_SYNC_RETRIED" })
+      expect(audits).toHaveLength(1)
+    }, 30000)
+
+    it("supersedes an expired attempt lease and ignores the interrupted worker's late result", async () => {
+      const source = await createSource()
+      const variantId = `tcvar_${suffix()}`
+      const proposal = await approvedProposal(source.id, variantId, { previousQuantity: 0, proposedQuantity: 2 })
+      await service.applyInventoryProposal({ id: proposal.id, actor: "applier", source: "MANUAL" })
+      const interrupted = await service.beginMedusaSyncAttempt({ proposalId: proposal.id, actor: "syncer-a", source: "SYSTEM" })
+      await pgConnection.raw(
+        `update trading_card_inventory_proposal set medusa_sync_attempted_at = now() - interval '10 minutes' where id = ?`,
+        [proposal.id],
+      )
+
+      const resumed = await service.beginMedusaSyncAttempt({ proposalId: proposal.id, actor: "syncer-b", source: "SYSTEM" })
+      expect(resumed.attemptToken).not.toBeNull()
+      expect(resumed.attemptToken).not.toBe(interrupted.attemptToken)
+      const late = await service.recordMedusaSyncResult({
+        proposalId: proposal.id, attemptToken: interrupted.attemptToken, outcome: "FAILED",
+        error: { category: "MEDUSA_DEPENDENCY_FAILED", message: "late" }, actor: "syncer-a", source: "SYSTEM",
+      })
+      expect(late.medusa_sync_status).toBe("PENDING")
+      expect(late.medusa_sync_attempt_token).toBe(resumed.attemptToken)
     }, 30000)
 
     it("a retried sync attempt mints a new token, invalidating results tagged with the previous one", async () => {

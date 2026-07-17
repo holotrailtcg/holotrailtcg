@@ -129,6 +129,12 @@ export interface NewsletterHttpTestApp {
   getInventoryTransactions: (query: Record<string, string>, authToken?: string) => Promise<Response>
   /** GET /admin/trading-card-inventory/proposals */
   getInventoryProposals: (query: Record<string, string>, authToken?: string) => Promise<Response>
+  getInventoryProposal: (id: string, query?: Record<string, string>, authToken?: string) => Promise<Response>
+  postReviewInventoryProposal: (id: string, body: unknown, authToken?: string) => Promise<Response>
+  postBulkReviewInventoryProposals: (body: unknown, authToken?: string) => Promise<Response>
+  postApplyInventoryProposal: (id: string, authToken?: string) => Promise<Response>
+  postBulkApplyInventoryProposals: (body: unknown, authToken?: string) => Promise<Response>
+  postRetryInventoryProposalSync: (id: string, authToken?: string) => Promise<Response>
   /** GET /admin/trading-card-inventory/proposals/summary */
   getInventoryProposalSummary: (query: Record<string, string>, authToken?: string) => Promise<Response>
   /** GET /admin/trading-card-inventory/snapshots/:id/reconciliation-summary */
@@ -351,6 +357,33 @@ export async function bootstrapNewsletterHttpTestApp(): Promise<NewsletterHttpTe
     getInventoryProposals: (query, authToken) =>
       fetch(`${baseUrl}/admin/trading-card-inventory/proposals?${new URLSearchParams(query).toString()}`, {
         headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    getInventoryProposal: (id, query = {}, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/proposals/${encodeURIComponent(id)}?${new URLSearchParams(query).toString()}`, {
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    postReviewInventoryProposal: (id, body, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/proposals/${encodeURIComponent(id)}/review`, {
+        method: "POST", headers: { "Content-Type": "application/json", ...(authToken ? { authorization: `Bearer ${authToken}` } : {}) },
+        body: JSON.stringify(body),
+      }),
+    postBulkReviewInventoryProposals: (body, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/proposals/review`, {
+        method: "POST", headers: { "Content-Type": "application/json", ...(authToken ? { authorization: `Bearer ${authToken}` } : {}) },
+        body: JSON.stringify(body),
+      }),
+    postApplyInventoryProposal: (id, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/proposals/${encodeURIComponent(id)}/apply`, {
+        method: "POST", headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    postBulkApplyInventoryProposals: (body, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/proposals/apply`, {
+        method: "POST", headers: { "Content-Type": "application/json", ...(authToken ? { authorization: `Bearer ${authToken}` } : {}) },
+        body: JSON.stringify(body),
+      }),
+    postRetryInventoryProposalSync: (id, authToken) =>
+      fetch(`${baseUrl}/admin/trading-card-inventory/proposals/${encodeURIComponent(id)}/retry-sync`, {
+        method: "POST", headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
       }),
     getInventoryProposalSummary: (query, authToken) =>
       fetch(`${baseUrl}/admin/trading-card-inventory/proposals/summary?${new URLSearchParams(query).toString()}`, {

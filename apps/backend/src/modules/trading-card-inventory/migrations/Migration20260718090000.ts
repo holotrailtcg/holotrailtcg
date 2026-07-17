@@ -25,6 +25,13 @@ export class Migration20260718090000 extends Migration {
       add column if not exists "medusa_sync_attempt_token" text null,
       add column if not exists "medusa_sync_last_error" jsonb null;`)
 
+    // Required before the original one-way APPLIED consistency check on a
+    // fresh Stage 5B.1 database. The later review migration repeats this
+    // idempotently for databases that had already recorded this migration.
+    this.addSql(`update "trading_card_inventory_proposal"
+      set review_status = 'APPROVED', updated_at = now()
+      where review_status = 'APPLIED' and applied_at is null and applied_transaction_id is null and applied_holding_id is null;`)
+
     this.addSql(`alter table if exists "trading_card_inventory_proposal"
       drop constraint if exists "CK_trading_card_inventory_proposal_resolved_consistency";`)
     this.addSql(`alter table if exists "trading_card_inventory_proposal"

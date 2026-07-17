@@ -22,7 +22,7 @@ import {
   INVENTORY_PROPOSAL_REVIEW_STATUS, INVENTORY_PROPOSAL_CHANGE_KIND, INVENTORY_PROVIDER_REFERENCE_TYPE,
   INVENTORY_SNAPSHOT_STATUS, INVENTORY_SOURCE_STATUS, INVENTORY_TRANSACTION_REASON,
   INVENTORY_SNAPSHOT_ENTRY_OUTCOME, INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS, INVENTORY_SNAPSHOT_ENTRY_MATCHED_VIA,
-  MEDUSA_SYNC_STATUS,
+  MEDUSA_SYNC_STATUS, MEDUSA_SYNC_ATTEMPT_LEASE_MS,
   isValidInventoryHoldingTransition, isValidInventoryProposalTransition, isValidInventorySnapshotTransition,
   type InventoryHoldingStatus, type InventoryProposalReviewStatus, type InventoryProposalChangeKind,
   type InventoryRecordSource, type InventorySnapshotStatus, type MedusaSyncStatus,
@@ -1684,8 +1684,11 @@ class TradingCardInventoryModuleService extends MedusaService({
 
       const changeKind = proposal.change_kind as InventoryProposalChangeKind
       const inScope = changeKind === INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING || changeKind === INVENTORY_PROPOSAL_CHANGE_KIND.QUANTITY_CHANGE
-      if (!inScope || !proposal.trading_card_variant_id) {
+      if (!inScope) {
         return { outcome: "OUT_OF_SCOPE", row: proposal }
+      }
+      if (!proposal.trading_card_variant_id || !Number.isInteger(proposal.proposed_quantity) || (proposal.proposed_quantity as number) < 0) {
+        return { outcome: "INVALID_STATE", row: proposal }
       }
 
       const sourceId = proposal.inventory_source_id as string
@@ -1704,7 +1707,10 @@ class TradingCardInventoryModuleService extends MedusaService({
       }
 
       const proposedQuantity = proposal.proposed_quantity as number
-      const idempotencyKey = parsed.applicationIdempotencyKey ?? parsed.id
+      // Proposal identity is canonical. A legacy/internal caller may still
+      // send an application key, but it must never select a different ledger
+      // identity or collide with another proposal.
+      const idempotencyKey = parsed.id
 
       let holdingId: string
       if (holding) {
@@ -1796,11 +1802,14 @@ class TradingCardInventoryModuleService extends MedusaService({
     }
 
     if (phaseAResult.outcome === "INVALID_STATE") {
+      const isApproved = phaseAResult.row.review_status === INVENTORY_PROPOSAL_REVIEW_STATUS.APPROVED
       return {
         proposalId: parsed.id, localApplicationStatus: "INVALID_STATE", transactionId: null,
         priorQuantity: null, resultingQuantity: null, medusaSyncStatus: MEDUSA_SYNC_STATUS.NOT_APPLICABLE,
         errorCode: "INVALID_STATE",
-        errorMessage: `Proposal is ${phaseAResult.row.review_status}; only an APPROVED proposal can be applied.`,
+        errorMessage: isApproved
+          ? "The approved proposal is missing a valid variant or proposed quantity."
+          : `Proposal is ${phaseAResult.row.review_status}; only an APPROVED proposal can be applied.`,
       }
     }
 
@@ -1855,6 +1864,12 @@ class TradingCardInventoryModuleService extends MedusaService({
       if (proposal.medusa_sync_status === MEDUSA_SYNC_STATUS.SYNCED) {
         return { proposal, attemptToken: null }
       }
+      if (proposal.medusa_sync_status === MEDUSA_SYNC_STATUS.PENDING && proposal.medusa_sync_attempt_token) {
+        const attemptedAt = new Date(proposal.medusa_sync_attempted_at as string | Date).getTime()
+        if (Number.isFinite(attemptedAt) && Date.now() - attemptedAt < MEDUSA_SYNC_ATTEMPT_LEASE_MS) {
+          return { proposal, attemptToken: null }
+        }
+      }
       const attemptToken = randomUUID()
       const retryCount = proposal.medusa_sync_attempted_at ? ((proposal.medusa_sync_retry_count as number) + 1) : (proposal.medusa_sync_retry_count as number)
       await manager.execute(
@@ -1864,6 +1879,13 @@ class TradingCardInventoryModuleService extends MedusaService({
          where id = ?`,
         [MEDUSA_SYNC_STATUS.PENDING, attemptToken, retryCount, input.proposalId]
       )
+      if (proposal.medusa_sync_attempted_at) {
+        await this.writeAudit(manager, {
+          ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_PROPOSAL, entityId: input.proposalId,
+          action: INVENTORY_AUDIT_ACTION.MEDUSA_SYNC_RETRIED,
+          oldValue: { retryCount: proposal.medusa_sync_retry_count }, newValue: { retryCount },
+        })
+      }
       const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_inventory_proposal where id = ?`, [input.proposalId])
       return { proposal: saved, attemptToken }
     })
@@ -1898,7 +1920,7 @@ class TradingCardInventoryModuleService extends MedusaService({
         await manager.execute(
           `update trading_card_inventory_proposal
            set medusa_sync_status = ?, medusa_sync_succeeded_at = now(), medusa_inventory_item_id = ?,
-               medusa_stock_location_id = ?, medusa_sync_last_error = null, updated_at = now()
+               medusa_stock_location_id = ?, medusa_sync_attempt_token = null, medusa_sync_last_error = null, updated_at = now()
            where id = ?`,
           [MEDUSA_SYNC_STATUS.SYNCED, parsed.medusaInventoryItemId ?? null, parsed.medusaStockLocationId ?? null, parsed.proposalId]
         )
@@ -1909,7 +1931,9 @@ class TradingCardInventoryModuleService extends MedusaService({
         })
       } else {
         await manager.execute(
-          `update trading_card_inventory_proposal set medusa_sync_status = ?, medusa_sync_last_error = ?::jsonb, updated_at = now() where id = ?`,
+          `update trading_card_inventory_proposal
+           set medusa_sync_status = ?, medusa_sync_attempt_token = null, medusa_sync_last_error = ?::jsonb, updated_at = now()
+           where id = ?`,
           [MEDUSA_SYNC_STATUS.FAILED, JSON.stringify({ ...parsed.error, occurredAt: new Date().toISOString() }), parsed.proposalId]
         )
         await this.writeAudit(manager, {

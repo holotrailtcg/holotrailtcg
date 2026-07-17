@@ -133,12 +133,22 @@ const InventoryProposal = model
     {
       name: "CK_tci_proposal_applied_consistency",
       expression: (columns) =>
-        `${columns.review_status} <> 'APPLIED' or ` +
-        `(${columns.applied_at} is not null and ${columns.applied_transaction_id} is not null and ${columns.applied_holding_id} is not null)`,
+        `(${columns.review_status} = 'APPLIED' and ${columns.applied_at} is not null and ${columns.applied_transaction_id} is not null ` +
+        `and ${columns.applied_holding_id} is not null and ${columns.application_idempotency_key} is not null ` +
+        `and ${columns.medusa_sync_status} in ('PENDING', 'SYNCED', 'FAILED')) or ` +
+        `(${columns.review_status} <> 'APPLIED' and ${columns.applied_at} is null and ${columns.applied_transaction_id} is null ` +
+        `and ${columns.applied_holding_id} is null and ${columns.application_idempotency_key} is null ` +
+        `and ${columns.medusa_sync_status} = 'NOT_APPLICABLE')`,
     },
     {
       name: "CK_tci_proposal_medusa_error_requires_failed",
       expression: (columns) => `${columns.medusa_sync_last_error} is null or ${columns.medusa_sync_status} = 'FAILED'`,
+    },
+    {
+      name: "CK_tci_proposal_medusa_attempt_token_scope",
+      expression: (columns) =>
+        `${columns.medusa_sync_attempt_token} is null or ` +
+        `(${columns.review_status} = 'APPLIED' and ${columns.medusa_sync_status} = 'PENDING')`,
     },
   ])
 

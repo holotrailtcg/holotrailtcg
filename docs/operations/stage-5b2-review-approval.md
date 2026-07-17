@@ -92,7 +92,7 @@ a bounded (`limit`, default 50, max 100), newest-first audit-history
 timeline covering: `PROPOSAL_CREATED`, `PROPOSAL_REVIEWED`,
 `PROPOSAL_APPLICATION_ATTEMPTED`, `PROPOSAL_APPLICATION_REJECTED_STALE_BASELINE`,
 `PROPOSAL_APPLIED`, `PROPOSAL_APPLICATION_RETRIED`, `MEDUSA_SYNC_SUCCEEDED`,
-`MEDUSA_SYNC_FAILED`. Entries are allow-listed (`toSafeInventoryAuditEntryDto`)
+`MEDUSA_SYNC_FAILED`, `MEDUSA_SYNC_RETRIED`. Entries are allow-listed (`toSafeInventoryAuditEntryDto`)
 — `old_value`/`new_value` are already-bounded structured JSON written by the
 service layer, never a raw exception.
 
@@ -118,12 +118,13 @@ service layer, never a raw exception.
 ## Concurrency and idempotency guarantees
 
 - **Apply**: the proposal id is the canonical idempotency identity. A
-  caller-supplied `applicationIdempotencyKey` only resumes a genuinely
-  interrupted first attempt for *that* proposal; a different key can never
-  cause a double-apply.
+  legacy/internal caller-supplied `applicationIdempotencyKey` is ignored; it
+  can neither change the ledger identity nor cause a double-apply.
 - **Sync retry**: `beginMedusaSyncAttempt` mints and persists a fresh attempt
   token before each sync attempt, refusing to mint one if the proposal is
-  already `SYNCED`. `recordMedusaSyncResult` discards any result whose token
+  already `SYNCED` or has a non-expired active token. Tokens have a five-minute
+  lease so an attempt interrupted by worker termination can be superseded.
+  `recordMedusaSyncResult` discards any result whose token
   doesn't match the row's *current* token (a stale/superseded attempt),
   never regresses `SYNCED` back to `FAILED`, and no-ops a duplicate `SYNCED`
   callback. At most one retry ever proceeds past the token check for a given

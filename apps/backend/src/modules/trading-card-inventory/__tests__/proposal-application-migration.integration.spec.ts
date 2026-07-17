@@ -5,6 +5,10 @@ import { Migration20260716180000 } from "../migrations/Migration20260716180000"
 import { Migration20260717100000 } from "../migrations/Migration20260717100000"
 import { Migration20260718090000 } from "../migrations/Migration20260718090000"
 import { Migration20260718090500 } from "../migrations/Migration20260718090500"
+import { Migration20260718100000 } from "../migrations/Migration20260718100000"
+import { Migration20260718100500 } from "../migrations/Migration20260718100500"
+
+jest.setTimeout(60000)
 
 let rootConnection: ReturnType<typeof createPgConnection>
 let pgConnection: ReturnType<typeof createPgConnection>
@@ -18,11 +22,21 @@ async function run(migration: { up(): Promise<void>; down(): Promise<void>; getQ
   migration.reset()
 }
 
-const runSchemaMigration = async (direction: "up" | "down") =>
-  run(new Migration20260718090000(undefined as never, undefined as never), direction)
+const runSchemaMigration = async (direction: "up" | "down") => {
+  const migrations = [
+    new Migration20260718090000(undefined as never, undefined as never),
+    new Migration20260718100500(undefined as never, undefined as never),
+  ]
+  for (const migration of direction === "up" ? migrations : migrations.reverse()) await run(migration, direction)
+}
 
-const runAuditActionMigration = async (direction: "up" | "down") =>
-  run(new Migration20260718090500(undefined as never, undefined as never), direction)
+const runAuditActionMigrations = async (direction: "up" | "down") => {
+  const migrations = [
+    new Migration20260718090500(undefined as never, undefined as never),
+    new Migration20260718100000(undefined as never, undefined as never),
+  ]
+  for (const migration of direction === "up" ? migrations : migrations.reverse()) await run(migration, direction)
+}
 
 const columnDefinition = async (column: string) => {
   const [row] = rows(await pgConnection.raw(
@@ -139,6 +153,30 @@ describe("Stage 5B.2 proposal application/Medusa-sync migration", () => {
     await runSchemaMigration("up")
   }, 60000)
 
+  it("carries legacy APPLIED review rows forward as APPROVED proposals awaiting authoritative application", async () => {
+    await runSchemaMigration("down")
+    const sourceId = `tcisrc_legacyapplied_${Date.now().toString(36)}`
+    const proposalId = `tciprop_legacyapplied_${Date.now().toString(36)}`
+    await pgConnection.raw(
+      `insert into trading_card_inventory_source (id, display_name, normalized_name, provider) values (?, ?, ?, 'PULSE')`,
+      [sourceId, "Legacy applied source", `legacy applied ${sourceId}`],
+    )
+    await pgConnection.raw(
+      `insert into trading_card_inventory_proposal
+        (id, inventory_source_id, trading_card_variant_id, change_kind, review_status, resolved_by, resolved_at)
+       values (?, ?, 'tcvar_legacy', 'QUANTITY_CHANGE', 'APPLIED', 'legacy-reviewer', now())`,
+      [proposalId, sourceId],
+    )
+
+    await runSchemaMigration("up")
+    const [proposal] = rows(await pgConnection.raw(
+      `select review_status, applied_at, medusa_sync_status from trading_card_inventory_proposal where id = ?`, [proposalId],
+    ))
+    expect(proposal).toMatchObject({ review_status: "APPROVED", applied_at: null, medusa_sync_status: "NOT_APPLICABLE" })
+    await pgConnection.raw(`delete from trading_card_inventory_proposal where id = ?`, [proposalId])
+    await pgConnection.raw(`delete from trading_card_inventory_source where id = ?`, [sourceId])
+  }, 60000)
+
   it("enforces rejection_reason only on REJECTED and review_note length", async () => {
     await runSchemaMigration("up")
     const sourceId = `tcisrc_rejreasonmigtest_${Date.now().toString(36)}`
@@ -190,25 +228,36 @@ describe("Stage 5B.2 proposal application/Medusa-sync migration", () => {
       /CK_tci_proposal_medusa_error_requires_failed|check constraint/i,
     )
 
+    await expectRawFailure(
+      `insert into trading_card_inventory_proposal
+        (id, inventory_source_id, trading_card_variant_id, change_kind, review_status, resolved_by, resolved_at, medusa_sync_status)
+       values (?, ?, 'tcvar_test', 'QUANTITY_CHANGE', 'APPROVED', 'actor', now(), 'SYNCED')`,
+      [proposalId, sourceId],
+      /CK_tci_proposal_applied_consistency|check constraint/i,
+    )
+
     await pgConnection.raw(`delete from trading_card_inventory_source where id = ?`, [sourceId])
   }, 60000)
 
   it("widens the audit-action CHECK for proposal-application actions and restores the exact prior constraint on down", async () => {
-    await runAuditActionMigration("up")
+    const priorDefinition = await auditActionConstraintDefinition()
+    await runAuditActionMigrations("up")
     const widened = await auditActionConstraintDefinition()
     for (const action of [
       "PROPOSAL_REVIEWED", "PROPOSAL_APPLICATION_ATTEMPTED", "PROPOSAL_APPLICATION_REJECTED_STALE_BASELINE",
       "PROPOSAL_APPLIED", "PROPOSAL_APPLICATION_RETRIED", "MEDUSA_SYNC_SUCCEEDED", "MEDUSA_SYNC_FAILED",
+      "MEDUSA_SYNC_RETRIED",
     ]) {
       expect(widened).toContain(action)
     }
     expect(widened).toContain("IMPORT_PROPOSALS_REFRESHED")
 
-    await runAuditActionMigration("down")
+    await runAuditActionMigrations("down")
     const restored = await auditActionConstraintDefinition()
+    expect(restored).toBe(priorDefinition)
     expect(restored).not.toContain("PROPOSAL_REVIEWED")
     expect(restored).toContain("IMPORT_PROPOSALS_REFRESHED")
 
-    await runAuditActionMigration("up")
+    await runAuditActionMigrations("up")
   }, 60000)
 })

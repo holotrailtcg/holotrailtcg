@@ -57,7 +57,13 @@ export async function syncInventoryProposalToMedusa(
       )
     }
   } else {
-    const locations = await stockLocationService.listStockLocations({})
+    let locations: Awaited<ReturnType<IStockLocationService["listStockLocations"]>>
+    try {
+      locations = await stockLocationService.listStockLocations({})
+    } catch (error) {
+      console.error("[trading-card-inventory] failed to list Medusa stock locations", error)
+      return failed(attemptToken, MEDUSA_SYNC_ERROR_CATEGORY.MEDUSA_DEPENDENCY_FAILED, "Failed to resolve the Medusa stock location.")
+    }
     if (locations.length === 0) {
       return failed(attemptToken, MEDUSA_SYNC_ERROR_CATEGORY.NO_STOCK_LOCATION, "No Medusa stock location exists.")
     }
@@ -75,11 +81,18 @@ export async function syncInventoryProposalToMedusa(
   // `pvitem_...` id, unrelated to the actual inventory item. The real
   // inventory item id is the pivot's `inventory_item_id` foreign key.
   // Verified against a real seeded MedusaApp instance, not inferred from docs.
-  const { data: linkedVariants } = await query.graph({
-    entity: "trading_card_variant",
-    fields: ["id", "product_variant.id", "product_variant.inventory_items.inventory_item_id"],
-    filters: { id: input.tradingCardVariantId },
-  })
+  let linkedVariants: Record<string, unknown>[]
+  try {
+    const result = await query.graph({
+      entity: "trading_card_variant",
+      fields: ["id", "product_variant.id", "product_variant.inventory_items.inventory_item_id"],
+      filters: { id: input.tradingCardVariantId },
+    })
+    linkedVariants = result.data as Record<string, unknown>[]
+  } catch (error) {
+    console.error(`[trading-card-inventory] failed to resolve Medusa links for variant ${input.tradingCardVariantId}`, error)
+    return failed(attemptToken, MEDUSA_SYNC_ERROR_CATEGORY.MEDUSA_DEPENDENCY_FAILED, "Failed to resolve the Medusa inventory link.")
+  }
   const productVariant = linkedVariants[0]?.product_variant as
     | { id?: string; inventory_items?: Array<{ inventory_item_id?: string }> | null }
     | null

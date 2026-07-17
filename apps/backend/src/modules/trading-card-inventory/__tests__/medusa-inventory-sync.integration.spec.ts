@@ -111,6 +111,14 @@ async function createStockLocation(name: string) {
 }
 
 describe("syncInventoryProposalToMedusa", () => {
+  it("fails NO_STOCK_LOCATION when the fallback finds no stock locations", async () => {
+    const { variant } = await cardVariantFixture()
+    const result = await syncInventoryProposalToMedusa(container, {
+      proposalId: "tciprop_x", tradingCardVariantId: variant.id, proposedQuantity: 4, attemptToken: "token-0",
+    })
+    expect(result).toMatchObject({ outcome: "FAILED", category: "NO_STOCK_LOCATION" })
+  })
+
   it(
     "spike: resolves inventory_items via a single query.graph hop from trading_card_variant → product_variant → inventory_items",
     async () => {
