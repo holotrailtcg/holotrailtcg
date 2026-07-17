@@ -1,7 +1,8 @@
 import { z } from "@medusajs/framework/zod"
 import {
-  INVENTORY_HOLDING_STATUS, INVENTORY_PROPOSAL_CHANGE_KIND, INVENTORY_PROVIDER, INVENTORY_PROVIDER_REFERENCE_TYPE,
-  INVENTORY_SOURCE_LANGUAGE, INVENTORY_TRANSACTION_REASON, INVENTORY_NOTE_MAX_LENGTH, INVENTORY_SOURCE_NOTES_MAX_LENGTH,
+  INVENTORY_HOLDING_STATUS, INVENTORY_PROPOSAL_CHANGE_KIND, INVENTORY_PROPOSAL_REVIEW_STATUS, INVENTORY_PROVIDER,
+  INVENTORY_PROVIDER_REFERENCE_TYPE, INVENTORY_SOURCE_LANGUAGE, INVENTORY_TRANSACTION_REASON, INVENTORY_NOTE_MAX_LENGTH,
+  INVENTORY_SOURCE_NOTES_MAX_LENGTH, MEDUSA_SYNC_STATUS,
 } from "./types"
 
 export const idSchema = z.string().min(1)
@@ -76,4 +77,44 @@ export const inventoryTransactionAppendSchema = z.object({
 export const paginationSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+})
+
+export const PROPOSAL_BATCH_MAX_SIZE = 200
+
+export const proposalReviewTargetStatusSchema = z.enum([
+  INVENTORY_PROPOSAL_REVIEW_STATUS.APPROVED, INVENTORY_PROPOSAL_REVIEW_STATUS.REJECTED,
+] as [string, ...string[]])
+
+export const reviewNoteSchema = z.string().max(500)
+
+export const proposalReviewSchema = z.object({
+  ids: z.array(idSchema).min(1).max(PROPOSAL_BATCH_MAX_SIZE),
+  targetStatus: proposalReviewTargetStatusSchema,
+  rejectionReason: boundedNoteSchema.nullish(),
+  reviewNote: reviewNoteSchema.nullish(),
+})
+
+export const proposalApplyBatchSchema = z.object({
+  ids: z.array(idSchema).min(1).max(PROPOSAL_BATCH_MAX_SIZE),
+})
+
+export const proposalApplySchema = z.object({
+  id: idSchema,
+  applicationIdempotencyKey: z.string().max(255).nullish(),
+})
+
+export const medusaSyncOutcomeSchema = z.enum([MEDUSA_SYNC_STATUS.SYNCED, MEDUSA_SYNC_STATUS.FAILED] as [string, ...string[]])
+
+export const medusaSyncErrorSchema = z.object({
+  category: z.string().min(1).max(64),
+  message: z.string().min(1).max(500),
+})
+
+export const recordMedusaSyncResultSchema = z.object({
+  proposalId: idSchema,
+  attemptToken: z.string().min(1).max(64),
+  outcome: medusaSyncOutcomeSchema,
+  medusaInventoryItemId: z.string().max(255).nullish(),
+  medusaStockLocationId: z.string().max(255).nullish(),
+  error: medusaSyncErrorSchema.nullish(),
 })

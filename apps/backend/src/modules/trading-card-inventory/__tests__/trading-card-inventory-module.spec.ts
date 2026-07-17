@@ -355,3 +355,251 @@ describe("inventory transaction ledger", () => {
     expect(second.id).toBe(first.id)
   })
 })
+
+describe("Stage 5B.2 proposal review and application", () => {
+  async function approvedProposal(sourceId: string, variantId: string, overrides: Record<string, unknown> = {}) {
+    const proposal = await service.createInventoryProposal({
+      inventorySourceId: sourceId, tradingCardVariantId: variantId, changeKind: "QUANTITY_CHANGE",
+      previousQuantity: 0, proposedQuantity: 5, actor: "test-actor", source: "MANUAL", ...overrides,
+    })
+    return service.transitionInventoryProposalStatus({ id: proposal.id, targetStatus: "APPROVED", actor: "reviewer", source: "MANUAL" })
+  }
+
+  describe("reviewInventoryProposals (bulk approve/reject)", () => {
+    it("approves every PENDING id in the batch and persists reviewer identity, timestamp and note", async () => {
+      const source = await createSource()
+      const a = await service.createInventoryProposal({
+        inventorySourceId: source.id, tradingCardVariantId: `tcvar_${suffix()}`, changeKind: "NEW_HOLDING", actor: "test-actor", source: "MANUAL",
+      })
+      const b = await service.createInventoryProposal({
+        inventorySourceId: source.id, tradingCardVariantId: `tcvar_${suffix()}`, changeKind: "NEW_HOLDING", actor: "test-actor", source: "MANUAL",
+      })
+      const [updatedA, updatedB] = await service.reviewInventoryProposals({
+        ids: [a.id, b.id], targetStatus: "APPROVED", reviewNote: "looks correct", actor: "reviewer-1", source: "MANUAL",
+      })
+      for (const row of [updatedA, updatedB]) {
+        expect(row.review_status).toBe("APPROVED")
+        expect(row.resolved_by).toBe("reviewer-1")
+        expect(row.resolved_at).not.toBeNull()
+        expect(row.review_note).toBe("looks correct")
+      }
+    })
+
+    it("rejects the whole batch with no mutation when any id is not PENDING (all-or-nothing)", async () => {
+      const source = await createSource()
+      const pending = await service.createInventoryProposal({
+        inventorySourceId: source.id, tradingCardVariantId: `tcvar_${suffix()}`, changeKind: "NEW_HOLDING", actor: "test-actor", source: "MANUAL",
+      })
+      const alreadyApproved = await approvedProposal(source.id, `tcvar_${suffix()}`)
+      await expect(service.reviewInventoryProposals({
+        ids: [pending.id, alreadyApproved.id], targetStatus: "APPROVED", actor: "reviewer-1", source: "MANUAL",
+      })).rejects.toThrow(/not PENDING/)
+      const stillPending = await service.retrieveInventoryProposal(pending.id)
+      expect(stillPending.review_status).toBe("PENDING")
+    })
+
+    it("only persists rejection_reason when rejecting", async () => {
+      const source = await createSource()
+      const proposal = await service.createInventoryProposal({
+        inventorySourceId: source.id, tradingCardVariantId: `tcvar_${suffix()}`, changeKind: "NEW_HOLDING", actor: "test-actor", source: "MANUAL",
+      })
+      const [rejected] = await service.reviewInventoryProposals({
+        ids: [proposal.id], targetStatus: "REJECTED", rejectionReason: "duplicate row", actor: "reviewer-1", source: "MANUAL",
+      })
+      expect(rejected.review_status).toBe("REJECTED")
+      expect(rejected.rejection_reason).toBe("duplicate row")
+    })
+  })
+
+  describe("applyInventoryProposal (Phase A)", () => {
+    it("applies a QUANTITY_CHANGE proposal: updates the holding, appends the ledger, marks APPLIED with sync PENDING", async () => {
+      const source = await createSource()
+      const variantId = `tcvar_${suffix()}`
+      await service.upsertInventoryHolding({ inventorySourceId: source.id, tradingCardVariantId: variantId, quantity: 3, actor: "test-actor", source: "MANUAL" })
+      const proposal = await approvedProposal(source.id, variantId, { previousQuantity: 3, proposedQuantity: 8 })
+
+      const result = await service.applyInventoryProposal({ id: proposal.id, actor: "applier", source: "MANUAL" })
+      expect(result).toMatchObject({ localApplicationStatus: "APPLIED", resultingQuantity: 8, medusaSyncStatus: "PENDING" })
+      expect(result.transactionId).not.toBeNull()
+
+      const [holding] = await service.listInventoryHoldings({ inventory_source_id: source.id, trading_card_variant_id: variantId })
+      expect(holding.quantity).toBe(8)
+
+      const applied = await service.retrieveInventoryProposal(proposal.id)
+      expect(applied).toMatchObject({ review_status: "APPLIED", medusa_sync_status: "PENDING" })
+      expect(applied.applied_transaction_id).toBe(result.transactionId)
+      expect(applied.applied_holding_id).toBe(holding.id)
+    }, 30000)
+
+    it("creates the holding for a NEW_HOLDING proposal when none exists yet", async () => {
+      const source = await createSource()
+      const variantId = `tcvar_${suffix()}`
+      const proposal = await approvedProposal(source.id, variantId, { changeKind: "NEW_HOLDING", previousQuantity: 0, proposedQuantity: 6 })
+      const result = await service.applyInventoryProposal({ id: proposal.id, actor: "applier", source: "MANUAL" })
+      expect(result.localApplicationStatus).toBe("APPLIED")
+      const [, count] = await service.listAndCountInventoryHoldings({ inventory_source_id: source.id, trading_card_variant_id: variantId })
+      expect(count).toBe(1)
+    }, 30000)
+
+    it("is idempotent: re-applying an already-APPLIED proposal returns success without a second ledger row or holding movement", async () => {
+      const source = await createSource()
+      const variantId = `tcvar_${suffix()}`
+      const proposal = await approvedProposal(source.id, variantId, { previousQuantity: 0, proposedQuantity: 4 })
+      const first = await service.applyInventoryProposal({ id: proposal.id, actor: "applier", source: "MANUAL" })
+      const second = await service.applyInventoryProposal({ id: proposal.id, actor: "applier", source: "MANUAL" })
+      expect(second.localApplicationStatus).toBe("ALREADY_APPLIED")
+      expect(second.transactionId).toBe(first.transactionId)
+      const [, count] = await service.listAndCountInventoryTransactions({ trading_card_variant_id: variantId })
+      expect(count).toBe(1)
+    }, 30000)
+
+    it("different caller-supplied idempotency keys cannot double-apply the same proposal", async () => {
+      const source = await createSource()
+      const variantId = `tcvar_${suffix()}`
+      const proposal = await approvedProposal(source.id, variantId, { previousQuantity: 0, proposedQuantity: 4 })
+      const first = await service.applyInventoryProposal({ id: proposal.id, applicationIdempotencyKey: "key-a", actor: "applier", source: "MANUAL" })
+      const second = await service.applyInventoryProposal({ id: proposal.id, applicationIdempotencyKey: "key-b", actor: "applier", source: "MANUAL" })
+      expect(second.localApplicationStatus).toBe("ALREADY_APPLIED")
+      expect(second.transactionId).toBe(first.transactionId)
+    }, 30000)
+
+    it("rejects PENDING and REJECTED proposals as INVALID_STATE without mutation", async () => {
+      const source = await createSource()
+      const pending = await service.createInventoryProposal({
+        inventorySourceId: source.id, tradingCardVariantId: `tcvar_${suffix()}`, changeKind: "NEW_HOLDING", actor: "test-actor", source: "MANUAL",
+      })
+      const pendingResult = await service.applyInventoryProposal({ id: pending.id, actor: "applier", source: "MANUAL" })
+      expect(pendingResult.localApplicationStatus).toBe("INVALID_STATE")
+
+      const [rejected] = await service.reviewInventoryProposals({
+        ids: [(await service.createInventoryProposal({
+          inventorySourceId: source.id, tradingCardVariantId: `tcvar_${suffix()}`, changeKind: "NEW_HOLDING", actor: "test-actor", source: "MANUAL",
+        })).id],
+        targetStatus: "REJECTED", rejectionReason: "bad", actor: "reviewer", source: "MANUAL",
+      })
+      const rejectedResult = await service.applyInventoryProposal({ id: rejected.id, actor: "applier", source: "MANUAL" })
+      expect(rejectedResult.localApplicationStatus).toBe("INVALID_STATE")
+    })
+
+    it("rejects PRICE_CHANGE/COST_CHANGE proposals as OUT_OF_SCOPE without mutating the holding", async () => {
+      const source = await createSource()
+      const variantId = `tcvar_${suffix()}`
+      await service.upsertInventoryHolding({ inventorySourceId: source.id, tradingCardVariantId: variantId, quantity: 2, actor: "test-actor", source: "MANUAL" })
+      const proposal = await approvedProposal(source.id, variantId, { changeKind: "PRICE_CHANGE", previousQuantity: 2, proposedQuantity: 2 })
+      const result = await service.applyInventoryProposal({ id: proposal.id, actor: "applier", source: "MANUAL" })
+      expect(result.localApplicationStatus).toBe("OUT_OF_SCOPE")
+      const [holding] = await service.listInventoryHoldings({ inventory_source_id: source.id, trading_card_variant_id: variantId })
+      expect(holding.quantity).toBe(2)
+    })
+
+    it("detects a stale baseline (holding drifted since approval) and applies no mutation", async () => {
+      const source = await createSource()
+      const variantId = `tcvar_${suffix()}`
+      await service.upsertInventoryHolding({ inventorySourceId: source.id, tradingCardVariantId: variantId, quantity: 3, actor: "test-actor", source: "MANUAL" })
+      const proposal = await approvedProposal(source.id, variantId, { previousQuantity: 3, proposedQuantity: 10 })
+      // Baseline drifts after approval, before apply.
+      await service.upsertInventoryHolding({ inventorySourceId: source.id, tradingCardVariantId: variantId, quantity: 99, actor: "someone-else", source: "MANUAL" })
+
+      const result = await service.applyInventoryProposal({ id: proposal.id, actor: "applier", source: "MANUAL" })
+      expect(result).toMatchObject({ localApplicationStatus: "STALE_BASELINE", errorCode: "STALE_BASELINE" })
+      const [holding] = await service.listInventoryHoldings({ inventory_source_id: source.id, trading_card_variant_id: variantId })
+      expect(holding.quantity).toBe(99)
+      const stillApproved = await service.retrieveInventoryProposal(proposal.id)
+      expect(stillApproved.review_status).toBe("APPROVED")
+      const entries = await service.listInventoryAuditEntries({ entity_type: "INVENTORY_PROPOSAL", entity_id: proposal.id })
+      expect(entries.some((entry: Record<string, unknown>) => entry.action === "PROPOSAL_APPLICATION_REJECTED_STALE_BASELINE")).toBe(true)
+    }, 30000)
+  })
+
+  describe("applyInventoryProposals (bulk apply, partial success)", () => {
+    it("applies eligible proposals while one stale proposal fails independently", async () => {
+      const source = await createSource()
+      const okVariant = `tcvar_${suffix()}`
+      const staleVariant = `tcvar_${suffix()}`
+      await service.upsertInventoryHolding({ inventorySourceId: source.id, tradingCardVariantId: staleVariant, quantity: 1, actor: "test-actor", source: "MANUAL" })
+      const ok = await approvedProposal(source.id, okVariant, { previousQuantity: 0, proposedQuantity: 3 })
+      const stale = await approvedProposal(source.id, staleVariant, { previousQuantity: 1, proposedQuantity: 5 })
+      await service.upsertInventoryHolding({ inventorySourceId: source.id, tradingCardVariantId: staleVariant, quantity: 50, actor: "drift", source: "MANUAL" })
+
+      const { results } = await service.applyInventoryProposals({ ids: [ok.id, stale.id], actor: "applier", source: "MANUAL" })
+      const okResult = results.find((row: Record<string, unknown>) => row.proposalId === ok.id)
+      const staleResult = results.find((row: Record<string, unknown>) => row.proposalId === stale.id)
+      expect(okResult.localApplicationStatus).toBe("APPLIED")
+      expect(staleResult.localApplicationStatus).toBe("STALE_BASELINE")
+    }, 30000)
+  })
+
+  describe("Medusa sync-state tracking", () => {
+    it("begins a sync attempt, records success, and the proposal is fully synced", async () => {
+      const source = await createSource()
+      const variantId = `tcvar_${suffix()}`
+      const proposal = await approvedProposal(source.id, variantId, { previousQuantity: 0, proposedQuantity: 2 })
+      await service.applyInventoryProposal({ id: proposal.id, actor: "applier", source: "MANUAL" })
+
+      const { attemptToken } = await service.beginMedusaSyncAttempt({ proposalId: proposal.id, actor: "syncer", source: "SYSTEM" })
+      expect(attemptToken).not.toBeNull()
+      const synced = await service.recordMedusaSyncResult({
+        proposalId: proposal.id, attemptToken, outcome: "SYNCED",
+        medusaInventoryItemId: "iitem_1", medusaStockLocationId: "sloc_1", actor: "syncer", source: "SYSTEM",
+      })
+      expect(synced.medusa_sync_status).toBe("SYNCED")
+    }, 30000)
+
+    it("a late FAILED result carrying a superseded attempt token cannot regress an already-SYNCED proposal", async () => {
+      const source = await createSource()
+      const variantId = `tcvar_${suffix()}`
+      const proposal = await approvedProposal(source.id, variantId, { previousQuantity: 0, proposedQuantity: 2 })
+      await service.applyInventoryProposal({ id: proposal.id, actor: "applier", source: "MANUAL" })
+
+      const first = await service.beginMedusaSyncAttempt({ proposalId: proposal.id, actor: "syncer", source: "SYSTEM" })
+      await service.recordMedusaSyncResult({ proposalId: proposal.id, attemptToken: first.attemptToken, outcome: "SYNCED", actor: "syncer", source: "SYSTEM" })
+
+      // A stale/duplicate FAILED result using the superseded token must be discarded, not regress SYNCED.
+      const stale = await service.recordMedusaSyncResult({
+        proposalId: proposal.id, attemptToken: first.attemptToken, outcome: "FAILED",
+        error: { category: "MEDUSA_LEVEL_UPDATE_FAILED", message: "late" }, actor: "syncer", source: "SYSTEM",
+      })
+      expect(stale.medusa_sync_status).toBe("SYNCED")
+    }, 30000)
+
+    it("beginMedusaSyncAttempt refuses to start a new attempt once already SYNCED", async () => {
+      const source = await createSource()
+      const variantId = `tcvar_${suffix()}`
+      const proposal = await approvedProposal(source.id, variantId, { previousQuantity: 0, proposedQuantity: 2 })
+      await service.applyInventoryProposal({ id: proposal.id, actor: "applier", source: "MANUAL" })
+      const first = await service.beginMedusaSyncAttempt({ proposalId: proposal.id, actor: "syncer", source: "SYSTEM" })
+      await service.recordMedusaSyncResult({ proposalId: proposal.id, attemptToken: first.attemptToken, outcome: "SYNCED", actor: "syncer", source: "SYSTEM" })
+
+      const second = await service.beginMedusaSyncAttempt({ proposalId: proposal.id, actor: "syncer", source: "SYSTEM" })
+      expect(second.attemptToken).toBeNull()
+      expect(second.proposal.medusa_sync_status).toBe("SYNCED")
+    }, 30000)
+
+    it("a retried sync attempt mints a new token, invalidating results tagged with the previous one", async () => {
+      const source = await createSource()
+      const variantId = `tcvar_${suffix()}`
+      const proposal = await approvedProposal(source.id, variantId, { previousQuantity: 0, proposedQuantity: 2 })
+      await service.applyInventoryProposal({ id: proposal.id, actor: "applier", source: "MANUAL" })
+
+      const first = await service.beginMedusaSyncAttempt({ proposalId: proposal.id, actor: "syncer", source: "SYSTEM" })
+      await service.recordMedusaSyncResult({
+        proposalId: proposal.id, attemptToken: first.attemptToken, outcome: "FAILED",
+        error: { category: "NO_STOCK_LOCATION", message: "none configured" }, actor: "syncer", source: "SYSTEM",
+      })
+      const retry = await service.beginMedusaSyncAttempt({ proposalId: proposal.id, actor: "syncer", source: "SYSTEM" })
+      expect(retry.attemptToken).not.toBe(first.attemptToken)
+      expect(retry.proposal.medusa_sync_retry_count).toBe(1)
+
+      // A result using the first (now-superseded) token no longer applies.
+      const ignored = await service.recordMedusaSyncResult({
+        proposalId: proposal.id, attemptToken: first.attemptToken, outcome: "SYNCED", actor: "syncer", source: "SYSTEM",
+      })
+      expect(ignored.medusa_sync_status).toBe("PENDING")
+
+      const applied = await service.recordMedusaSyncResult({
+        proposalId: proposal.id, attemptToken: retry.attemptToken, outcome: "SYNCED", actor: "syncer", source: "SYSTEM",
+      })
+      expect(applied.medusa_sync_status).toBe("SYNCED")
+    }, 30000)
+  })
+})
