@@ -207,5 +207,6 @@ Stage 5A.2 engine, updates or removes only those draft proposals, preserves
 unaffected proposals, and emits `IMPORT_PROPOSALS_REFRESHED`. Any reviewed or
 otherwise actioned affected proposal rejects the whole transaction. Terminal
 snapshot states are never retryable. This does not approve/apply proposals or
-mutate holdings, Medusa inventory, or product publication; Stage 5B.2 remains
-out of scope.
+mutate holdings, Medusa inventory, or product publication; that is delivered
+in Stage 5B.2 — see
+[ADR 0011](0011-inventory-proposal-application-and-medusa-sync.md).

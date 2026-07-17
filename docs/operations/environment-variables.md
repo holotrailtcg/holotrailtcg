@@ -208,6 +208,21 @@ against `FakeR2ImageStorageClient`. The advisory lock that serialises
 reconciliation runs uses this project's real (non-production) test
 database directly, not a fake.
 
+## Stage 5B.2 Medusa inventory sync
+
+Backend-only; never a storefront file, never `NEXT_PUBLIC_`. See
+[ADR 0011](../decisions/0011-inventory-proposal-application-and-medusa-sync.md)
+and [stage-5b2-review-approval.md](stage-5b2-review-approval.md).
+
+| Variable | Owner / class | Local file and committed template | Required when enabled | Validation |
+| --- | --- | --- | --- | --- |
+| `TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID` | Backend / config | Backend `.env`; combined `.env.example` | Optional | If set, must resolve to a real Medusa stock location, or the sync fails explicitly (`INVALID_CONFIGURED_STOCK_LOCATION`) rather than falling back; if unset, the sync auto-picks the sole existing stock location and fails explicitly if there are zero or more than one |
+
+No automated test requires real Medusa Admin/Store network calls for this —
+the sync integration test boots a real, seeded local `MedusaApp` instance
+(product, inventory, stock-location modules) against the same test database,
+never a live Medusa deployment.
+
 ## Test database safety
 
 Before any automated database-backed test or reviewed migration command, load
