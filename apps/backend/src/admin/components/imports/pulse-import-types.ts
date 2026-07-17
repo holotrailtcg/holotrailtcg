@@ -124,3 +124,95 @@ export interface SnapshotDiagnosticListResponse {
   limit: number
   offset: number
 }
+
+export interface InventorySnapshotListItem {
+  id: string
+  inventorySourceId: string
+  status: string
+  sequenceNumber: number
+  originalFilename: string | null
+  rowCount: number | null
+  createdAt: string
+}
+
+export interface InventorySnapshotListResponse {
+  snapshots: InventorySnapshotListItem[]
+  count: number
+  limit: number
+  offset: number
+}
+
+/** Stage 5B.2: `reviewStatus` (local application) and `medusaSyncStatus` (Medusa reflection) are always independent — never collapse them. */
+export interface InventoryProposalListItem {
+  id: string
+  inventorySourceId: string
+  inventorySnapshotId: string | null
+  tradingCardVariantId: string | null
+  providerReference: string | null
+  previousQuantity: number | null
+  proposedQuantity: number | null
+  quantityDelta: number | null
+  changeKind: string
+  reviewStatus: string
+  resolvedBy: string | null
+  resolvedAt: string | null
+  reviewNote: string | null
+  rejectionReason?: string | null
+  appliedAt: string | null
+  appliedTransactionId: string | null
+  medusaSyncStatus: "NOT_APPLICABLE" | "PENDING" | "SYNCED" | "FAILED"
+  medusaInventoryItemId: string | null
+  medusaStockLocationId: string | null
+  medusaSyncRetryCount: number
+  medusaSyncLastError: { category: string; message: string; occurredAt?: string } | null
+  createdAt: string
+}
+
+export interface InventoryProposalListResponse {
+  proposals: InventoryProposalListItem[]
+  count: number
+  limit: number
+  offset: number
+}
+
+export interface InventoryAuditEntry {
+  id: string
+  actor: string
+  action: string
+  oldValue: unknown
+  newValue: unknown
+  reason: string | null
+  source: string
+  createdAt: string
+}
+
+export interface InventoryProposalDetailResponse {
+  proposal: InventoryProposalListItem
+  history: InventoryAuditEntry[]
+}
+
+export interface SnapshotProgress {
+  totalProposals: number
+  pending: number
+  approved: number
+  rejected: number
+  appliedFullySynced: number
+  appliedSyncPending: number
+  appliedSyncFailed: number
+  blocked: number
+  outOfScope: number
+  allReviewed: boolean
+  allApplicableApplied: boolean
+  fullyComplete: boolean
+}
+
+export interface ApplyProposalItemResult {
+  proposalId: string
+  localApplicationStatus: "APPLIED" | "ALREADY_APPLIED" | "STALE_BASELINE" | "INVALID_STATE" | "OUT_OF_SCOPE"
+  transactionId: string | null
+  priorQuantity: number | null
+  resultingQuantity: number | null
+  medusaSyncStatus: string
+  errorCode: string | null
+  errorMessage: string | null
+}

@@ -69,8 +69,8 @@ const ImportsOverviewPage = () => {
         />
         <OverviewCard
           title="4. Check and approve"
-          description="Check each match and approve it."
-          href="/imports/review"
+          description="Check each import snapshot, then review and apply its inventory proposals."
+          href="/imports/snapshots"
           connected
         />
       </div>

@@ -10,7 +10,7 @@ import ReviewTable, { type ReviewTableColumn } from "../../../../components/impo
 import RowOutcomeBadge from "../../../../components/imports/row-outcome-badge"
 import type {
   ImportSummary, RetryMatchingResult, SnapshotDiagnosticListItem, SnapshotDiagnosticListResponse,
-  SnapshotEntryListItem, SnapshotEntryListResponse,
+  SnapshotEntryListItem, SnapshotEntryListResponse, SnapshotProgress,
 } from "../../../../components/imports/pulse-import-types"
 import "../../../../styles/imports.css"
 
@@ -19,7 +19,7 @@ const DIAGNOSTIC_PAGE_SIZE = 20
 
 const OUTSTANDING_MATCHING_STATUSES = ["UNMATCHED", "AMBIGUOUS", "REVIEW_REQUIRED"]
 
-function fetchSummary(snapshotId: string): Promise<{ summary: ImportSummary }> {
+function fetchSummary(snapshotId: string): Promise<{ summary: ImportSummary; progress: SnapshotProgress }> {
   return fetchJson(`/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/summary`)
 }
 
@@ -98,6 +98,7 @@ const ImportsSnapshotDetailPage = () => {
   })
 
   const summary = summaryQuery.data?.summary
+  const progress = summaryQuery.data?.progress
   const outstandingMatches = summary
     ? OUTSTANDING_MATCHING_STATUSES.reduce((sum, status) => sum + (summary.byMatchingStatus[status] ?? 0), 0)
     : 0
@@ -205,6 +206,38 @@ const ImportsSnapshotDetailPage = () => {
               )}
             </div>
           </Container>
+
+          {progress && progress.totalProposals > 0 && (
+            <Container className="flex flex-col gap-3 p-6">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <Heading level="h2">Inventory proposals</Heading>
+                <Link to={`/imports/snapshots/${encodeURIComponent(snapshotId)}/proposals`}>Review proposals</Link>
+              </div>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
+                <div>
+                  <Text size="xsmall" className="text-ui-fg-subtle">Pending review</Text>
+                  <Text size="small">{progress.pending}</Text>
+                </div>
+                <div>
+                  <Text size="xsmall" className="text-ui-fg-subtle">Approved, unapplied</Text>
+                  <Text size="small">{progress.approved}</Text>
+                </div>
+                <div>
+                  <Text size="xsmall" className="text-ui-fg-subtle">Applied and synced</Text>
+                  <Text size="small">{progress.appliedFullySynced}</Text>
+                </div>
+                <div>
+                  <Text size="xsmall" className="text-ui-fg-subtle">Applied, sync pending or failed</Text>
+                  <Text size="small">{progress.appliedSyncPending + progress.appliedSyncFailed}</Text>
+                </div>
+              </div>
+              <Text size="small" className={progress.fullyComplete ? "text-ui-fg-subtle" : "text-ui-fg-subtle"}>
+                {progress.fullyComplete
+                  ? "All applicable proposals have been applied and synchronised to Medusa."
+                  : "This snapshot is not fully applied yet."}
+              </Text>
+            </Container>
+          )}
 
           <Container className="flex flex-col gap-3 p-0">
             <div className="flex flex-wrap items-center gap-3 p-4">
