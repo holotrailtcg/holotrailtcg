@@ -27,12 +27,12 @@ export async function retryInventoryProposalSync(container: MedusaContainer, inp
 
   const proposal = await inventory.retrieveInventoryProposal(input.proposalId)
   if (proposal.medusa_sync_status !== "FAILED") {
-    throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Only a proposal with a FAILED Medusa sync can be retried")
+    throw new MedusaError(MedusaError.Types.CONFLICT, "Only a proposal with a FAILED Medusa sync can be retried")
   }
 
   const { attemptToken } = await inventory.beginMedusaSyncAttempt({ ...auditContext, proposalId: input.proposalId })
   if (!attemptToken) {
-    throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This proposal is already synced or a sync attempt is already in flight")
+    throw new MedusaError(MedusaError.Types.CONFLICT, "This proposal is already synced or a sync attempt is already in flight")
   }
 
   const syncResult = await syncInventoryProposalToMedusa(container, {

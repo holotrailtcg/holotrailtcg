@@ -6,6 +6,7 @@ import type TradingCardInventoryModuleService from "../../../modules/trading-car
 import {
   INVENTORY_PROPOSAL_CHANGE_KIND, INVENTORY_PROPOSAL_REVIEW_STATUS, INVENTORY_PROVIDER, INVENTORY_SOURCE_STATUS,
 } from "../../../modules/trading-card-inventory/types"
+import { PROPOSAL_BATCH_MAX_SIZE } from "../../../modules/trading-card-inventory/validation"
 
 export function tradingCardInventoryService(req: MedusaRequest): TradingCardInventoryModuleService {
   return req.scope.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
@@ -95,6 +96,32 @@ export const proposalSummaryQuerySchema = z.object({
   inventorySnapshotId: z.string().min(1),
 }).strict()
 
+export const proposalAuditHistoryQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+}).strict()
+
+const proposalReviewTargetStatusSchema = z.enum([
+  INVENTORY_PROPOSAL_REVIEW_STATUS.APPROVED, INVENTORY_PROPOSAL_REVIEW_STATUS.REJECTED,
+] as [string, ...string[]])
+
+/** No `actor`/`reviewedBy` field — the reviewer identity is always `adminActor(req)`, never client-supplied. */
+export const proposalReviewBodySchema = z.object({
+  targetStatus: proposalReviewTargetStatusSchema,
+  rejectionReason: z.string().max(2000).nullish(),
+  reviewNote: z.string().max(500).nullish(),
+}).strict()
+
+export const proposalBulkReviewBodySchema = z.object({
+  ids: z.array(z.string().min(1)).min(1).max(PROPOSAL_BATCH_MAX_SIZE),
+  targetStatus: proposalReviewTargetStatusSchema,
+  rejectionReason: z.string().max(2000).nullish(),
+  reviewNote: z.string().max(500).nullish(),
+}).strict()
+
+export const proposalBulkApplyBodySchema = z.object({
+  ids: z.array(z.string().min(1)).min(1).max(PROPOSAL_BATCH_MAX_SIZE),
+}).strict()
+
 export const createSourceBodySchema = z.object({
   displayName: z.string().trim().min(1).max(255),
   provider: z.enum(Object.values(INVENTORY_PROVIDER) as [string, ...string[]]),
@@ -173,6 +200,41 @@ export function toSafeInventoryProposalDto(row: Record<string, unknown>) {
       sellingPriceLocked: diagnostics.sellingPriceLocked === true,
     } : null,
     comparedAt: row.compared_at ?? null,
+    createdAt: row.created_at,
+    // Stage 5B.2 review/application/sync fields. `reviewStatus` (above) and
+    // `medusaSyncStatus` are always independent: APPLIED describes the local
+    // authoritative stock movement only and says nothing about whether the
+    // result has reached Medusa yet. Never collapse the two into one field.
+    resolvedBy: row.resolved_by ?? null,
+    resolvedAt: row.resolved_at ?? null,
+    reviewNote: row.review_note ?? null,
+    appliedAt: row.applied_at ?? null,
+    appliedTransactionId: row.applied_transaction_id ?? null,
+    appliedHoldingId: row.applied_holding_id ?? null,
+    medusaSyncStatus: row.medusa_sync_status ?? "NOT_APPLICABLE",
+    medusaInventoryItemId: row.medusa_inventory_item_id ?? null,
+    medusaStockLocationId: row.medusa_stock_location_id ?? null,
+    medusaSyncAttemptedAt: row.medusa_sync_attempted_at ?? null,
+    medusaSyncSucceededAt: row.medusa_sync_succeeded_at ?? null,
+    medusaSyncRetryCount: row.medusa_sync_retry_count ?? 0,
+    medusaSyncLastError: row.medusa_sync_last_error ?? null,
+  }
+}
+
+/**
+ * Allow-listed Admin view of one audit-trail entry — `old_value`/`new_value`
+ * are already-bounded structured JSON written by `writeAudit` (never a raw
+ * exception or stack trace), so they are safe to pass through directly.
+ */
+export function toSafeInventoryAuditEntryDto(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    actor: row.actor,
+    action: row.action,
+    oldValue: row.old_value ?? null,
+    newValue: row.new_value ?? null,
+    reason: row.reason ?? null,
+    source: row.source,
     createdAt: row.created_at,
   }
 }

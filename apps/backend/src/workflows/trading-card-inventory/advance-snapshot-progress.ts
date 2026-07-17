@@ -12,21 +12,15 @@ export interface AdvanceSnapshotProgressResult {
 }
 
 /**
- * Recomputes `SnapshotProgress` for one snapshot from current proposal/holding
- * state and, only if `fullyComplete` newly holds, drives the snapshot through
- * `APPROVED -> APPLYING -> APPLIED`. Called after every review, apply, and
- * sync-retry operation — this is the single place that ever moves a snapshot
- * into `APPLIED`, and it never trusts anything but freshly-read DB state (see
- * ADR 0011). A snapshot outside `{APPROVED, APPLYING, APPLIED}` is left
- * untouched: applying proposals is only ever expected once a snapshot has
- * been approved, and this helper must not paper over an unexpected state by
- * forcing an invalid transition.
+ * Read-only: recomputes `SnapshotProgress` for one snapshot from current
+ * proposal/holding state. Used both by `advanceSnapshotProgressIfComplete`
+ * (below) and directly by read routes (e.g. the snapshot summary endpoint)
+ * that only need the live counts, never a transition.
  */
-export async function advanceSnapshotProgressIfComplete(
+export async function loadInventorySnapshotProgress(
   container: MedusaContainer,
-  snapshotId: string,
-  auditContext: { actor: string; source: InventoryRecordSource; reason?: string | null }
-): Promise<AdvanceSnapshotProgressResult> {
+  snapshotId: string
+): Promise<{ progress: SnapshotProgress; snapshotStatus: string; inventorySourceId: string }> {
   const inventory = container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
   const snapshot = await inventory.retrieveInventorySnapshot(snapshotId)
   const snapshotStatus = snapshot.status as string
@@ -53,6 +47,27 @@ export async function advanceSnapshotProgressIfComplete(
   }
 
   const progress = computeInventorySnapshotProgress(rows, holdingQuantityByVariantId)
+  return { progress, snapshotStatus, inventorySourceId: snapshot.inventory_source_id as string }
+}
+
+/**
+ * Recomputes `SnapshotProgress` for one snapshot and, only if `fullyComplete`
+ * newly holds, drives the snapshot through `APPROVED -> APPLYING -> APPLIED`.
+ * Called after every review, apply, and sync-retry operation — this is the
+ * single place that ever moves a snapshot into `APPLIED`, and it never
+ * trusts anything but freshly-read DB state (see ADR 0011). A snapshot
+ * outside `{APPROVED, APPLYING, APPLIED}` is left untouched: applying
+ * proposals is only ever expected once a snapshot has been approved, and
+ * this helper must not paper over an unexpected state by forcing an invalid
+ * transition.
+ */
+export async function advanceSnapshotProgressIfComplete(
+  container: MedusaContainer,
+  snapshotId: string,
+  auditContext: { actor: string; source: InventoryRecordSource; reason?: string | null }
+): Promise<AdvanceSnapshotProgressResult> {
+  const inventory = container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
+  const { progress, snapshotStatus } = await loadInventorySnapshotProgress(container, snapshotId)
 
   const canAdvance = snapshotStatus === INVENTORY_SNAPSHOT_STATUS.APPROVED || snapshotStatus === INVENTORY_SNAPSHOT_STATUS.APPLYING
   if (!progress.fullyComplete || !canAdvance) {
