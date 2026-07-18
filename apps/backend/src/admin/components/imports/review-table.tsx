@@ -3,6 +3,8 @@ import type { ReactNode } from "react"
 
 export interface ReviewTableColumn<T> {
   header: string
+  /** Overrides the rendered header cell content (e.g. a select-all checkbox) while `header` still supplies the column's stable key. */
+  headerCell?: ReactNode
   cell: (row: T) => ReactNode
 }
 
@@ -56,7 +58,7 @@ function ReviewTable<T>({
       <Table.Header>
         <Table.Row>
           {columns.map((column) => (
-            <Table.HeaderCell key={column.header}>{column.header}</Table.HeaderCell>
+            <Table.HeaderCell key={column.header}>{column.headerCell ?? column.header}</Table.HeaderCell>
           ))}
         </Table.Row>
       </Table.Header>

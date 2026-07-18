@@ -99,6 +99,7 @@ function toResultDto(tradingCardVariantId: string, variant: Record<string, unkno
   const cardSet = tradingCard?.card_set as Record<string, unknown> | undefined
   return {
     tradingCardVariantId,
+    tradingCardId: tradingCard?.id ?? null,
     card: tradingCard ? {
       name: tradingCard.name, setDisplayName: cardSet?.display_name ?? null, cardNumber: tradingCard.card_number,
       condition: variant?.condition, finish: variant?.finish, specialTreatment: variant?.special_treatment,

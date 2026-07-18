@@ -1,12 +1,15 @@
 import { Badge, Button, Container, Heading, Text, Textarea, toast, usePrompt } from "@medusajs/ui"
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useState } from "react"
+import { useState, type MouseEvent } from "react"
 import { Link, useParams } from "react-router-dom"
+import CreateCardDialog from "../../../../../components/imports/create-card-dialog"
 import { fetchJson, postAction } from "../../../../../components/imports/fetch-json"
 import ImportStepper from "../../../../../components/imports/import-stepper"
 import InventoryProposalStatusBadge from "../../../../../components/imports/inventory-proposal-status-badge"
 import PaginationBar from "../../../../../components/imports/pagination-bar"
 import ReviewTable, { type ReviewTableColumn } from "../../../../../components/imports/review-table"
+import SelectAllCheckbox from "../../../../../components/imports/select-all-checkbox"
+import { useRangeSelection } from "../../../../../components/imports/use-range-selection"
 import type {
   ApplyProposalItemResult, InventoryProposalDetailResponse, InventoryProposalListItem, InventoryProposalListResponse,
   SnapshotProgress,
@@ -39,9 +42,13 @@ const InventoryProposalsPage = () => {
 
   const [offset, setOffset] = useState(0)
   const [reviewStatusFilter, setReviewStatusFilter] = useState("")
-  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const selection = useRangeSelection<InventoryProposalListItem>(
+    (row) => row.id,
+    (row) => selectionKind(row) !== null,
+  )
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [rejectReason, setRejectReason] = useState("")
+  const [createCardRow, setCreateCardRow] = useState<InventoryProposalListItem | null>(null)
 
   const summaryQuery = useQuery({
     queryKey: summaryQueryKey(snapshotId),
@@ -74,7 +81,7 @@ const InventoryProposalsPage = () => {
     queryClient.invalidateQueries({ queryKey: summaryQueryKey(snapshotId) })
     queryClient.invalidateQueries({ queryKey: ["inventory-proposals", snapshotId] })
     queryClient.invalidateQueries({ queryKey: ["inventory-proposal-detail"] })
-    setSelected(new Set())
+    selection.clear()
   }
 
   const reviewOneMutation = useMutation({
@@ -131,24 +138,6 @@ const InventoryProposalsPage = () => {
     onError: () => toast.error("The Medusa sync retry did not succeed. Please try again."),
   })
 
-  const toggleSelected = (row: InventoryProposalListItem) => {
-    setSelected((current) => {
-      const next = new Set(current)
-      if (next.has(row.id)) {
-        next.delete(row.id)
-      } else {
-        const rows = proposalsQuery.data?.proposals ?? []
-        const kind = selectionKind(row)
-        for (const selectedId of next) {
-          const selectedRow = rows.find((candidate) => candidate.id === selectedId)
-          if (!selectedRow || selectionKind(selectedRow) !== kind) next.delete(selectedId)
-        }
-        next.add(row.id)
-      }
-      return next
-    })
-  }
-
   const handleReject = async (id: string) => {
     const confirmed = await prompt({
       title: "Reject this proposal?",
@@ -161,7 +150,7 @@ const InventoryProposalsPage = () => {
   }
 
   const handleBulkReview = async (targetStatus: "APPROVED" | "REJECTED") => {
-    const ids = [...selected]
+    const ids = [...selection.selected]
     if (ids.length === 0) return
     const confirmed = await prompt({
       title: targetStatus === "APPROVED" ? `Approve ${ids.length} proposals?` : `Reject ${ids.length} proposals?`,
@@ -174,7 +163,7 @@ const InventoryProposalsPage = () => {
   }
 
   const handleBulkApply = async () => {
-    const ids = [...selected]
+    const ids = [...selection.selected]
     if (ids.length === 0) return
     const confirmed = await prompt({
       title: `Apply ${ids.length} proposals?`,
@@ -187,20 +176,49 @@ const InventoryProposalsPage = () => {
 
   const progress = summaryQuery.data?.progress
   const visibleRows = proposalsQuery.data?.proposals ?? []
-  const selectedRows = visibleRows.filter((row) => selected.has(row.id))
+  const selectedRows = visibleRows.filter((row) => selection.selected.has(row.id))
   const selectedKind = selectedRows.length > 0 ? selectionKind(selectedRows[0]) : null
+
+  /**
+   * Selection stays scoped to a single eligibility kind (REVIEW or APPLY) at
+   * a time — selecting a row of a different kind clears the rest first.
+   * Shift-click ranges are computed against only the rows sharing the
+   * clicked row's kind, so a mixed-kind range silently skips the
+   * out-of-kind rows in between rather than adding or erroring on them.
+   */
+  const handleCheckboxClick = (row: InventoryProposalListItem, event: MouseEvent) => {
+    const kind = selectionKind(row)
+    if (kind === null) return
+    const willSelect = !selection.selected.has(row.id)
+    if (willSelect) {
+      const currentlySelected = visibleRows.filter((candidate) => selection.selected.has(candidate.id))
+      if (currentlySelected.some((candidate) => selectionKind(candidate) !== kind)) selection.clear()
+    }
+    const sameKindRows = visibleRows.filter((candidate) => selectionKind(candidate) === kind)
+    selection.handleRowClick(row, sameKindRows, { shiftKey: event.shiftKey })
+  }
+
+  const headerKind = visibleRows.map(selectionKind).find((kind) => kind !== null) ?? null
+  const headerEligibleRows = visibleRows.filter((row) => selectionKind(row) === headerKind)
+  const handleHeaderToggle = () => {
+    if (headerKind === null) return
+    selection.toggleAllVisible(headerEligibleRows)
+  }
 
   const columns: ReviewTableColumn<InventoryProposalListItem>[] = [
     {
       header: "",
+      headerCell: headerKind !== null
+        ? <SelectAllCheckbox state={selection.headerState(headerEligibleRows)} onToggle={handleHeaderToggle} ariaLabel="Select all eligible proposals" />
+        : null,
       cell: (row) => (
         <input
           type="checkbox"
           aria-label={`Select proposal ${row.id}`}
-          checked={selected.has(row.id)}
+          checked={selection.selected.has(row.id)}
           disabled={selectionKind(row) === null}
-          onChange={() => toggleSelected(row)}
-          onClick={(event) => event.stopPropagation()}
+          onChange={() => {}}
+          onClick={(event) => { event.stopPropagation(); handleCheckboxClick(row, event) }}
         />
       ),
     },
@@ -235,6 +253,11 @@ const InventoryProposalsPage = () => {
       header: "Actions",
       cell: (row) => (
         <div className="flex flex-wrap items-center gap-2" onClick={(event) => event.stopPropagation()}>
+          {row.reviewStatus === "PENDING" && row.card === null && (
+            <Button size="small" variant="secondary" onClick={() => setCreateCardRow(row)}>
+              Create card
+            </Button>
+          )}
           {row.reviewStatus === "PENDING" && (
             <>
               <Button size="small" variant="primary" isLoading={reviewOneMutation.isPending}
@@ -304,9 +327,9 @@ const InventoryProposalsPage = () => {
               <option value="APPLIED">Applied</option>
             </select>
           </div>
-          {selected.size > 0 && (
+          {selection.selected.size > 0 && (
             <div className="flex flex-wrap items-center gap-2">
-              <Text size="small" className="text-ui-fg-subtle">{selected.size} selected</Text>
+              <Text size="small" className="text-ui-fg-subtle">{selection.selected.size} selected</Text>
               {selectedKind === "REVIEW" && (
                 <>
                   <Button size="small" variant="primary" isLoading={bulkReviewMutation.isPending} onClick={() => handleBulkReview("APPROVED")}>
@@ -374,6 +397,14 @@ const InventoryProposalsPage = () => {
           maxLength={2000}
         />
       </Container>
+
+      {createCardRow && (
+        <CreateCardDialog
+          row={createCardRow}
+          onClose={() => setCreateCardRow(null)}
+          onCreated={refreshAfterAction}
+        />
+      )}
     </div>
   )
 }
