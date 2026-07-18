@@ -684,4 +684,177 @@ describe("Stage 5B.2 proposal review and application", () => {
       expect(applied.medusa_sync_status).toBe("SYNCED")
     }, 30000)
   })
+
+  describe("card-creation claim + resolveInventoryProposalVariant (Stage 5B.3)", () => {
+    /**
+     * Builds an UNRESOLVED_VARIANT proposal the way the real pipeline does:
+     * an entry with no variant, an UNMATCHED match row for it (matching
+     * always runs before reconciliation in production), then reconciliation
+     * derives the UNRESOLVED_VARIANT proposal from the null-variant entry.
+     */
+    async function unresolvedVariantProposal(sourceId: string, providerReference: string) {
+      const snapshot = await service.createInventorySnapshot({ inventorySourceId: sourceId, actor: "test-actor", source: "MANUAL" })
+      await service.addInventorySnapshotEntries({
+        snapshotId: snapshot.id, actor: "test-actor", source: "MANUAL",
+        entries: [{
+          providerReference, providerReferenceType: "PULSE_PRODUCT_ID", tradingCardVariantId: null,
+          quantity: 1, currencyCode: "GBP", unitAcquisitionCost: "1.00", unitMarketPrice: "2.00", unitSellingPrice: "3.00",
+        }],
+      })
+      await service.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "VALIDATED", actor: "test-actor", source: "MANUAL" })
+      const [entry] = await service.listInventorySnapshotEntries({ inventory_snapshot_id: snapshot.id, provider_reference: providerReference })
+      await service.recordSnapshotEntryMatch({
+        snapshotEntryId: entry.id, inventorySnapshotId: snapshot.id, matchingStatus: "UNMATCHED", matchedVia: "NONE",
+        diagnostics: [], actor: "test-actor", source: "SYSTEM",
+      })
+      await service.reconcileInventorySnapshot({ inventorySourceId: sourceId, snapshotId: snapshot.id, actor: "reconciler", source: "SYSTEM" })
+      const [proposal] = await service.listInventoryProposals({ inventory_snapshot_id: snapshot.id, provider_reference: providerReference })
+      expect(proposal.change_kind).toBe("UNRESOLVED_VARIANT")
+      return { snapshotId: snapshot.id, entryId: entry.id, proposal }
+    }
+
+    describe("beginCardCreationClaim", () => {
+      it("mints a claim token for a pending, unresolved-variant proposal", async () => {
+        const source = await createSource()
+        const { proposal } = await unresolvedVariantProposal(source.id, `claim-${suffix()}`)
+        const claim = await service.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer", source: "MANUAL" })
+        expect(claim.alreadyResolved).toBe(false)
+        expect(typeof claim.claimToken).toBe("string")
+        const refreshed = await service.retrieveInventoryProposal(proposal.id)
+        expect(refreshed.card_creation_claim_token).toBe(claim.claimToken)
+        expect(refreshed.card_creation_claimed_at).not.toBeNull()
+      }, 30000)
+
+      it("refuses a second claim while the first is within its lease window", async () => {
+        const source = await createSource()
+        const { proposal } = await unresolvedVariantProposal(source.id, `lease-${suffix()}`)
+        const first = await service.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer-a", source: "MANUAL" })
+        const second = await service.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer-b", source: "MANUAL" })
+        expect(second.claimToken).toBeNull()
+        expect(second.alreadyResolved).toBe(false)
+        const refreshed = await service.retrieveInventoryProposal(proposal.id)
+        expect(refreshed.card_creation_claim_token).toBe(first.claimToken)
+      }, 30000)
+
+      it("serialises two concurrent claim attempts for the same proposal — exactly one wins", async () => {
+        const source = await createSource()
+        const { proposal } = await unresolvedVariantProposal(source.id, `concurrent-${suffix()}`)
+        const [a, b] = await Promise.all([
+          service.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer-a", source: "MANUAL" }),
+          service.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer-b", source: "MANUAL" }),
+        ])
+        const tokens = [a.claimToken, b.claimToken].filter((token): token is string => token !== null)
+        expect(tokens).toHaveLength(1)
+      }, 30000)
+
+      it("is a no-op, alreadyResolved short-circuit once the proposal already carries a resolved variant", async () => {
+        const source = await createSource()
+        const providerReference = `already-${suffix()}`
+        const { proposal } = await unresolvedVariantProposal(source.id, providerReference)
+        const claim = await service.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer", source: "MANUAL" })
+        const variantId = `tcvar_${suffix()}`
+        await service.resolveInventoryProposalVariant({
+          proposalId: proposal.id, claimToken: claim.claimToken, tradingCardVariantId: variantId, actor: "reviewer", source: "MANUAL",
+        })
+        const replay = await service.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer", source: "MANUAL" })
+        expect(replay).toMatchObject({ alreadyResolved: true, claimToken: null, tradingCardVariantId: variantId })
+      }, 30000)
+
+      it("rejects a proposal that is not pending / unresolved-variant", async () => {
+        const source = await createSource()
+        const proposal = await service.createInventoryProposal({
+          inventorySourceId: source.id, tradingCardVariantId: `tcvar_${suffix()}`, changeKind: "QUANTITY_CHANGE",
+          previousQuantity: 0, proposedQuantity: 5, actor: "test-actor", source: "MANUAL",
+        })
+        await expect(service.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer", source: "MANUAL" }))
+          .rejects.toThrow(/unresolved-variant proposal/)
+      })
+    })
+
+    describe("resolveInventoryProposalVariant", () => {
+      it("atomically resolves the proposal and its snapshot entry match to the new variant", async () => {
+        const source = await createSource()
+        const providerReference = `resolve-${suffix()}`
+        const { proposal, entryId } = await unresolvedVariantProposal(source.id, providerReference)
+        const claim = await service.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer", source: "MANUAL" })
+        const variantId = `tcvar_${suffix()}`
+
+        const resolved = await service.resolveInventoryProposalVariant({
+          proposalId: proposal.id, claimToken: claim.claimToken, tradingCardVariantId: variantId, actor: "reviewer", source: "MANUAL",
+        })
+        expect(resolved).toMatchObject({ change_kind: "NEW_HOLDING", trading_card_variant_id: variantId })
+
+        const [match] = await service.listInventorySnapshotEntryMatches({ snapshot_entry_id: entryId })
+        expect(match).toMatchObject({ matching_status: "MATCHED", trading_card_variant_id: variantId, matched_via: "MANUAL" })
+
+        const refreshedProposal = await service.retrieveInventoryProposal(proposal.id)
+        expect(refreshedProposal.card_creation_claim_token).toBeNull()
+        expect(refreshedProposal.card_creation_claimed_at).toBeNull()
+      }, 30000)
+
+      it("rejects a stale claim token — a superseded attempt cannot complete resolution", async () => {
+        const source = await createSource()
+        const { proposal } = await unresolvedVariantProposal(source.id, `stale-${suffix()}`)
+        const claim = await service.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer", source: "MANUAL" })
+        await expect(service.resolveInventoryProposalVariant({
+          proposalId: proposal.id, claimToken: "not-the-real-token", tradingCardVariantId: `tcvar_${suffix()}`, actor: "reviewer", source: "MANUAL",
+        })).rejects.toThrow(/stale/)
+        // the legitimate claim is untouched and can still complete
+        const resolved = await service.resolveInventoryProposalVariant({
+          proposalId: proposal.id, claimToken: claim.claimToken, tradingCardVariantId: `tcvar_${suffix()}`, actor: "reviewer", source: "MANUAL",
+        })
+        expect(resolved.change_kind).toBe("NEW_HOLDING")
+      }, 30000)
+
+      it("is idempotent when replayed with the exact variant it already resolved to", async () => {
+        const source = await createSource()
+        const { proposal } = await unresolvedVariantProposal(source.id, `replay-${suffix()}`)
+        const claim = await service.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer", source: "MANUAL" })
+        const variantId = `tcvar_${suffix()}`
+        await service.resolveInventoryProposalVariant({
+          proposalId: proposal.id, claimToken: claim.claimToken, tradingCardVariantId: variantId, actor: "reviewer", source: "MANUAL",
+        })
+        const replay = await service.resolveInventoryProposalVariant({
+          proposalId: proposal.id, claimToken: claim.claimToken, tradingCardVariantId: variantId, actor: "reviewer", source: "MANUAL",
+        })
+        expect(replay.trading_card_variant_id).toBe(variantId)
+      }, 30000)
+
+      it("rejects resolving to a different variant than it was already resolved to", async () => {
+        const source = await createSource()
+        const { proposal } = await unresolvedVariantProposal(source.id, `mismatch-${suffix()}`)
+        const claim = await service.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer", source: "MANUAL" })
+        const firstVariantId = `tcvar_${suffix()}`
+        await service.resolveInventoryProposalVariant({
+          proposalId: proposal.id, claimToken: claim.claimToken, tradingCardVariantId: firstVariantId, actor: "reviewer", source: "MANUAL",
+        })
+        await expect(service.resolveInventoryProposalVariant({
+          proposalId: proposal.id, claimToken: claim.claimToken, tradingCardVariantId: `tcvar_${suffix()}`, actor: "reviewer", source: "MANUAL",
+        })).rejects.toThrow(/different trading card variant/)
+      }, 30000)
+
+      it("the MANUAL match cannot be silently overwritten by a plain re-match once the snapshot has moved to PENDING_REVIEW", async () => {
+        const source = await createSource()
+        const providerReference = `retry-preserve-${suffix()}`
+        const { snapshotId, entryId, proposal } = await unresolvedVariantProposal(source.id, providerReference)
+        const claim = await service.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer", source: "MANUAL" })
+        const variantId = `tcvar_${suffix()}`
+        await service.resolveInventoryProposalVariant({
+          proposalId: proposal.id, claimToken: claim.claimToken, tradingCardVariantId: variantId, actor: "reviewer", source: "MANUAL",
+        })
+        // Reconciliation already moved the snapshot to PENDING_REVIEW — the plain
+        // create-or-update matcher only accepts DRAFT/VALIDATED snapshots, so a
+        // naive re-match cannot silently downgrade the manual resolution; only the
+        // atomic `refreshPendingProposals` path (which re-validates the proposal
+        // is still PENDING) is allowed to touch matching after this point.
+        await expect(service.recordSnapshotEntryMatch({
+          snapshotEntryId: entryId, inventorySnapshotId: snapshotId, matchingStatus: "UNMATCHED", matchedVia: "NONE",
+          diagnostics: [], actor: "system", source: "SYSTEM",
+        })).rejects.toThrow(/cannot be changed in this snapshot state/)
+
+        const [match] = await service.listInventorySnapshotEntryMatches({ inventory_snapshot_id: snapshotId })
+        expect(match).toMatchObject({ matching_status: "MATCHED", matched_via: "MANUAL", trading_card_variant_id: variantId })
+      }, 30000)
+    })
+  })
 })
