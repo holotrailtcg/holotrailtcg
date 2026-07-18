@@ -1,5 +1,5 @@
 import { ContainerRegistrationKeys, generateJwtToken, Modules } from "@medusajs/framework/utils"
-import type { IProductModuleService } from "@medusajs/framework/types"
+import type { IProductModuleService, IStockLocationService } from "@medusajs/framework/types"
 import sharp from "sharp"
 import { NEWSLETTER_MODULE } from "../../src/modules/newsletter"
 import type NewsletterModuleService from "../../src/modules/newsletter/service"
@@ -1703,7 +1703,7 @@ describe("Admin trading-card-inventory", () => {
       expect(body.proposals).toHaveLength(1)
       expect(body.proposals[0].changeKind).toBe("UNRESOLVED_VARIANT")
       expect(Object.keys(body.proposals[0]).sort()).toEqual([
-        "baselineSnapshotId", "changeKind", "comparedAt", "createdAt", "currencyCode", "diagnostics", "id",
+        "baselineSnapshotId", "card", "cardIdentityHint", "changeKind", "comparedAt", "createdAt", "currencyCode", "diagnostics", "id",
         "inventorySnapshotId", "inventorySourceId", "previousQuantity", "previousUnitAcquisitionCost",
         "previousUnitMarketPrice", "previousUnitSellingPrice", "proposedQuantity", "proposedUnitAcquisitionCost",
         "proposedUnitMarketPrice", "proposedUnitSellingPrice", "providerReference", "providerReferenceType",
@@ -2131,5 +2131,223 @@ describe("Admin trading-card-inventory Pulse import", () => {
       )
       expect(response.status).toBe(400)
     })
+  })
+})
+
+describe("POST /admin/trading-cards/create-from-inventory-row", () => {
+  if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required for HTTP integration tests")
+  const adminToken = generateJwtToken({
+    actor_id: "user_create_card_http_test",
+    actor_type: "user",
+    auth_identity_id: "auth_create_card_http_test",
+  }, { secret: process.env.JWT_SECRET, expiresIn: 3600 })
+
+  const uniqueMarker = (label: string) =>
+    `${label}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`
+
+  const postCreateCard = (body: unknown, authenticated = true) => fetch(`${app.baseUrl}/admin/trading-cards/create-from-inventory-row`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(authenticated ? { authorization: `Bearer ${adminToken}` } : {}),
+    },
+    body: JSON.stringify(body),
+  })
+
+  async function ensureStockLocation() {
+    const stockLocations = app.container.resolve<IStockLocationService>(Modules.STOCK_LOCATION)
+    const [existing] = await stockLocations.listStockLocations({})
+    if (existing) return existing
+    return stockLocations.createStockLocations({ name: `Create Card HTTP Test Location ${uniqueMarker("loc")}` })
+  }
+
+  /**
+   * Builds an UNRESOLVED_VARIANT proposal the same way the real Pulse
+   * pipeline reaches one: a null-variant entry, an UNMATCHED match row for
+   * it, then reconciliation. Uses `app.getInventoryProposals` (a real
+   * authenticated HTTP call) rather than a raw service list, so the
+   * fixture itself exercises the same allow-listed read path the Admin UI
+   * uses.
+   */
+  async function unresolvedVariantProposalFixture(marker: string, overrides: { cardNumber?: string; setCode?: string } = {}) {
+    const inventory = app.container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
+    const source = await inventory.createInventorySource({
+      displayName: `Create Card HTTP Source ${marker}`, provider: "PULSE", language: "EN", actor: "http-test", source: "MANUAL",
+    }) as Record<string, unknown>
+    const snapshot = await inventory.createInventorySnapshot({
+      inventorySourceId: source.id as string, actor: "http-test", source: "MANUAL",
+    }) as Record<string, unknown>
+    const cardNumber = overrides.cardNumber ?? "066/196"
+    const setCode = overrides.setCode ?? `sv1-${marker}`
+    const providerReference = `card:${setCode}|${cardNumber}|holo|null|null|null`
+    await inventory.addInventorySnapshotEntries({
+      snapshotId: snapshot.id as string, actor: "http-test", source: "MANUAL",
+      entries: [{
+        providerReference, providerReferenceType: "PULSE_PRODUCT_ID", tradingCardVariantId: null,
+        quantity: 2, currencyCode: "GBP", unitAcquisitionCost: "1.00", unitMarketPrice: "2.00", unitSellingPrice: "3.00",
+      }],
+    })
+    await inventory.transitionInventorySnapshotStatus({ id: snapshot.id as string, targetStatus: "VALIDATED", actor: "http-test", source: "MANUAL" })
+    const [entry] = await inventory.listInventorySnapshotEntries({
+      inventory_snapshot_id: snapshot.id as string, provider_reference: providerReference,
+    }) as Record<string, unknown>[]
+    await inventory.recordSnapshotEntryMatch({
+      snapshotEntryId: entry.id as string, inventorySnapshotId: snapshot.id as string,
+      matchingStatus: "UNMATCHED", matchedVia: "NONE", diagnostics: [], actor: "http-test", source: "SYSTEM",
+    })
+    await inventory.reconcileInventorySnapshot({
+      inventorySourceId: source.id as string, snapshotId: snapshot.id as string, actor: "reconciler", source: "SYSTEM",
+    })
+    const proposalsResponse = await app.getInventoryProposals({
+      inventorySnapshotId: snapshot.id as string, changeKind: "UNRESOLVED_VARIANT",
+    }, adminToken)
+    const proposalsBody = await proposalsResponse.json()
+    return { source, snapshot, entry, proposal: proposalsBody.proposals[0], providerReference, cardNumber }
+  }
+
+  function createCardBody(proposalId: string, marker: string, overrides: Record<string, unknown> = {}) {
+    return {
+      inventoryProposalId: proposalId,
+      cardSetDisplayName: `Test Set ${marker}`,
+      name: `Test Card ${marker}`,
+      cardNumber: "066/196",
+      rarityRaw: null,
+      condition: "NEAR_MINT",
+      finish: "HOLO",
+      specialTreatment: "NONE",
+      finishConfirmed: true,
+      specialTreatmentConfirmed: true,
+      ...overrides,
+    }
+  }
+
+  beforeAll(async () => {
+    await ensureStockLocation()
+  })
+
+  it("requires Admin authentication", async () => {
+    const response = await postCreateCard(createCardBody("tciprop_missing", "auth"), false)
+    expect(response.status).toBe(401)
+  })
+
+  it("creates the card, resolves the proposal, and triggers TCGdex enrichment — retrievable through Medusa's normal APIs", async () => {
+    const marker = uniqueMarker("roundtrip")
+    const { proposal } = await unresolvedVariantProposalFixture(marker)
+    app.tcgdexClient.enqueueError(new TcgDexError({ code: TCGDEX_ERROR_CODE.NOT_FOUND, message: "no match", operation: "getCardBySetAndLocalId" }))
+
+    const response = await postCreateCard(createCardBody(proposal.id, marker))
+    expect(response.status).toBe(201)
+    const body = await response.json()
+    expect(body.idempotentReplay).toBe(false)
+    expect(body.result).toMatchObject({
+      card: { name: `Test Card ${marker}`, setDisplayName: `Test Set ${marker}`, cardNumber: "066/196", condition: "NEAR_MINT", finish: "HOLO", specialTreatment: "NONE" },
+    })
+    expect(typeof body.result.tradingCardVariantId).toBe("string")
+    expect(typeof body.result.tradingCardId).toBe("string")
+
+    // The proposal is now resolved, not still sitting UNRESOLVED_VARIANT.
+    const inventory = app.container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
+    const refreshedProposal = await inventory.retrieveInventoryProposal(proposal.id)
+    expect(refreshedProposal).toMatchObject({ change_kind: "NEW_HOLDING", trading_card_variant_id: body.result.tradingCardVariantId })
+
+    // The full Medusa linkage is retrievable via the exact query.graph hop
+    // Stage 5B.2's own inventory sync uses — proving the ProductOption
+    // audit-fix rewrite (official module-service APIs, not raw SQL) leaves
+    // a fully valid, normally-queryable Product/ProductVariant/InventoryItem
+    // chain, not just a workflow-internal success.
+    const query = app.container.resolve(ContainerRegistrationKeys.QUERY)
+    const { data } = await query.graph({
+      entity: "trading_card_variant",
+      fields: ["id", "product_variant.id", "product_variant.sku", "product_variant.inventory_items.inventory_item_id"],
+      filters: { id: body.result.tradingCardVariantId },
+    })
+    const productVariant = data[0]?.product_variant as { id?: string; inventory_items?: Array<{ inventory_item_id?: string }> } | null
+    expect(productVariant?.id).toEqual(expect.any(String))
+    expect(productVariant?.inventory_items?.[0]?.inventory_item_id).toEqual(expect.any(String))
+
+    const { data: variantOwner } = await query.graph({
+      entity: "product_variant", fields: ["id", "product.id"], filters: { id: productVariant?.id as string },
+    })
+    const ownerProductId = (variantOwner[0]?.product as { id: string }).id
+
+    // Retrievable through the plain product module service too — confirms
+    // the option/value/pivot rows the workaround wrote are visible outside
+    // the request that wrote them, not merely returned optimistically from
+    // the same call (this was the exact persistence quirk the audit found
+    // with the module service's own `updateProductOptions` path).
+    const products = app.container.resolve<IProductModuleService>(Modules.PRODUCT)
+    const ownerProduct = await products.retrieveProduct(ownerProductId, { relations: ["options", "options.values"] })
+    const cardVariantOption = ownerProduct.options?.find((option) => option.title === "Card Variant")
+    expect(cardVariantOption).toBeDefined()
+    expect(cardVariantOption?.values?.some((value) => value.value.includes("NEAR MINT"))).toBe(true)
+
+    // TCGdex returning "not found" is a completed, recorded attempt, not a
+    // thrown error — retryTcgdexEnrichmentMatch resolves normally either
+    // way, so TRIGGERED is correct here (FAILED_TO_TRIGGER means the call
+    // itself couldn't be made, e.g. missing card-set identity).
+    expect(app.tcgdexClient.calls.length).toBeGreaterThan(0)
+    expect(body.result.tcgdexEnrichmentStatus).toBe("TRIGGERED")
+  })
+
+  it("is idempotent on replay — returns the same variant with idempotentReplay: true", async () => {
+    const marker = uniqueMarker("replay")
+    const { proposal } = await unresolvedVariantProposalFixture(marker)
+    app.tcgdexClient.enqueueError(new TcgDexError({ code: TCGDEX_ERROR_CODE.NOT_FOUND, message: "no match", operation: "getCardBySetAndLocalId" }))
+
+    const first = await postCreateCard(createCardBody(proposal.id, marker))
+    expect(first.status).toBe(201)
+    const firstBody = await first.json()
+
+    const second = await postCreateCard(createCardBody(proposal.id, marker))
+    expect(second.status).toBe(200)
+    const secondBody = await second.json()
+    expect(secondBody.idempotentReplay).toBe(true)
+    expect(secondBody.result.tradingCardVariantId).toBe(firstBody.result.tradingCardVariantId)
+  })
+
+  it("returns 409 while another attempt holds the creation claim", async () => {
+    const marker = uniqueMarker("inprogress")
+    const { proposal } = await unresolvedVariantProposalFixture(marker)
+    const inventory = app.container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
+    await inventory.beginCardCreationClaim({ proposalId: proposal.id, actor: "another-reviewer", source: "MANUAL" })
+
+    const response = await postCreateCard(createCardBody(proposal.id, marker))
+    expect(response.status).toBe(409)
+  })
+
+  it("reuses the existing Product when a second row adds a new variant to the same card", async () => {
+    const marker = uniqueMarker("reuse")
+    const setCode = `sv1-${marker}`
+    const first = await unresolvedVariantProposalFixture(`${marker}-a`, { cardNumber: "077/196", setCode })
+    const second = await unresolvedVariantProposalFixture(`${marker}-b`, { cardNumber: "077/196", setCode })
+    app.tcgdexClient.enqueueError(new TcgDexError({ code: TCGDEX_ERROR_CODE.NOT_FOUND, message: "no match", operation: "getCardBySetAndLocalId" }))
+    app.tcgdexClient.enqueueError(new TcgDexError({ code: TCGDEX_ERROR_CODE.NOT_FOUND, message: "no match", operation: "getCardBySetAndLocalId" }))
+
+    const firstResponse = await postCreateCard(createCardBody(first.proposal.id, marker, {
+      cardSetDisplayName: `Reuse Set ${marker}`, name: `Reuse Card ${marker}`, cardNumber: "077/196",
+      condition: "NEAR_MINT", finish: "HOLO",
+    }))
+    expect(firstResponse.status).toBe(201)
+    const firstBody = await firstResponse.json()
+
+    const secondResponse = await postCreateCard(createCardBody(second.proposal.id, marker, {
+      cardSetDisplayName: `Reuse Set ${marker}`, name: `Reuse Card ${marker}`, cardNumber: "077/196",
+      condition: "LIGHTLY_PLAYED", finish: "HOLO",
+    }))
+    expect(secondResponse.status).toBe(201)
+    const secondBody = await secondResponse.json()
+
+    expect(secondBody.result.tradingCardId).toBe(firstBody.result.tradingCardId)
+    expect(secondBody.result.tradingCardVariantId).not.toBe(firstBody.result.tradingCardVariantId)
+
+    const query = app.container.resolve(ContainerRegistrationKeys.QUERY)
+    const { data } = await query.graph({
+      entity: "trading_card", fields: ["id", "product.id"], filters: { id: firstBody.result.tradingCardId },
+    })
+    const productId = (data[0]?.product as { id: string }).id
+    const { data: variantsOfProduct } = await query.graph({
+      entity: "product_variant", fields: ["id"], filters: { product_id: productId },
+    })
+    expect(variantsOfProduct).toHaveLength(2)
   })
 })
