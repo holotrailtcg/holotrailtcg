@@ -43,7 +43,9 @@ const ImportsSnapshotListPage = () => {
         <Heading level="h1">Check and approve</Heading>
         <ImportStepper compact />
         <Text size="small" className="text-ui-fg-subtle">
-          Select a snapshot to check its rows and, once approved, review and apply its inventory proposals.
+          Each row below is one uploaded file, called a "snapshot". Click one to see what it
+          contains and check it before anything happens to your stock. Click through in this order:
+          check the snapshot, then review the changes it suggests, then apply the ones you approve.
         </Text>
         <Text size="small">
           <Link to="/imports">Back to imports</Link>

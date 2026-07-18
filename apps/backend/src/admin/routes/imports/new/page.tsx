@@ -98,7 +98,11 @@ const ImportsNewPage = () => {
         <Heading level="h1">Upload and import</Heading>
         <ImportStepper compact />
         <Text size="small" className="text-ui-fg-subtle">
-          Upload a Pulse CSV file and start an import. You will see a preview before anything changes.
+          A "source" is where the file comes from, for example an eBay stock export. Pick an
+          existing source if you have used it before, or create a new one for the first time.
+          Uploading here does not change any stock yet — it just reads the file and gets it ready
+          for you to check. You will approve any changes yourself later, on the "Check and approve"
+          page.
         </Text>
 
         <div className="flex flex-col gap-4 sm:max-w-md">

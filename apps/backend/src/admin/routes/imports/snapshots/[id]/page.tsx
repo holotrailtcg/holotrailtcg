@@ -135,6 +135,12 @@ const ImportsSnapshotDetailPage = () => {
       <Container className="flex flex-col gap-4 p-6">
         <Heading level="h1">Import preview</Heading>
         <ImportStepper compact />
+        <Text size="small" className="text-ui-fg-subtle">
+          This shows what is in the uploaded file before anything happens to your stock. If
+          "Retry matching" is shown, some rows still need matching to a card — try it after you
+          have added or fixed cards. Once the file looks right, use "Trigger reconciliation" to
+          work out the stock changes, then go to "Review proposals" to approve them.
+        </Text>
         <Text size="small">
           <Link to="/imports/new">Back to upload</Link>
         </Text>

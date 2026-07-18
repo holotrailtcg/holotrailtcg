@@ -63,7 +63,10 @@ const ImportsImagesPage = () => {
         <Heading level="h1">Assign card images</Heading>
         <ImportStepper compact />
         <Text size="small" className="text-ui-fg-subtle">
-          Add real Holo Trail photographs to each card.
+          This list shows every card that still needs a real photograph. Click a card, then upload
+          a photo for each of its versions (for example, Near Mint and Holo are separate
+          versions and each need their own photo). This page works on its own — you do not need to
+          come here as part of an import, and you can add photos to a card at any time.
         </Text>
         <Text size="small">
           <Link to="/imports">Back to imports</Link>

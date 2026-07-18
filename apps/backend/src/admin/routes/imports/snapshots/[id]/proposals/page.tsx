@@ -292,6 +292,13 @@ const InventoryProposalsPage = () => {
       <Container className="flex flex-col gap-4 p-6">
         <Heading level="h1">Review inventory proposals</Heading>
         <ImportStepper compact />
+        <Text size="small" className="text-ui-fg-subtle">
+          Each row is a suggested stock change from the file you uploaded. "Not yet matched" is
+          normal for this type of file — it just means the row could not be matched to a card
+          automatically. Use "Create card" to add it, filling in the details from the row.
+          Otherwise, approve or reject each row, then apply the ones you have approved. To select
+          several rows at once, tick their boxes, or hold Shift and click to select a range.
+        </Text>
         <Text size="small">
           <Link to={`/imports/snapshots/${encodeURIComponent(snapshotId)}`}>Back to snapshot</Link>
         </Text>

@@ -42,8 +42,10 @@ const ImportsOverviewPage = () => {
       <Container className="flex flex-col gap-2 p-6">
         <Heading level="h1">Import cards</Heading>
         <Text size="small" className="text-ui-fg-subtle">
-          This page shows the four steps for bringing new cards into Holo Trail. All four steps
-          are connected to real data now.
+          This page shows the four steps for bringing new cards into Holo Trail. Work through them
+          in order, top to bottom: upload a file, match cards, add photos, then check and approve
+          the stock changes. If this is your first import, the card list will be empty — that is
+          expected, since cards get added as you go through step 4.
         </Text>
       </Container>
 

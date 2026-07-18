@@ -106,6 +106,10 @@ const ImportsReviewDetailPage = () => {
   return (
     <div className="ht-imports flex flex-col gap-6">
       <Container className="flex flex-col gap-2 p-6">
+        <Text size="small" className="text-ui-fg-subtle">
+          This compares your Holo Trail card with what TCGdex has for it, side by side. Approving
+          only changes card details such as rarity and artwork — it does not touch stock or price.
+        </Text>
         <Text size="small">
           <Link to="/imports/review">Back to review</Link>
         </Text>

@@ -176,7 +176,11 @@ const ImportsReviewPage = () => {
         <Heading level="h1">Sync with TCGdex</Heading>
         <ImportStepper compact />
         <Text size="small" className="text-ui-fg-subtle">
-          Check the cards TCGdex has matched, and see cards it could not match.
+          This page is about card details, not stock levels. TCGdex is an outside source of card
+          artwork and details, and it tries to match your cards automatically. Cards you add using
+          "Create card" on the proposals page are matched for you straight away, so you should not
+          normally need to come here for those — this page is mainly for older cards, or ones that
+          TCGdex could not match on its own.
         </Text>
         <Text size="small">
           <Link to="/imports">Back to imports</Link>
