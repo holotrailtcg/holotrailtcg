@@ -22,7 +22,7 @@ import {
   INVENTORY_PROPOSAL_REVIEW_STATUS, INVENTORY_PROPOSAL_CHANGE_KIND, INVENTORY_PROVIDER_REFERENCE_TYPE,
   INVENTORY_SNAPSHOT_STATUS, INVENTORY_SOURCE_STATUS, INVENTORY_TRANSACTION_REASON,
   INVENTORY_SNAPSHOT_ENTRY_OUTCOME, INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS, INVENTORY_SNAPSHOT_ENTRY_MATCHED_VIA,
-  MEDUSA_SYNC_STATUS, MEDUSA_SYNC_ATTEMPT_LEASE_MS,
+  MEDUSA_SYNC_STATUS, MEDUSA_SYNC_ATTEMPT_LEASE_MS, CARD_CREATION_CLAIM_LEASE_MS,
   isValidInventoryHoldingTransition, isValidInventoryProposalTransition, isValidInventorySnapshotTransition,
   type InventoryHoldingStatus, type InventoryProposalReviewStatus, type InventoryProposalChangeKind,
   type InventoryRecordSource, type InventorySnapshotStatus, type MedusaSyncStatus,
@@ -1088,7 +1088,7 @@ class TradingCardInventoryModuleService extends MedusaService({
     snapshotId: string,
     filters: {
       outcome?: string; matchingStatus?: string; finishCandidate?: string; specialTreatmentCandidate?: string
-      rarityCandidate?: string; duplicateReferenceOnly?: boolean; snapshotEntryId?: string
+      rarityCandidate?: string; duplicateReferenceOnly?: boolean; snapshotEntryId?: string; providerReference?: string
     },
     pagination: { limit: number; offset: number },
   ) {
@@ -1101,6 +1101,7 @@ class TradingCardInventoryModuleService extends MedusaService({
     if (filters.specialTreatmentCandidate) { conditions.push("e.special_treatment_candidate = ?"); params.push(filters.specialTreatmentCandidate) }
     if (filters.rarityCandidate) { conditions.push("e.rarity_candidate = ?"); params.push(filters.rarityCandidate) }
     if (filters.snapshotEntryId) { conditions.push("e.id = ?"); params.push(filters.snapshotEntryId) }
+    if (filters.providerReference) { conditions.push("e.provider_reference = ?"); params.push(filters.providerReference) }
     if (filters.duplicateReferenceOnly) {
       conditions.push(
         `e.provider_reference in (
@@ -1942,6 +1943,124 @@ class TradingCardInventoryModuleService extends MedusaService({
         })
       }
       const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_inventory_proposal where id = ?`, [parsed.proposalId])
+      return saved
+    })
+  }
+
+  // ---------------------------------------------------------------------
+  // Card-creation-from-inventory-row: claim/lease + atomic resolution.
+  // Mirrors beginMedusaSyncAttempt/recordMedusaSyncResult's exact protocol —
+  // see the module comments on `card_creation_claim_token` in the model.
+  // ---------------------------------------------------------------------
+
+  /**
+   * Marks the start of a "create a card from this unmatched row" attempt,
+   * minting a fresh claim token the caller must round-trip back through
+   * `resolveInventoryProposalVariant`. Refuses (no-ops, `claimToken: null`)
+   * if the proposal isn't a pending, unresolved row, or if another attempt
+   * already holds a live claim. If the proposal is already resolved to a
+   * variant, this is the idempotent-replay case: returns that variant id
+   * immediately, no claim minted, nothing to create.
+   */
+  async beginCardCreationClaim(input: AuditContext & { proposalId: string }): Promise<{
+    claimToken: string | null; alreadyResolved: boolean; tradingCardVariantId: string | null
+  }> {
+    idSchema.parse(input.proposalId)
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    return this.manager_.transactional(async (manager) => {
+      const [proposal] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_inventory_proposal where id = ? and deleted_at is null for update`, [input.proposalId]
+      )
+      if (!proposal) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory proposal not found")
+      if (proposal.review_status !== INVENTORY_PROPOSAL_REVIEW_STATUS.PENDING) {
+        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Only a pending proposal can start card creation")
+      }
+      if (proposal.change_kind === INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING && proposal.trading_card_variant_id) {
+        return { claimToken: null, alreadyResolved: true, tradingCardVariantId: proposal.trading_card_variant_id as string }
+      }
+      if (proposal.change_kind !== INVENTORY_PROPOSAL_CHANGE_KIND.UNRESOLVED_VARIANT) {
+        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Only an unresolved-variant proposal can start card creation")
+      }
+      if (proposal.card_creation_claim_token) {
+        const claimedAt = new Date(proposal.card_creation_claimed_at as string | Date).getTime()
+        if (Number.isFinite(claimedAt) && Date.now() - claimedAt < CARD_CREATION_CLAIM_LEASE_MS) {
+          return { claimToken: null, alreadyResolved: false, tradingCardVariantId: null }
+        }
+      }
+      const claimToken = randomUUID()
+      await manager.execute(
+        `update trading_card_inventory_proposal set card_creation_claim_token = ?, card_creation_claimed_at = now(), updated_at = now() where id = ?`,
+        [claimToken, input.proposalId]
+      )
+      return { claimToken, alreadyResolved: false, tradingCardVariantId: null }
+    })
+  }
+
+  /**
+   * Atomically resolves an UNRESOLVED_VARIANT proposal to a real
+   * TradingCardVariant, once a card has been created/found for it — the
+   * final step of the create-card-from-inventory-row workflow. Requires the
+   * live `card_creation_claim_token` so a superseded/expired attempt can
+   * never complete after a newer one has taken ownership (see
+   * `beginCardCreationClaim`). Also updates the corresponding snapshot-entry
+   * match row (`matched_via = 'MANUAL'`) so a future retry-matching run
+   * doesn't revert it, after verifying the match row and proposal actually
+   * describe the same snapshot entry.
+   */
+  async resolveInventoryProposalVariant(input: AuditContext & {
+    proposalId: string; claimToken: string; tradingCardVariantId: string
+  }): Promise<Record<string, unknown>> {
+    idSchema.parse(input.proposalId)
+    idSchema.parse(input.tradingCardVariantId)
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    return this.manager_.transactional(async (manager) => {
+      const [proposal] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_inventory_proposal where id = ? and deleted_at is null for update`, [input.proposalId]
+      )
+      if (!proposal) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory proposal not found")
+
+      if (proposal.change_kind === INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING && proposal.trading_card_variant_id) {
+        if (proposal.trading_card_variant_id !== input.tradingCardVariantId) {
+          throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This proposal is already resolved to a different trading card variant")
+        }
+        return proposal
+      }
+      if (proposal.change_kind !== INVENTORY_PROPOSAL_CHANGE_KIND.UNRESOLVED_VARIANT || proposal.review_status !== INVENTORY_PROPOSAL_REVIEW_STATUS.PENDING) {
+        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Only a pending, unresolved-variant proposal can be resolved this way")
+      }
+      if (proposal.card_creation_claim_token !== input.claimToken) {
+        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This card-creation attempt's claim is stale — a newer attempt has taken ownership of this proposal")
+      }
+
+      const [matchRow] = await manager.execute<Record<string, unknown>>(
+        `select m.* from trading_card_inventory_snapshot_entry_match m
+         join trading_card_inventory_snapshot_entry e on e.id = m.snapshot_entry_id
+         where e.inventory_snapshot_id = ? and e.provider_reference = ? and m.deleted_at is null and e.deleted_at is null
+         for update of m`,
+        [proposal.inventory_snapshot_id, proposal.provider_reference]
+      )
+      if (!matchRow) {
+        throw new MedusaError(MedusaError.Types.UNEXPECTED_STATE, "No matching snapshot entry was found for this proposal's provider reference")
+      }
+
+      await manager.execute(
+        `update trading_card_inventory_proposal
+         set trading_card_variant_id = ?, change_kind = ?, card_creation_claim_token = null, card_creation_claimed_at = null, updated_at = now()
+         where id = ?`,
+        [input.tradingCardVariantId, INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING, input.proposalId]
+      )
+      await manager.execute(
+        `update trading_card_inventory_snapshot_entry_match
+         set matching_status = ?, trading_card_variant_id = ?, matched_via = ?, updated_at = now()
+         where id = ?`,
+        [INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS.MATCHED, input.tradingCardVariantId, INVENTORY_SNAPSHOT_ENTRY_MATCHED_VIA.MANUAL, matchRow.id]
+      )
+      await this.writeAudit(manager, {
+        ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_PROPOSAL, entityId: input.proposalId,
+        action: INVENTORY_AUDIT_ACTION.PROPOSAL_VARIANT_RESOLVED,
+        oldValue: { changeKind: proposal.change_kind }, newValue: { changeKind: INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING, tradingCardVariantId: input.tradingCardVariantId },
+      })
+      const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_inventory_proposal where id = ?`, [input.proposalId])
       return saved
     })
   }

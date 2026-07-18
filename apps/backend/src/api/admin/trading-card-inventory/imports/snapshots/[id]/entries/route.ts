@@ -14,6 +14,7 @@ export async function GET(req: AuthenticatedMedusaRequest, res: MedusaResponse) 
   if (query.rarityCandidate) filters.rarityCandidate = query.rarityCandidate
   if (query.duplicateReferenceOnly) filters.duplicateReferenceOnly = true
   if (query.snapshotEntryId) filters.snapshotEntryId = query.snapshotEntryId
+  if (query.providerReference) filters.providerReference = query.providerReference
 
   const { rows, count } = await safeAdminRead(() =>
     tradingCardInventoryService(req).listSnapshotEntriesForAdmin(id, filters, { limit: query.limit, offset: query.offset })

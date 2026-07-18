@@ -38,6 +38,7 @@ export const snapshotEntriesQuerySchema = z.object({
   rarityCandidate: z.enum(Object.values(INVENTORY_RARITY) as [string, ...string[]]).optional(),
   duplicateReferenceOnly: z.coerce.boolean().optional(),
   snapshotEntryId: z.string().min(1).optional(),
+  providerReference: z.string().min(1).max(255).optional(),
 }).strict()
 
 export const snapshotDiagnosticsQuerySchema = z.object({
@@ -48,6 +49,10 @@ export const snapshotDiagnosticsQuerySchema = z.object({
 }).strict()
 
 export const retryMatchingBodySchema = z.object({
+  reason: z.string().max(500).optional(),
+}).strict()
+
+export const discardSnapshotBodySchema = z.object({
   reason: z.string().max(500).optional(),
 }).strict()
 

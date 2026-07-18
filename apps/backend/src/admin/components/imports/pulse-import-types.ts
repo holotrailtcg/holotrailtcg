@@ -142,12 +142,23 @@ export interface InventorySnapshotListResponse {
   offset: number
 }
 
+export interface InventoryProposalCardIdentity {
+  name: string
+  setDisplayName: string
+  cardNumber: string
+  condition: string
+  finish: string
+  specialTreatment: string
+}
+
 /** Stage 5B.2: `reviewStatus` (local application) and `medusaSyncStatus` (Medusa reflection) are always independent — never collapse them. */
 export interface InventoryProposalListItem {
   id: string
   inventorySourceId: string
   inventorySnapshotId: string | null
   tradingCardVariantId: string | null
+  card: InventoryProposalCardIdentity | null
+  cardIdentityHint: string | null
   providerReference: string | null
   previousQuantity: number | null
   proposedQuantity: number | null

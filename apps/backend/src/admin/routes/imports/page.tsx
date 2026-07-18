@@ -2,6 +2,7 @@ import { defineRouteConfig } from "@medusajs/admin-sdk"
 import { Container, Heading, Text } from "@medusajs/ui"
 import { Link } from "react-router-dom"
 import ImportStepper from "../../components/imports/import-stepper"
+import RecentImportsPanel from "../../components/imports/recent-imports-panel"
 import "../../styles/imports.css"
 
 interface OverviewCardProps {
@@ -74,6 +75,8 @@ const ImportsOverviewPage = () => {
           connected
         />
       </div>
+
+      <RecentImportsPanel />
     </div>
   )
 }

@@ -3,7 +3,10 @@ import { MedusaError } from "@medusajs/framework/utils"
 import { z } from "@medusajs/framework/zod"
 import { TRADING_CARDS_MODULE } from "../../../modules/trading-cards"
 import type TradingCardsModuleService from "../../../modules/trading-cards/service"
-import { MAX_CARD_IMAGE_BYTE_SIZE, SUPPORTED_IMAGE_MIME_TYPES } from "../../../modules/trading-cards/types"
+import {
+  CARD_CONDITION, CARD_FINISH, CARD_GAME, CARD_LANGUAGE, MAX_CARD_IMAGE_BYTE_SIZE, SPECIAL_TREATMENT,
+  SUPPORTED_IMAGE_MIME_TYPES,
+} from "../../../modules/trading-cards/types"
 import { resolveR2Config } from "../../../modules/trading-cards/images/r2-config"
 
 export function tradingCardsService(req: MedusaRequest): TradingCardsModuleService {
@@ -59,6 +62,30 @@ export const focalPointBodySchema = z.object({
   focalX: z.number().min(0).max(1),
   focalY: z.number().min(0).max(1),
 }).strict()
+
+export const inventoryProposalIdParamsSchema = z.object({ inventoryProposalId: z.string().min(1) })
+
+/**
+ * Body for `POST /admin/trading-cards/create-from-inventory-row`. Only
+ * reviewer-confirmed/overridden display values are accepted here — the
+ * route derives the proposal, snapshot, source language, and parsed Pulse
+ * identity (set code / card number) server-side from `inventoryProposalId`
+ * alone, never from client-submitted identifiers.
+ */
+export const createCardFromInventoryRowBodySchema = z.object({
+  inventoryProposalId: z.string().min(1),
+  cardSetDisplayName: z.string().trim().min(1).max(255),
+  name: z.string().trim().min(1).max(255),
+  cardNumber: z.string().trim().min(1).max(64),
+  rarityRaw: z.string().trim().max(255).nullish(),
+  condition: z.enum(Object.values(CARD_CONDITION) as [string, ...string[]]),
+  finish: z.enum(Object.values(CARD_FINISH) as [string, ...string[]]),
+  specialTreatment: z.enum(Object.values(SPECIAL_TREATMENT) as [string, ...string[]]),
+  finishConfirmed: z.boolean(),
+  specialTreatmentConfirmed: z.boolean(),
+}).strict()
+
+export { CARD_GAME, CARD_LANGUAGE }
 
 /**
  * The Admin-safe view of a `CardImage` row. Explicitly excludes

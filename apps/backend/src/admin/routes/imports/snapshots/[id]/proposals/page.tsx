@@ -204,7 +204,30 @@ const InventoryProposalsPage = () => {
         />
       ),
     },
-    { header: "Variant", cell: (row) => row.tradingCardVariantId ?? "Unresolved" },
+    {
+      header: "Card",
+      cell: (row) => {
+        if (row.card) {
+          return (
+            <div className="flex flex-col">
+              <Text size="small" weight="plus">{row.card.name}</Text>
+              <Text size="xsmall" className="text-ui-fg-subtle">
+                {row.card.setDisplayName} · {row.card.cardNumber} · {row.card.condition} · {row.card.finish}
+              </Text>
+            </div>
+          )
+        }
+        if (row.cardIdentityHint) {
+          return (
+            <div className="flex flex-col">
+              <Text size="small" className="text-ui-fg-subtle">Not yet matched</Text>
+              <Text size="xsmall" className="text-ui-fg-subtle">{row.cardIdentityHint}</Text>
+            </div>
+          )
+        }
+        return <Text size="small" className="text-ui-fg-subtle">Not yet matched</Text>
+      },
+    },
     { header: "Change", cell: (row) => row.changeKind },
     { header: "Quantity", cell: (row) => `${row.previousQuantity ?? 0} → ${row.proposedQuantity ?? 0}` },
     { header: "Status", cell: (row) => <InventoryProposalStatusBadge reviewStatus={row.reviewStatus} medusaSyncStatus={row.medusaSyncStatus} /> },
