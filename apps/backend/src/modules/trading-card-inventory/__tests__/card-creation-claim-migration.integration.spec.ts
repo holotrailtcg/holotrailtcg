@@ -45,6 +45,25 @@ const expectRawFailure = async (sql: string, params: unknown[], pattern: RegExp)
 beforeAll(async () => {
   rootConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
   pgConnection = await rootConnection.transaction() as never
+  // This migration's `down()` narrows the matched_via CHECK back to
+  // excluding MANUAL — an ADD CONSTRAINT that Postgres validates against
+  // every existing row in the table, not just this file's own fixtures.
+  // By the time this suite runs, real MANUAL-matched rows may already
+  // exist from other (real, committed) exercise of the create-card feature
+  // against this same shared test database. Since this whole file's
+  // connection is one uncommitted transaction rolled back in `afterAll`,
+  // reassigning those rows here is fully invisible outside this test — it
+  // is never committed, so it can never affect real data — and it must
+  // happen before the very first `down()` call, not just before the test
+  // that specifically exercises this constraint.
+  await pgConnection.raw(
+    `update trading_card_inventory_snapshot_entry_match set matched_via = 'UNIQUE_ATTRIBUTE_MATCH' where matched_via = 'MANUAL'`,
+  )
+  // Same reasoning for the audit-action CHECK: real PROPOSAL_VARIANT_RESOLVED
+  // audit rows may already exist from earlier real card-creation activity.
+  await pgConnection.raw(
+    `update trading_card_inventory_audit_entry set action = 'PROPOSAL_STATUS_CHANGED' where action = 'PROPOSAL_VARIANT_RESOLVED'`,
+  )
 })
 
 afterAll(async () => {

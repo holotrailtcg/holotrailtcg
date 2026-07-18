@@ -259,7 +259,6 @@ const CreateCardDialog = ({ row, onClose, onCreated }: CreateCardDialogProps) =>
                 <div className="flex flex-col gap-2">
                   <Text size="small" weight="plus">Existing image reused</Text>
                   {existingReadyImage.imageUrl && (
-                    // eslint-disable-next-line @next/next/no-img-element -- admin extension, not the Next.js storefront
                     <img src={existingReadyImage.imageUrl} alt={existingReadyImage.originalFilename} className="h-40 w-auto object-contain" />
                   )}
                   <div className="flex gap-2">

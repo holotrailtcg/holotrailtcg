@@ -155,7 +155,7 @@ interface CardCompensation {
 }
 
 const resolveOrCreateCardStep = createStep(
-  "resolve-or-create-trading-card",
+  "resolve-or-create-card",
   async (input: CreateCardFromInventoryRowInput & { cardSetId: string }, { container }) => {
     const cards = container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
     const query = container.resolve(ContainerRegistrationKeys.QUERY)
@@ -303,7 +303,7 @@ async function addCardVariantOptionValue(
 }
 
 const resolveOrCreateVariantStep = createStep(
-  "resolve-or-create-trading-card-variant",
+  "resolve-or-create-variant",
   async (input: CreateCardFromInventoryRowInput & { cardResult: CardStepResult }, { container }) => {
     const cards = container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
     const dimensions: VariantDimensions = { condition: input.condition, finish: input.finish, specialTreatment: input.specialTreatment }
@@ -430,7 +430,7 @@ const resolveOrCreateVariantStep = createStep(
 // ---------------------------------------------------------------------
 
 const resolveProposalStep = createStep(
-  "resolve-inventory-proposal-variant",
+  "resolve-proposal",
   async (input: { actor: string; source: InventoryRecordSource; proposalId: string; claimToken: string; tradingCardVariantId: string }, { container }) => {
     const inventory = container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
     const result = await inventory.resolveInventoryProposalVariant({
@@ -448,7 +448,7 @@ const resolveProposalStep = createStep(
 export type TcgdexEnrichmentStatus = "TRIGGERED" | "FAILED_TO_TRIGGER"
 
 const triggerTcgdexSyncStep = createStep(
-  "trigger-tcgdex-sync-best-effort",
+  "trigger-tcgdex-sync",
   async (input: { actor: string; tradingCardId: string }, { container }): Promise<StepResponse<TcgdexEnrichmentStatus>> => {
     try {
       const cards = container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
