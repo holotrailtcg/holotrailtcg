@@ -179,6 +179,7 @@ export function toSafeInventoryTransactionDto(row: Record<string, unknown>) {
 }
 
 export interface SafeCardIdentity {
+  tradingCardId: string
   name: string
   setDisplayName: string
   cardNumber: string
@@ -267,6 +268,7 @@ export async function attachCardIdentities<T extends {
       const cardSet = tradingCard?.card_set as Record<string, unknown> | undefined
       if (!tradingCard) continue
       identityByVariantId.set(variant.id as string, {
+        tradingCardId: tradingCard.id as string,
         name: tradingCard.name as string,
         setDisplayName: (cardSet?.display_name as string | undefined) ?? "Unknown set",
         cardNumber: tradingCard.card_number as string,

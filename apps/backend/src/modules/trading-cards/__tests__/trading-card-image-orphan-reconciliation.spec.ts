@@ -5,6 +5,7 @@ import { TRADING_CARDS_MODULE } from "../index"
 import { Migration20260715120000 } from "../migrations/Migration20260715120000"
 import { FakeR2ImageStorageClient } from "../__fixtures__/fake-r2-client"
 import { MANAGED_STAGING_PREFIX, MANAGED_FINAL_PREFIX } from "../images/managed-prefixes"
+import { normaliseCardNumberComparisonForm } from "../identity/card-number"
 
 /**
  * Focuses on what genuinely needs a real database and the real service
@@ -63,7 +64,7 @@ async function createVariant() {
   const cardId = suffix()
   const card = await service.createTradingCards({
     card_set_id: set.id, name: `Orphan Reconciliation Test Card ${cardId}`, search_name: `orphan reconciliation test card ${cardId}`,
-    card_number: "088/150", card_number_normalised: "088/150", origin: "PULSE",
+    card_number: "088/150", card_number_normalised: normaliseCardNumberComparisonForm("088/150"), origin: "PULSE",
   })
   const variantId = suffix()
   const variant = await service.createTradingCardVariants({

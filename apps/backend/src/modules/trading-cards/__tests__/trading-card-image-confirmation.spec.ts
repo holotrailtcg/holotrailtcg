@@ -4,6 +4,7 @@ import sharp from "sharp"
 import { TRADING_CARDS_MODULE } from "../index"
 import { Migration20260715120000 } from "../migrations/Migration20260715120000"
 import { FakeR2ImageStorageClient } from "../__fixtures__/fake-r2-client"
+import { normaliseCardNumberComparisonForm } from "../identity/card-number"
 
 let pgConnection: ReturnType<typeof createPgConnection>
 let medusaApp: Awaited<ReturnType<typeof MedusaApp>>
@@ -51,7 +52,7 @@ async function createCard(language: "EN" | "JA" | "ZH" = "EN", number = "044/072
   const id = suffix()
   const card = await service.createTradingCards({
     card_set_id: set.id, name: `Confirm Test Card ${id}`, search_name: `confirm test card ${id}`,
-    card_number: number, card_number_normalised: number, origin: "PULSE",
+    card_number: number, card_number_normalised: normaliseCardNumberComparisonForm(number), origin: "PULSE",
   })
   return { set, card }
 }

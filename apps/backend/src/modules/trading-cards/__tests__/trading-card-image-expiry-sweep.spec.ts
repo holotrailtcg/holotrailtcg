@@ -3,6 +3,7 @@ import { ContainerRegistrationKeys, createPgConnection } from "@medusajs/framewo
 import { TRADING_CARDS_MODULE } from "../index"
 import { Migration20260715120000 } from "../migrations/Migration20260715120000"
 import { FakeR2ImageStorageClient } from "../__fixtures__/fake-r2-client"
+import { normaliseCardNumberComparisonForm } from "../identity/card-number"
 
 let pgConnection: ReturnType<typeof createPgConnection>
 let medusaApp: Awaited<ReturnType<typeof MedusaApp>>
@@ -46,7 +47,7 @@ async function createVariant() {
   const cardId = suffix()
   const card = await service.createTradingCards({
     card_set_id: set.id, name: `Expiry Sweep Test Card ${cardId}`, search_name: `expiry sweep test card ${cardId}`,
-    card_number: "099/150", card_number_normalised: "099/150", origin: "PULSE",
+    card_number: "099/150", card_number_normalised: normaliseCardNumberComparisonForm("099/150"), origin: "PULSE",
   })
   const variantId = suffix()
   const variant = await service.createTradingCardVariants({

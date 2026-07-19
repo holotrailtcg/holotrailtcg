@@ -85,7 +85,7 @@ export async function POST(req: AuthenticatedMedusaRequest, res: MedusaResponse)
     )
     res.status(201).json({ result: toResultDto(result.tradingCardVariantId, variant as Record<string, unknown> | undefined, result.tcgdexEnrichmentStatus), idempotentReplay: false })
   } catch (error) {
-    if (error instanceof CatalogueIntegrityError) {
+    if (CatalogueIntegrityError.isCatalogueIntegrityError(error)) {
       throw new MedusaError(MedusaError.Types.UNEXPECTED_STATE, error.message)
     }
     throw error
