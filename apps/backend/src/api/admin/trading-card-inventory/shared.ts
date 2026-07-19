@@ -7,9 +7,16 @@ import {
   INVENTORY_PROPOSAL_CHANGE_KIND, INVENTORY_PROPOSAL_REVIEW_STATUS, INVENTORY_PROVIDER, INVENTORY_SOURCE_STATUS,
 } from "../../../modules/trading-card-inventory/types"
 import { PROPOSAL_BATCH_MAX_SIZE } from "../../../modules/trading-card-inventory/validation"
+import { parseProductId } from "../../../modules/trading-card-inventory/pulse/product-id"
+import { TRADING_CARDS_MODULE } from "../../../modules/trading-cards"
+import type TradingCardsModuleService from "../../../modules/trading-cards/service"
 
 export function tradingCardInventoryService(req: MedusaRequest): TradingCardInventoryModuleService {
   return req.scope.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
+}
+
+export function tradingCardsService(req: MedusaRequest): TradingCardsModuleService {
+  return req.scope.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
 }
 
 /** The authenticated Admin user's actor ID. Never accepted from the request body. */
@@ -171,6 +178,19 @@ export function toSafeInventoryTransactionDto(row: Record<string, unknown>) {
   }
 }
 
+export interface SafeCardIdentity {
+  tradingCardId: string
+  name: string
+  setDisplayName: string
+  cardNumber: string
+  rarity: string | null
+  rarityRaw: string | null
+  condition: string
+  finish: string
+  specialTreatment: string
+  sku: string
+}
+
 export function toSafeInventoryProposalDto(row: Record<string, unknown>) {
   const diagnostics = row.reconciliation_diagnostics as Record<string, unknown> | null
   return {
@@ -178,8 +198,13 @@ export function toSafeInventoryProposalDto(row: Record<string, unknown>) {
     inventorySourceId: row.inventory_source_id,
     inventorySnapshotId: row.inventory_snapshot_id ?? null,
     baselineSnapshotId: row.baseline_snapshot_id ?? null,
-    tradingCardVariantId: row.trading_card_variant_id ?? null,
-    providerReference: row.provider_reference ?? null,
+    tradingCardVariantId: (row.trading_card_variant_id as string | null) ?? null,
+    // Populated by `attachCardIdentities` after the base DTO is built — never
+    // set from the raw inventory-module row, which has no visibility into
+    // the trading-cards module's data.
+    card: null as SafeCardIdentity | null,
+    cardIdentityHint: null as string | null,
+    providerReference: (row.provider_reference as string | null) ?? null,
     providerReferenceType: row.provider_reference_type ?? null,
     previousQuantity: row.previous_quantity ?? null,
     proposedQuantity: row.proposed_quantity ?? null,
@@ -219,6 +244,55 @@ export function toSafeInventoryProposalDto(row: Record<string, unknown>) {
     medusaSyncRetryCount: row.medusa_sync_retry_count ?? 0,
     medusaSyncLastError: row.medusa_sync_last_error ?? null,
   }
+}
+
+/**
+ * Fills in `card` / `cardIdentityHint` on a page of proposal DTOs, batched
+ * into a single cross-module read. Resolved rows (`tradingCardVariantId` set)
+ * get the real card name/set/number from the trading-cards module; unresolved
+ * rows fall back to a best-effort hint decoded from the Pulse provider
+ * reference, so the review table is never just a bare ID or "Unresolved"
+ * with no way to tell which physical card a row is about.
+ */
+export async function attachCardIdentities<T extends {
+  tradingCardVariantId: string | null
+  providerReference: string | null
+  card: SafeCardIdentity | null
+  cardIdentityHint: string | null
+}>(req: MedusaRequest, rows: T[]): Promise<T[]> {
+  const variantIds = [...new Set(rows.map((row) => row.tradingCardVariantId).filter((id): id is string => Boolean(id)))]
+  const identityByVariantId = new Map<string, SafeCardIdentity>()
+  if (variantIds.length > 0) {
+    const variants = await tradingCardsService(req).listTradingCardVariants(
+      { id: variantIds }, { relations: ["trading_card", "trading_card.card_set"] },
+    )
+    for (const variant of variants as Array<Record<string, unknown>>) {
+      const tradingCard = variant.trading_card as Record<string, unknown> | undefined
+      const cardSet = tradingCard?.card_set as Record<string, unknown> | undefined
+      if (!tradingCard) continue
+      identityByVariantId.set(variant.id as string, {
+        tradingCardId: tradingCard.id as string,
+        name: tradingCard.name as string,
+        setDisplayName: (cardSet?.display_name as string | undefined) ?? "Unknown set",
+        cardNumber: tradingCard.card_number as string,
+        rarity: (tradingCard.rarity as string | null | undefined) ?? null,
+        rarityRaw: (tradingCard.rarity_raw as string | null | undefined) ?? null,
+        condition: variant.condition as string,
+        finish: variant.finish as string,
+        specialTreatment: variant.special_treatment as string,
+        sku: variant.sku as string,
+      })
+    }
+  }
+  return rows.map((row) => {
+    const card = row.tradingCardVariantId ? identityByVariantId.get(row.tradingCardVariantId) ?? null : null
+    if (card) return { ...row, card }
+    if (!row.providerReference) return row
+    const parsed = parseProductId(row.providerReference)
+    if (!parsed.setCodeCandidate && !parsed.cardNumberCandidate) return row
+    const hint = [parsed.setCodeCandidate, parsed.cardNumberCandidate].filter(Boolean).join(" ")
+    return { ...row, cardIdentityHint: hint || null }
+  })
 }
 
 /**

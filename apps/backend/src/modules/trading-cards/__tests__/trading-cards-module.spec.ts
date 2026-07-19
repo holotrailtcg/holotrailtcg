@@ -2,6 +2,7 @@ import { MedusaApp } from "@medusajs/framework/modules-sdk"
 import { ContainerRegistrationKeys, createPgConnection } from "@medusajs/framework/utils"
 import { TRADING_CARDS_MODULE } from "../index"
 import { canonicalIdentityKey, variantIdentityKey } from "../identity/identity-key"
+import { normaliseCardNumberComparisonForm } from "../identity/card-number"
 import { VERIFIED_DUPLICATE_EEVEE_ROWS } from "../__fixtures__/pulse-rows"
 import { EXTERNAL_REFERENCE_NOTE_MAX_LENGTH } from "../service"
 import { Migration20260715120000 } from "../migrations/Migration20260715120000"
@@ -43,7 +44,7 @@ async function createCard(language: "EN" | "JA" | "ZH" = "EN", number = "044/072
   const id = suffix()
   const card = await service.createTradingCards({
     card_set_id: set.id, name: `Crobat ${id}`, search_name: `crobat ${id}`,
-    card_number: number, card_number_normalised: number, origin: "PULSE",
+    card_number: number, card_number_normalised: normaliseCardNumberComparisonForm(number), origin: "PULSE",
   })
   return { set, card }
 }
@@ -81,7 +82,7 @@ describe("trading-card schema", () => {
     const { set } = await createCard("EN", "0104/15")
     await expect(service.createTradingCards({
       card_set_id: set.id, name: "Duplicate", search_name: "duplicate",
-      card_number: "0104/15", card_number_normalised: "0104/15",
+      card_number: "0104/15", card_number_normalised: normaliseCardNumberComparisonForm("0104/15"),
     })).rejects.toThrow()
   })
 
@@ -89,6 +90,97 @@ describe("trading-card schema", () => {
     const en = await createCard("EN", "53/62")
     const ja = await createCard("JA", "53/62")
     expect(en.card.id).not.toBe(ja.card.id)
+  })
+
+  // Checkpoint 5B follow-up: an earlier report claimed pre-migration Pulse
+  // matching "remains correct because the incoming candidate is
+  // normalised", without verifying the actual stored comparison. That claim
+  // was FALSE: a literal `card_number_normalised = ?` SQL comparison against
+  // only the new (denominator-stripped) form returns zero rows for a row
+  // that has not yet been migrated — "044/072" (stored, unmigrated) is never
+  // equal to "044" (candidate, normalised). Verified directly by temporarily
+  // reverting `findVariantCandidatesForPulseMatch` to the single-form query
+  // and re-running this exact test, which failed (0 candidates) before the
+  // legacy-fallback branch below was added, and passes now that it exists.
+  it("findVariantCandidatesForPulseMatch finds a genuinely unmigrated legacy row via the legacy-fallback branch", async () => {
+    const setId = suffix()
+    const set = await service.createCardSets({
+      game: "POKEMON", language: "EN", display_name: `Legacy Match Set ${setId}`, provider_set_code: `set_legacy_match_${setId}`,
+    })
+    // Deliberately written with the OLD algorithm's shape — denominator
+    // still attached — exactly as every pre-Phase-8 writer would have left
+    // it, and exactly what `Migration20260718160000` exists to fix. Never
+    // migrated in this test, by design.
+    const legacyCard = await service.createTradingCards({
+      card_set_id: set.id, name: `Legacy Match Card ${setId}`, search_name: `legacy match card ${setId}`,
+      card_number: "044/072", card_number_normalised: "044/072", origin: "PULSE",
+    })
+    const legacyVariant = await service.createTradingCardVariants({
+      trading_card_id: legacyCard.id, condition: "NEAR_MINT", condition_source: "EXPLICIT",
+      finish: "HOLO", finish_confirmed: true, special_treatment: "NONE", special_treatment_confirmed: true,
+      sku: `SKU-LEGACYMATCH-${setId.toUpperCase()}`, origin: "PULSE",
+    })
+
+    // A fresh Pulse row for the exact same physical card — the shape
+    // `parseProductId` would hand `findVariantCandidatesForPulseMatch` today.
+    const candidates = await service.findVariantCandidatesForPulseMatch({
+      setCodeCandidate: `set_legacy_match_${setId}`, cardNumberCandidate: "044/072", language: "EN",
+      condition: "NEAR_MINT", finish: "HOLO", specialTreatment: "NONE",
+    })
+
+    expect(candidates).toHaveLength(1)
+    expect(candidates[0].id).toBe(legacyVariant.id)
+  })
+
+  it("findVariantCandidatesForPulseMatch finds a legacy row with a lowercase suffix via the legacy-fallback branch", async () => {
+    const setId = suffix()
+    const set = await service.createCardSets({
+      game: "POKEMON", language: "EN", display_name: `Legacy Suffix Set ${setId}`, provider_set_code: `set_legacy_suffix_${setId}`,
+    })
+    // Old algorithm preserved case — "025a" was never uppercase-folded.
+    const legacyCard = await service.createTradingCards({
+      card_set_id: set.id, name: `Legacy Suffix Card ${setId}`, search_name: `legacy suffix card ${setId}`,
+      card_number: "025a", card_number_normalised: "025a", origin: "PULSE",
+    })
+    const legacyVariant = await service.createTradingCardVariants({
+      trading_card_id: legacyCard.id, condition: "NEAR_MINT", condition_source: "EXPLICIT",
+      finish: "HOLO", finish_confirmed: true, special_treatment: "NONE", special_treatment_confirmed: true,
+      sku: `SKU-LEGACYSUFFIX-${setId.toUpperCase()}`, origin: "PULSE",
+    })
+
+    const candidates = await service.findVariantCandidatesForPulseMatch({
+      setCodeCandidate: `set_legacy_suffix_${setId}`, cardNumberCandidate: "025a", language: "EN",
+      condition: "NEAR_MINT", finish: "HOLO", specialTreatment: "NONE",
+    })
+
+    expect(candidates).toHaveLength(1)
+    expect(candidates[0].id).toBe(legacyVariant.id)
+  })
+
+  it("findVariantCandidatesForPulseMatch finds the same row once it has been migrated to the new normalisation shape", async () => {
+    const setId = suffix()
+    const set = await service.createCardSets({
+      game: "POKEMON", language: "EN", display_name: `Migrated Match Set ${setId}`, provider_set_code: `set_migrated_match_${setId}`,
+    })
+    // Post-migration shape: denominator stripped, uppercase-folded — what
+    // Migration20260718160000 leaves behind.
+    const migratedCard = await service.createTradingCards({
+      card_set_id: set.id, name: `Migrated Match Card ${setId}`, search_name: `migrated match card ${setId}`,
+      card_number: "044/072", card_number_normalised: "044", origin: "PULSE",
+    })
+    const variant = await service.createTradingCardVariants({
+      trading_card_id: migratedCard.id, condition: "NEAR_MINT", condition_source: "EXPLICIT",
+      finish: "HOLO", finish_confirmed: true, special_treatment: "NONE", special_treatment_confirmed: true,
+      sku: `SKU-MIGRATEDMATCH-${setId.toUpperCase()}`, origin: "PULSE",
+    })
+
+    const candidates = await service.findVariantCandidatesForPulseMatch({
+      setCodeCandidate: `set_migrated_match_${setId}`, cardNumberCandidate: "044/072", language: "EN",
+      condition: "NEAR_MINT", finish: "HOLO", specialTreatment: "NONE",
+    })
+
+    expect(candidates).toHaveLength(1)
+    expect(candidates[0].id).toBe(variant.id)
   })
 
   it("prevents duplicate commercial variants and duplicate SKUs", async () => {

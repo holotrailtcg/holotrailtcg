@@ -4,7 +4,7 @@ import type { ParsedPulseRow } from "../types"
 const baseRow = (overrides: Partial<ParsedPulseRow> = {}): ParsedPulseRow => ({
   rowNumber: 1, outcome: "VALID", providerReference: "card:swsh4pt5|044/072|Holo|null|null|null|nm",
   quantity: 1, currencyCode: "GBP", unitAcquisitionCost: "1.00", unitMarketPrice: "1.06", unitSellingPrice: "0.95",
-  conditionSource: "EXPLICIT", conditionCandidate: "NEAR_MINT", finishCandidate: "HOLO", specialTreatmentCandidate: "NONE",
+  conditionSource: "EXPLICIT", conditionCandidate: "NEAR_MINT", conditionUnknownToken: null, finishCandidate: "HOLO", specialTreatmentCandidate: "NONE",
   rarityCandidate: "COMMON", rarityRaw: "Common", languageConflict: false, languageCandidate: "EN",
   cardNumberCandidate: "044/072", setCodeCandidate: "swsh4pt5", gradedCardDetected: false, rawFields: {}, diagnostics: [],
   ...overrides,
@@ -52,9 +52,17 @@ describe("matchSnapshotEntry", () => {
     expect(result).toMatchObject({ matchingStatus: "MATCHED", tradingCardVariantId: "tcvar_5", matchedVia: "UNIQUE_ATTRIBUTE_MATCH", shouldPersistTrustedReference: true })
   })
 
-  it("never treats a defaulted/guessed attribute as uniquely proven, even if a unique candidate would exist", async () => {
+  it("allows a cleanly-absent condition (defaulted to Near Mint) to still be uniquely matched", async () => {
     const result = await matchSnapshotEntry(
-      baseRow({ conditionSource: "DEFAULTED" }),
+      baseRow({ conditionSource: "DEFAULTED", conditionUnknownToken: null }),
+      lookup({ findCandidateVariants: async () => [{ id: "tcvar_5", tradingCardId: "tcard_5" }] }),
+    )
+    expect(result).toMatchObject({ matchingStatus: "MATCHED", tradingCardVariantId: "tcvar_5", matchedVia: "UNIQUE_ATTRIBUTE_MATCH", shouldPersistTrustedReference: true })
+  })
+
+  it("never treats a genuinely unrecognized condition token as safe to auto-match, even if a unique candidate would exist", async () => {
+    const result = await matchSnapshotEntry(
+      baseRow({ conditionSource: "DEFAULTED", conditionUnknownToken: "xyz" }),
       lookup({ findCandidateVariants: async () => [{ id: "tcvar_5", tradingCardId: "tcard_5" }] }),
     )
     expect(result.matchingStatus).toBe("REVIEW_REQUIRED")

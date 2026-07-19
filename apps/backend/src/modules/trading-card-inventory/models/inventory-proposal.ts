@@ -62,6 +62,16 @@ const InventoryProposal = model
     medusa_sync_attempt_token: model.text().nullable(),
     // Categorized, bounded, Admin-safe diagnostic only — never a raw Medusa exception or stack trace.
     medusa_sync_last_error: model.json().nullable(),
+    /**
+     * Lease/claim pair guarding the "create a card from this unmatched
+     * Pulse row" operation, mirroring `medusa_sync_attempt_token`'s exact
+     * protocol: minted fresh by `beginCardCreationClaim`, required and
+     * re-validated by `resolveInventoryProposalVariant`'s final write so a
+     * superseded/expired attempt can never complete after a newer one has
+     * taken ownership. Both are cleared the moment resolution succeeds.
+     */
+    card_creation_claim_token: model.text().nullable(),
+    card_creation_claimed_at: model.dateTime().nullable(),
   })
   .indexes([
     {

@@ -1,6 +1,6 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { asValue } from "@medusajs/framework/awilix"
-import { TcgDexClient, type TcgDexLookupDependency } from "../../../modules/trading-cards/tcgdex"
+import { TcgDexClient } from "../../../modules/trading-cards/tcgdex"
 
 /**
  * Container registration key for the TCGdex lookup client used by the
@@ -16,9 +16,9 @@ import { TcgDexClient, type TcgDexLookupDependency } from "../../../modules/trad
  */
 export const TCGDEX_ADMIN_CLIENT_KEY = "tcgdexAdminClient"
 
-export function resolveTcgDexAdminClient(container: MedusaContainer): TcgDexLookupDependency {
+export function resolveTcgDexAdminClient(container: MedusaContainer): TcgDexClient {
   if (!container.hasRegistration(TCGDEX_ADMIN_CLIENT_KEY)) {
     container.register(TCGDEX_ADMIN_CLIENT_KEY, asValue(new TcgDexClient()))
   }
-  return container.resolve<TcgDexLookupDependency>(TCGDEX_ADMIN_CLIENT_KEY)
+  return container.resolve<TcgDexClient>(TCGDEX_ADMIN_CLIENT_KEY)
 }

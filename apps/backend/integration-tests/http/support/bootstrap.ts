@@ -105,6 +105,8 @@ export interface NewsletterHttpTestApp {
   getNeedingImages: (query: Record<string, string>, authToken?: string) => Promise<Response>
   /** GET /admin/trading-cards/:tradingCardId/images */
   getCardImages: (tradingCardId: string, authToken?: string) => Promise<Response>
+  /** GET /admin/trading-cards/variants/images */
+  getVariantThumbnails: (variantIds: string[], authToken?: string) => Promise<Response>
   /** POST /admin/trading-cards/variants/:variantId/images/reorder */
   postReorder: (variantId: string, body: unknown, authToken?: string) => Promise<Response>
   /** POST /admin/trading-cards/images/:imageId/archive */
@@ -284,6 +286,10 @@ export async function bootstrapNewsletterHttpTestApp(): Promise<NewsletterHttpTe
       }),
     getCardImages: (tradingCardId, authToken) =>
       fetch(`${baseUrl}/admin/trading-cards/${encodeURIComponent(tradingCardId)}/images`, {
+        headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+      }),
+    getVariantThumbnails: (variantIds, authToken) =>
+      fetch(`${baseUrl}/admin/trading-cards/variants/images?variantIds=${variantIds.map(encodeURIComponent).join(",")}`, {
         headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
       }),
     postReorder: (variantId, body, authToken) =>

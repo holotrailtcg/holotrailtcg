@@ -9,13 +9,10 @@ function fakeInventory(overrides: Partial<Record<string, unknown>> = {}) {
       .mockResolvedValueOnce({ id: "tcisnap_1", inventory_source_id: "tcisrc_1", status: "DRAFT", row_count: 1 })
       .mockResolvedValue({ id: "tcisnap_1", inventory_source_id: "tcisrc_1", status: "VALIDATED", row_count: 1 }),
     retrieveInventorySource: jest.fn(async (id: string) => ({ id, status: "ACTIVE", language: "EN" })),
-    listSnapshotEntriesForAdmin: jest.fn(async () => ({
-      rows: [{
+    listUnmatchedSnapshotEntriesForAdmin: jest.fn(async () => ([{
         id: "tcisentry_1", row_number: 1, outcome: "VALID", provider_reference: "card:sv1|066/196|holo|nm",
         quantity: 2, currency_code: "GBP", matching_status: "UNMATCHED",
-      }],
-      count: 1,
-    })),
+      }])),
     recordSnapshotEntryMatches: jest.fn(async () => ({ inventorySnapshotId: "tcisnap_1", processedCount: 1 })),
     recordImportLifecycleAudit: jest.fn(async () => undefined),
     transitionInventorySnapshotStatus: jest.fn(async () => ({ id: "tcisnap_1" })),
@@ -91,7 +88,7 @@ describe("retryPulseSnapshotMatching", () => {
       retrieveInventorySnapshot: jest.fn(async (id: string) => ({
         id, inventory_source_id: "tcisrc_1", status: "PENDING_REVIEW", row_count: 1,
       })),
-      listSnapshotEntriesForAdmin: jest.fn(async () => ({ rows: [], count: 0 })),
+      listUnmatchedSnapshotEntriesForAdmin: jest.fn(async () => []),
     })
     const cards = fakeCards()
     const result = await retryPulseSnapshotMatching(fakeContainer(inventory, cards), baseInput)
@@ -134,6 +131,30 @@ describe("retryPulseSnapshotMatching", () => {
       inventorySnapshotId: "tcisnap_1",
     }))
     expect(inventory.transitionInventorySnapshotStatus).not.toHaveBeenCalled()
+  })
+
+  it("re-matches every underlying duplicate entry instead of one grouped display row", async () => {
+    const inventory = fakeInventory({
+      listUnmatchedSnapshotEntriesForAdmin: jest.fn(async () => [
+        {
+          id: "tcisentry_1", row_number: 1, outcome: "VALID", provider_reference: "card:sv1|066/196|holo|nm",
+          quantity: 1, currency_code: "GBP", matching_status: "UNMATCHED",
+        },
+        {
+          id: "tcisentry_2", row_number: 2, outcome: "VALID", provider_reference: "card:sv1|066/196|holo|nm",
+          quantity: 1, currency_code: "GBP", matching_status: "UNMATCHED",
+        },
+      ]),
+    })
+
+    await retryPulseSnapshotMatching(fakeContainer(inventory, fakeCards()), baseInput)
+
+    expect(inventory.recordSnapshotEntryMatches).toHaveBeenCalledWith(expect.objectContaining({
+      entries: expect.arrayContaining([
+        expect.objectContaining({ snapshotEntryId: "tcisentry_1" }),
+        expect.objectContaining({ snapshotEntryId: "tcisentry_2" }),
+      ]),
+    }))
   })
 
   it("returns NO_USABLE_ROWS and skips reconciliation when a DRAFT snapshot still has no usable rows", async () => {

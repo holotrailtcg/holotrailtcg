@@ -5,13 +5,15 @@ import TradingCardVariant from "./models/trading-card-variant"
 import ExternalCardReference from "./models/external-card-reference"
 import CardAuditEntry from "./models/card-audit-entry"
 import RarityMapping from "./models/rarity-mapping"
+import ProviderSetMapping from "./models/provider-set-mapping"
+import TcgDexLookupCandidate from "./models/tcgdex-lookup-candidate"
 import TcgDexEnrichmentProposal from "./models/tcgdex-enrichment-proposal"
 import TcgDexEnrichmentAttempt from "./models/tcgdex-enrichment-attempt"
 import CardImage from "./models/card-image"
-import { cardNumberForms, normaliseComparisonText } from "./identity/card-number"
+import { cardNumberForms, normaliseCardNumberComparisonForm, normaliseComparisonText } from "./identity/card-number"
 import { rarityComparisonForm } from "./rarity/normalise-rarity"
 import {
-  AUDIT_ACTION, AUDIT_ENTITY_TYPE, type CardCondition, type CardFinish,
+  AUDIT_ACTION, AUDIT_ENTITY_TYPE, type CardCondition, type CardFinish, type CardGame,
   type CardLanguage, type ConditionSource, type ExternalProvider, RECORD_ORIGIN, type RecordOrigin, type SpecialTreatment,
   EXTERNAL_PROVIDER, EXTERNAL_REFERENCE_PROVENANCE, type ExternalReferenceProvenance, IMAGE_STATUS,
   MAX_CARD_IMAGE_BYTE_SIZE, CARD_IMAGE_UPLOAD_EXPIRY_MINUTES, CARD_IMAGE_CLEANUP_ACTOR, SUPPORTED_IMAGE_MIME_TYPES,
@@ -36,6 +38,7 @@ import {
 } from "./tcgdex/admin-review"
 import {
   listCardsNeedingImages,
+  listThumbnailsForVariants,
   retrieveCardImageDetail,
   type ImageListQuery,
 } from "./images/admin-image-review"
@@ -161,7 +164,7 @@ const externalReferenceAuditState = (value: Record<string, unknown>) => ({
 
 class TradingCardsModuleService extends MedusaService({
   CardSet, TradingCard, TradingCardVariant, ExternalCardReference, CardAuditEntry, RarityMapping,
-  TcgDexEnrichmentProposal, TcgDexEnrichmentAttempt, CardImage,
+  TcgDexEnrichmentProposal, TcgDexEnrichmentAttempt, CardImage, ProviderSetMapping, TcgDexLookupCandidate,
 }) {
   protected manager_: EntityManager
 
@@ -414,22 +417,45 @@ class TradingCardsModuleService extends MedusaService({
   /**
    * Stage 5B.1: the other half of `TradingCardMatchLookup` — candidate
    * variants for a card identified by (set code, card number, language)
-   * matching the row's exact commercial attributes. Card number comparison
-   * uses the same NFC/trim normalisation as Stage 3 identity matching
-   * (`identity/card-number.ts`); set code and language are compared exactly,
-   * per ADR 0007 (never parsed/fuzzy-matched).
+   * matching the row's exact commercial attributes. Set code and language
+   * are compared exactly, per ADR 0007 (never parsed/fuzzy-matched).
+   *
+   * Card number comparison matches against BOTH the current
+   * `normaliseCardNumberComparisonForm` shape (denominator-stripped,
+   * uppercase-folded — what every writer produces once
+   * `Migration20260718160000` has run) AND the pre-Phase-8 legacy shape
+   * (trim+NFC only, denominator and case preserved — what every row written
+   * before that migration still has until it runs). This is a deliberate,
+   * temporary compatibility fallback, not deployment-ordering trust: a
+   * literal `card_number_normalised = ?` SQL comparison against only the new
+   * form returns zero rows for a row that has not yet been migrated
+   * (verified directly — see "findVariantCandidatesForPulseMatch finds
+   * NOTHING for a genuinely unmigrated legacy row" in
+   * trading-cards-module.spec.ts), so relying on migration-before-boot
+   * ordering alone would leave a real window where existing catalogue cards
+   * become invisible to Pulse matching. Remove the legacy branch once
+   * Migration20260718160000 is confirmed applied in every environment that
+   * matters (dev, test, and — once it exists — production) and no
+   * `card_number_normalised` value in any of them differs from
+   * `normaliseCardNumberComparisonForm(card_number_normalised)`.
    */
   async findVariantCandidatesForPulseMatch(input: {
     setCodeCandidate: string; cardNumberCandidate: string; language: string; condition: string; finish: string; specialTreatment: string
   }) {
-    const cardNumber = normaliseComparisonText(input.cardNumberCandidate)
+    const currentForm = normaliseCardNumberComparisonForm(input.cardNumberCandidate)
+    const legacyForm = normaliseComparisonText(input.cardNumberCandidate)
+    // Pulse candidates are already denominator-inclusive text (e.g.
+    // "044/072"), so `currentForm` and `legacyForm` normally differ; only
+    // dedupe the parameter list for the rare case they coincide (a card
+    // number with no denominator and no letters to case-fold).
+    const cardNumberCandidates = [...new Set([currentForm, legacyForm])]
     const rows = await this.manager_.execute<{ id: string; trading_card_id: string }>(
       `select tcv.id, tcv.trading_card_id from trading_card_variant tcv
        inner join trading_card tc on tc.id = tcv.trading_card_id and tc.deleted_at is null
        inner join trading_card_set cs on cs.id = tc.card_set_id and cs.deleted_at is null
-       where cs.provider_set_code = ? and cs.language = ? and tc.card_number_normalised = ?
+       where cs.provider_set_code = ? and cs.language = ? and tc.card_number_normalised in (${cardNumberCandidates.map(() => "?").join(", ")})
          and tcv.condition = ? and tcv.finish = ? and tcv.special_treatment = ? and tcv.deleted_at is null`,
-      [input.setCodeCandidate, input.language, cardNumber, input.condition, input.finish, input.specialTreatment],
+      [input.setCodeCandidate, input.language, ...cardNumberCandidates, input.condition, input.finish, input.specialTreatment],
     )
     return rows.map((row) => ({ id: row.id, tradingCardId: row.trading_card_id }))
   }
@@ -598,6 +624,113 @@ class TradingCardsModuleService extends MedusaService({
       [input.provider, comparison, input.language ?? null, input.language ?? null]
     )
     return rows[0] ?? null
+  }
+
+  async findProviderSetMapping(input: { provider: ExternalProvider; game: CardGame; language: CardLanguage; providerSetCode: string }) {
+    const [row] = await this.manager_.execute<Record<string, unknown>>(
+      `select * from trading_card_provider_set_mapping
+       where provider = ? and game = ? and language = ? and provider_set_code = ? and deleted_at is null`,
+      [input.provider, input.game, input.language, input.providerSetCode]
+    )
+    return row ?? null
+  }
+
+  /**
+   * Confirms a mapping from one provider's own set code to a real TCGdex set
+   * id. The caller (API layer) is responsible for verifying the TCGdex id
+   * actually exists via a live lookup before calling this — this method only
+   * persists the confirmed result, it never talks to TCGdex itself.
+   */
+  async createProviderSetMapping(input: {
+    provider: ExternalProvider; game: CardGame; language: CardLanguage
+    providerSetCode: string; tcgdexSetId: string; tcgdexSetName: string
+    tcgdexSeriesId: string; tcgdexSeriesName: string
+  }) {
+    const existing = await this.findProviderSetMapping(input)
+    if (existing) {
+      throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This provider set code is already mapped")
+    }
+    const id = generateEntityId(undefined, "tcpsm")
+    await this.manager_.execute(
+      `insert into trading_card_provider_set_mapping
+         (id, provider, game, language, provider_set_code, tcgdex_set_id, tcgdex_set_name, tcgdex_series_id, tcgdex_series_name)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id, input.provider, input.game, input.language, input.providerSetCode, input.tcgdexSetId, input.tcgdexSetName,
+        input.tcgdexSeriesId, input.tcgdexSeriesName,
+      ]
+    )
+    return this.findProviderSetMapping(input)
+  }
+
+  async retrieveTcgdexLookupCandidateById(id: string) {
+    const [row] = await this.manager_.execute<Record<string, unknown>>(
+      `select * from trading_card_tcgdex_lookup_candidate where id = ? and deleted_at is null`, [id]
+    )
+    return row ?? null
+  }
+
+  async findTcgdexLookupCandidate(input: { provider: ExternalProvider; language: CardLanguage; tcgdexSetId: string; cardNumber: string }) {
+    const [row] = await this.manager_.execute<Record<string, unknown>>(
+      `select * from trading_card_tcgdex_lookup_candidate
+       where provider = ? and language = ? and tcgdex_set_id = ? and card_number = ? and deleted_at is null`,
+      [input.provider, input.language, input.tcgdexSetId, input.cardNumber]
+    )
+    return row ?? null
+  }
+
+  /**
+   * Caches one TCGdex lookup outcome, keyed by exact card identity — never
+   * called for `PROVIDER_ERROR` (a transient failure must be retried, not
+   * remembered as a stable result; the caller is responsible for not
+   * caching it). Idempotent: a second call for the same identity is a
+   * harmless no-op, returning the first-ever recorded result rather than
+   * overwriting it, since the whole point is that a card's TCGdex identity
+   * never legitimately changes.
+   */
+  async recordTcgdexLookupCandidate(input: {
+    provider: ExternalProvider; language: CardLanguage; tcgdexSetId: string; cardNumber: string
+    matchOutcome: "MATCHED" | "NO_MATCH" | "UNRESOLVED_SET" | "IDENTITY_MISMATCH"
+    enrichment?: Record<string, unknown> | null
+  }) {
+    const existing = await this.findTcgdexLookupCandidate(input)
+    if (existing) return existing
+    const id = generateEntityId(undefined, "tclookup")
+    const reviewStatus = input.matchOutcome === "MATCHED" ? "PENDING" : null
+    await this.manager_.execute(
+      `insert into trading_card_tcgdex_lookup_candidate
+         (id, provider, language, tcgdex_set_id, card_number, match_outcome, enrichment, review_status)
+       values (?, ?, ?, ?, ?, ?, ?::jsonb, ?)
+       on conflict (provider, language, tcgdex_set_id, card_number) where deleted_at is null do nothing`,
+      [id, input.provider, input.language, input.tcgdexSetId, input.cardNumber, input.matchOutcome,
+        input.enrichment ? JSON.stringify(input.enrichment) : null, reviewStatus]
+    )
+    return this.findTcgdexLookupCandidate(input)
+  }
+
+  /** Batch existence check for a set of exact card identities — used to skip already-cached lookups before spending a live TCGdex call. */
+  async listTcgdexLookupCandidates(input: {
+    provider: ExternalProvider; language: CardLanguage; keys: Array<{ tcgdexSetId: string; cardNumber: string }>
+  }) {
+    if (input.keys.length === 0) return []
+    const placeholders = input.keys.map(() => `(?, ?)`).join(", ")
+    const params = input.keys.flatMap((key) => [key.tcgdexSetId, key.cardNumber])
+    return this.manager_.execute<Record<string, unknown>>(
+      `select * from trading_card_tcgdex_lookup_candidate
+       where provider = ? and language = ? and deleted_at is null
+         and (tcgdex_set_id, card_number) in (${placeholders})`,
+      [input.provider, input.language, ...params]
+    )
+  }
+
+  async reviewTcgdexLookupCandidates(input: { ids: string[]; reviewStatus: "ACCEPTED" | "REJECTED" }) {
+    if (input.ids.length === 0) return
+    const placeholders = input.ids.map(() => "?").join(", ")
+    await this.manager_.execute(
+      `update trading_card_tcgdex_lookup_candidate set review_status = ?, updated_at = now()
+       where id in (${placeholders}) and match_outcome = 'MATCHED' and review_status = 'PENDING' and deleted_at is null`,
+      [input.reviewStatus, ...input.ids]
+    )
   }
 
   async assertVariantProductHierarchy(input: { productVariantProductId?: string | null; tradingCardProductId?: string | null }): Promise<void> {
@@ -1005,6 +1138,15 @@ class TradingCardsModuleService extends MedusaService({
 
   async retrieveCardImageDetail(tradingCardId: string) {
     return retrieveCardImageDetail(this.manager_, tradingCardId)
+  }
+
+  /** See `listThumbnailsForVariants` in `images/admin-image-review.ts`. */
+  async listThumbnailsForVariants(input: { variantIds: string[]; publicBaseUrl: string | null }) {
+    return listThumbnailsForVariants(
+      this.manager_,
+      input.variantIds,
+      (objectKey) => input.publicBaseUrl ? derivePublicImageUrl(input.publicBaseUrl, objectKey) : null,
+    )
   }
 
   /**

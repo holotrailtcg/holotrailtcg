@@ -1,6 +1,7 @@
 import type { AuthenticatedMedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import {
-  parseAdminInput, proposalListQuerySchema, safeAdminRead, toSafeInventoryProposalDto, tradingCardInventoryService,
+  attachCardIdentities, parseAdminInput, proposalListQuerySchema, safeAdminRead, toSafeInventoryProposalDto,
+  tradingCardInventoryService,
 } from "../shared"
 
 export async function GET(req: AuthenticatedMedusaRequest, res: MedusaResponse) {
@@ -14,8 +15,6 @@ export async function GET(req: AuthenticatedMedusaRequest, res: MedusaResponse) 
   const [rows, count] = await safeAdminRead(() => tradingCardInventoryService(req).listAndCountInventoryProposals(
     filters, { skip: query.offset, take: query.limit, order: { created_at: "DESC" } },
   ))
-  res.status(200).json({
-    proposals: rows.map((row: Record<string, unknown>) => toSafeInventoryProposalDto(row)),
-    count, limit: query.limit, offset: query.offset,
-  })
+  const proposals = await attachCardIdentities(req, rows.map((row: Record<string, unknown>) => toSafeInventoryProposalDto(row)))
+  res.status(200).json({ proposals, count, limit: query.limit, offset: query.offset })
 }

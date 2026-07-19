@@ -7,10 +7,11 @@ import { TRADING_CARD_INVENTORY_MODULE } from "../../modules/trading-card-invent
 import type TradingCardInventoryModuleService from "../../modules/trading-card-inventory/service"
 import type { AuditContext, RecordSnapshotEntryMatchBatchItem } from "../../modules/trading-card-inventory/service"
 import {
-  INVENTORY_AUDIT_ACTION, INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS, INVENTORY_SNAPSHOT_ENTRY_OUTCOME, INVENTORY_SNAPSHOT_STATUS,
+  INVENTORY_AUDIT_ACTION, INVENTORY_SNAPSHOT_ENTRY_OUTCOME, INVENTORY_SNAPSHOT_STATUS,
 } from "../../modules/trading-card-inventory/types"
 import { matchSnapshotEntry, type TradingCardMatchLookup } from "../../modules/trading-card-inventory/pulse/matching"
 import { parseProductId } from "../../modules/trading-card-inventory/pulse/product-id"
+import { resolveCondition } from "../../modules/trading-card-inventory/pulse/condition"
 import { inferProviderLanguageHint, resolveRowLanguage } from "../../modules/trading-card-inventory/pulse/language"
 import type { ParsedPulseRow } from "../../modules/trading-card-inventory/pulse/types"
 import { reconcileInventorySnapshotWithPriceLocks } from "./reconcile-inventory-snapshot"
@@ -28,7 +29,6 @@ import type { RetryPulseSnapshotMatchingInput } from "./retry-pulse-snapshot-mat
 
 export const MATCH_CHUNK_SIZE = 250
 export const WARNING_CAP = 50
-export const ADMIN_LIST_PAGE_SIZE = 500
 
 export const MATCHABLE_OUTCOMES: readonly string[] = [
   INVENTORY_SNAPSHOT_ENTRY_OUTCOME.VALID, INVENTORY_SNAPSHOT_ENTRY_OUTCOME.VALID_WITH_WARNINGS, INVENTORY_SNAPSHOT_ENTRY_OUTCOME.REVIEW_REQUIRED,
@@ -65,6 +65,10 @@ export function entryRowToMatchInput(entryRow: Record<string, unknown>, sourceLa
   const productId = parseProductId(providerReference)
   const languageHint = inferProviderLanguageHint(productId.setCodeCandidate)
   const language = resolveRowLanguage(sourceLanguage, languageHint)
+  // Re-resolved from the raw product-ID token (not read back from the persisted `condition_source`
+  // column) so this stays a pure function of the provider reference — the same helper `parsePulseRow`
+  // itself uses, so a retry sees exactly the same condition/source/unknownToken as the original parse.
+  const condition = resolveCondition(productId.conditionCandidate)
   return {
     rowNumber: Number(entryRow.row_number ?? 0),
     outcome: String(entryRow.outcome) as ParsedPulseRow["outcome"],
@@ -74,8 +78,9 @@ export function entryRowToMatchInput(entryRow: Record<string, unknown>, sourceLa
     unitAcquisitionCost: entryRow.unit_acquisition_cost === null || entryRow.unit_acquisition_cost === undefined ? null : String(entryRow.unit_acquisition_cost),
     unitMarketPrice: entryRow.unit_market_price === null || entryRow.unit_market_price === undefined ? null : String(entryRow.unit_market_price),
     unitSellingPrice: entryRow.unit_selling_price === null || entryRow.unit_selling_price === undefined ? null : String(entryRow.unit_selling_price),
-    conditionSource: (entryRow.condition_source as ParsedPulseRow["conditionSource"]) ?? null,
-    conditionCandidate: productId.conditionCandidate,
+    conditionSource: condition.source,
+    conditionCandidate: condition.condition,
+    conditionUnknownToken: condition.unknownToken,
     finishCandidate: (entryRow.finish_candidate as string | null) ?? null,
     specialTreatmentCandidate: (entryRow.special_treatment_candidate as string | null) ?? null,
     rarityCandidate: (entryRow.rarity_candidate as string | null) ?? null,
@@ -239,23 +244,16 @@ export async function collectWarnings(inventory: TradingCardInventoryModuleServi
 export async function loadEntriesNeedingMatch(
   inventory: TradingCardInventoryModuleService, snapshotId: string, sourceLanguage: string | null,
 ): Promise<Array<{ entryId: string; row: ParsedPulseRow }>> {
-  const items: Array<{ entryId: string; row: ParsedPulseRow }> = []
-  let offset = 0
-  for (;;) {
-    const { rows, count } = await inventory.listSnapshotEntriesForAdmin(snapshotId, {}, { limit: ADMIN_LIST_PAGE_SIZE, offset })
-    for (const row of rows) {
-      if (!MATCHABLE_OUTCOMES.includes(String(row.outcome))) continue
-      const matchingStatus = row.matching_status as string | null
-      const needsMatch = !matchingStatus ||
-        matchingStatus === INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS.UNMATCHED ||
-        matchingStatus === INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS.AMBIGUOUS ||
-        matchingStatus === INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS.REVIEW_REQUIRED
-      if (needsMatch) items.push({ entryId: row.id as string, row: entryRowToMatchInput(row, sourceLanguage) })
-    }
-    offset += ADMIN_LIST_PAGE_SIZE
-    if (offset >= count) break
-  }
-  return items
+  // The Admin table intentionally groups duplicate provider references into
+  // one displayed card. Matching must never use that grouped read: every
+  // physical CSV entry owns an independent match row and must be updated.
+  // Otherwise one duplicate can become MATCHED while its siblings remain
+  // UNMATCHED, even though the UI correctly displays them as one card with
+  // a summed quantity.
+  const rows = await inventory.listUnmatchedSnapshotEntriesForAdmin(snapshotId)
+  return rows
+    .filter((row) => MATCHABLE_OUTCOMES.includes(String(row.outcome)))
+    .map((row) => ({ entryId: row.id as string, row: entryRowToMatchInput(row, sourceLanguage) }))
 }
 
 /**

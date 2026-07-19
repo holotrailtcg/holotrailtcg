@@ -3,6 +3,8 @@ import type { ReactNode } from "react"
 
 export interface ReviewTableColumn<T> {
   header: string
+  /** Overrides the rendered header cell content (e.g. a select-all checkbox) while `header` still supplies the column's stable key. */
+  headerCell?: ReactNode
   cell: (row: T) => ReactNode
 }
 
@@ -11,10 +13,13 @@ interface ReviewTableProps<T> {
   rows: T[]
   rowKey: (row: T) => string
   onRowClick?: (row: T) => void
+  /** Optional per-row background tint, e.g. by severity. Returned classes are appended alongside the default row classes. */
+  rowClassName?: (row: T) => string | undefined
   isLoading: boolean
   isError: boolean
   emptyMessage: string
   errorMessage?: string
+  className?: string
 }
 
 function ReviewTable<T>({
@@ -22,10 +27,12 @@ function ReviewTable<T>({
   rows,
   rowKey,
   onRowClick,
+  rowClassName,
   isLoading,
   isError,
   emptyMessage,
   errorMessage = "This could not be loaded. Please try again.",
+  className,
 }: ReviewTableProps<T>) {
   if (isLoading) {
     return (
@@ -52,11 +59,11 @@ function ReviewTable<T>({
   }
 
   return (
-    <Table>
+    <Table className={className}>
       <Table.Header>
         <Table.Row>
           {columns.map((column) => (
-            <Table.HeaderCell key={column.header}>{column.header}</Table.HeaderCell>
+            <Table.HeaderCell key={column.header}>{column.headerCell ?? column.header}</Table.HeaderCell>
           ))}
         </Table.Row>
       </Table.Header>
@@ -64,7 +71,7 @@ function ReviewTable<T>({
         {rows.map((row) => (
           <Table.Row
             key={rowKey(row)}
-            className={onRowClick ? "cursor-pointer" : undefined}
+            className={[onRowClick ? "cursor-pointer" : "", rowClassName?.(row) ?? ""].filter(Boolean).join(" ") || undefined}
             onClick={() => onRowClick?.(row)}
           >
             {columns.map((column) => (

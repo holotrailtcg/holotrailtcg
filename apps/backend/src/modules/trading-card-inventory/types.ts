@@ -19,6 +19,11 @@ export type InventorySourceStatus = (typeof INVENTORY_SOURCE_STATUS)[keyof typeo
  * APPLYING: application to holdings/ledger in progress (transient).
  * APPLIED: terminal success; holdings/ledger reflect this snapshot.
  * REJECTED / FAILED / SUPERSEDED: terminal non-success outcomes.
+ * DISCARDED: terminal — an Admin manually removed this snapshot from the
+ * working list before it was ever applied. Reachable only from states where
+ * nothing has touched real stock yet (see the transition table below); never
+ * reachable from APPLIED/APPLYING, so a discard can never hide a snapshot
+ * that already moved inventory.
  */
 export const INVENTORY_SNAPSHOT_STATUS = {
   DRAFT: "DRAFT",
@@ -30,6 +35,7 @@ export const INVENTORY_SNAPSHOT_STATUS = {
   REJECTED: "REJECTED",
   FAILED: "FAILED",
   SUPERSEDED: "SUPERSEDED",
+  DISCARDED: "DISCARDED",
 } as const
 export type InventorySnapshotStatus = (typeof INVENTORY_SNAPSHOT_STATUS)[keyof typeof INVENTORY_SNAPSHOT_STATUS]
 
@@ -38,22 +44,27 @@ export type InventorySnapshotStatus = (typeof INVENTORY_SNAPSHOT_STATUS)[keyof t
  * statuses a snapshot in that state may move to; anything else is rejected.
  */
 export const INVENTORY_SNAPSHOT_STATUS_TRANSITIONS: Record<InventorySnapshotStatus, InventorySnapshotStatus[]> = {
-  DRAFT: [INVENTORY_SNAPSHOT_STATUS.VALIDATED, INVENTORY_SNAPSHOT_STATUS.FAILED],
-  VALIDATED: [INVENTORY_SNAPSHOT_STATUS.PENDING_REVIEW, INVENTORY_SNAPSHOT_STATUS.FAILED],
+  DRAFT: [INVENTORY_SNAPSHOT_STATUS.VALIDATED, INVENTORY_SNAPSHOT_STATUS.FAILED, INVENTORY_SNAPSHOT_STATUS.DISCARDED],
+  VALIDATED: [
+    INVENTORY_SNAPSHOT_STATUS.PENDING_REVIEW, INVENTORY_SNAPSHOT_STATUS.FAILED, INVENTORY_SNAPSHOT_STATUS.DISCARDED,
+  ],
   PENDING_REVIEW: [
     INVENTORY_SNAPSHOT_STATUS.APPROVED,
     INVENTORY_SNAPSHOT_STATUS.REJECTED,
     INVENTORY_SNAPSHOT_STATUS.SUPERSEDED,
+    INVENTORY_SNAPSHOT_STATUS.DISCARDED,
   ],
   APPROVED: [
     INVENTORY_SNAPSHOT_STATUS.APPLYING,
     INVENTORY_SNAPSHOT_STATUS.SUPERSEDED,
+    INVENTORY_SNAPSHOT_STATUS.DISCARDED,
   ],
   APPLYING: [INVENTORY_SNAPSHOT_STATUS.APPLIED, INVENTORY_SNAPSHOT_STATUS.FAILED],
   APPLIED: [INVENTORY_SNAPSHOT_STATUS.SUPERSEDED],
-  REJECTED: [],
-  FAILED: [],
+  REJECTED: [INVENTORY_SNAPSHOT_STATUS.DISCARDED],
+  FAILED: [INVENTORY_SNAPSHOT_STATUS.DISCARDED],
   SUPERSEDED: [],
+  DISCARDED: [],
 }
 
 /**
@@ -129,6 +140,9 @@ export type MedusaSyncStatus = (typeof MEDUSA_SYNC_STATUS)[keyof typeof MEDUSA_S
 /** After this lease, an interrupted PENDING attempt may be safely superseded by a retry token. */
 export const MEDUSA_SYNC_ATTEMPT_LEASE_MS = 5 * 60 * 1000
 
+/** Same lease protocol as `MEDUSA_SYNC_ATTEMPT_LEASE_MS`, for the "create a card from this unmatched Pulse row" claim. */
+export const CARD_CREATION_CLAIM_LEASE_MS = 5 * 60 * 1000
+
 /** Categorized, Admin-safe Medusa sync failure reasons — never a raw Medusa exception or stack trace. */
 export const MEDUSA_SYNC_ERROR_CATEGORY = {
   INVALID_CONFIGURED_STOCK_LOCATION: "INVALID_CONFIGURED_STOCK_LOCATION",
@@ -191,6 +205,7 @@ export const INVENTORY_AUDIT_ACTION = {
   PROPOSAL_REVIEWED: "PROPOSAL_REVIEWED",
   PROPOSAL_APPLICATION_ATTEMPTED: "PROPOSAL_APPLICATION_ATTEMPTED",
   PROPOSAL_APPLICATION_REJECTED_STALE_BASELINE: "PROPOSAL_APPLICATION_REJECTED_STALE_BASELINE",
+  PROPOSAL_APPLICATION_REJECTED_SNAPSHOT_DISCARDED: "PROPOSAL_APPLICATION_REJECTED_SNAPSHOT_DISCARDED",
   PROPOSAL_APPLIED: "PROPOSAL_APPLIED",
   PROPOSAL_APPLICATION_RETRIED: "PROPOSAL_APPLICATION_RETRIED",
   MEDUSA_SYNC_SUCCEEDED: "MEDUSA_SYNC_SUCCEEDED",
@@ -205,6 +220,7 @@ export const INVENTORY_AUDIT_ACTION = {
   IMPORT_RECONCILIATION_COMPLETED: "IMPORT_RECONCILIATION_COMPLETED",
   IMPORT_PROPOSALS_REFRESHED: "IMPORT_PROPOSALS_REFRESHED",
   IMPORT_FAILED: "IMPORT_FAILED",
+  PROPOSAL_VARIANT_RESOLVED: "PROPOSAL_VARIANT_RESOLVED",
 } as const
 export type InventoryAuditAction = (typeof INVENTORY_AUDIT_ACTION)[keyof typeof INVENTORY_AUDIT_ACTION]
 
@@ -290,6 +306,7 @@ export type InventorySnapshotEntryMatchingStatus =
 export const INVENTORY_SNAPSHOT_ENTRY_MATCHED_VIA = {
   TRUSTED_REFERENCE: "TRUSTED_REFERENCE",
   UNIQUE_ATTRIBUTE_MATCH: "UNIQUE_ATTRIBUTE_MATCH",
+  MANUAL: "MANUAL",
   NONE: "NONE",
 } as const
 export type InventorySnapshotEntryMatchedVia =

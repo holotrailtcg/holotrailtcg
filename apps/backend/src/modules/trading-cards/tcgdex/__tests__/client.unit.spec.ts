@@ -59,6 +59,53 @@ describe("TCGdex language mapping", () => {
   })
 })
 
+describe("TcgDexClient.listSets", () => {
+  it("requests the sets collection for the given language and validates the response shape", async () => {
+    const fetchImpl = jest.fn(async (url: string | URL) => {
+      expect(String(url)).toBe("https://api.tcgdex.net/v2/en/sets")
+      return response([{ id: "swsh4.5", name: "Shining Fates" }, { id: "swsh10", name: "Astral Radiance" }])
+    })
+    const { client } = makeClient(fetchImpl)
+    await expect(client.listSets("EN")).resolves.toEqual([
+      { id: "swsh4.5", name: "Shining Fates" },
+      { id: "swsh10", name: "Astral Radiance" },
+    ])
+  })
+
+  it("rejects a malformed sets response", async () => {
+    const fetchImpl = jest.fn(async () => response([{ id: "swsh10" }]))
+    const { client } = makeClient(fetchImpl)
+    await expectCode(client.listSets("EN"), TCGDEX_ERROR_CODE.INVALID_RESPONSE)
+  })
+})
+
+describe("TcgDexClient.getSetById", () => {
+  it("returns the verified set and its parent series", async () => {
+    const fetchImpl = jest.fn(async (url: string | URL) => {
+      expect(String(url)).toBe("https://api.tcgdex.net/v2/en/sets/me02.5")
+      return response({
+        id: "me02.5",
+        name: "Ascended Heroes",
+        serie: { id: "me", name: "Mega Evolution" },
+      })
+    })
+    const { client } = makeClient(fetchImpl)
+
+    await expect(client.getSetById("EN", "me02.5")).resolves.toMatchObject({
+      id: "me02.5",
+      name: "Ascended Heroes",
+      serie: { id: "me", name: "Mega Evolution" },
+    })
+  })
+
+  it("rejects set details without a parent series", async () => {
+    const fetchImpl = jest.fn(async () => response({ id: "me02.5", name: "Ascended Heroes" }))
+    const { client } = makeClient(fetchImpl)
+
+    await expectCode(client.getSetById("EN", "me02.5"), TCGDEX_ERROR_CODE.INVALID_RESPONSE)
+  })
+})
+
 describe("TcgDexClient", () => {
   it.each([
     ["EN", "en"],

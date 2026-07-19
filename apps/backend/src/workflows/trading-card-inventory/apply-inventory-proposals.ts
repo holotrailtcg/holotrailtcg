@@ -6,6 +6,7 @@ import type { ApplyInventoryProposalItemResult } from "../../modules/trading-car
 import { MEDUSA_SYNC_STATUS, type InventoryRecordSource } from "../../modules/trading-card-inventory/types"
 import { syncInventoryProposalToMedusa } from "./medusa-inventory-sync"
 import { advanceSnapshotProgressIfComplete } from "./advance-snapshot-progress"
+import { syncTradingCardProductMedia } from "../trading-cards/sync-product-media"
 
 export interface ApplyInventoryProposalsWithSyncInput {
   actor: string
@@ -58,6 +59,16 @@ export async function applyInventoryProposalsWithSync(
           }
     )
     result.medusaSyncStatus = saved.medusa_sync_status as ApplyInventoryProposalItemResult["medusaSyncStatus"]
+
+    if (syncResult.outcome === "SYNCED") {
+      try {
+        await syncTradingCardProductMedia(container, proposal.trading_card_variant_id as string)
+      } catch (error) {
+        // Product media is a separate, idempotent projection and must not
+        // turn a successful absolute inventory sync into a false failure.
+        console.error(`[trading-card-inventory] failed to sync product media for proposal ${result.proposalId}`, error)
+      }
+    }
   }
 
   const snapshotIds = new Set<string>()

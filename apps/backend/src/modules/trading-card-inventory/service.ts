@@ -22,7 +22,7 @@ import {
   INVENTORY_PROPOSAL_REVIEW_STATUS, INVENTORY_PROPOSAL_CHANGE_KIND, INVENTORY_PROVIDER_REFERENCE_TYPE,
   INVENTORY_SNAPSHOT_STATUS, INVENTORY_SOURCE_STATUS, INVENTORY_TRANSACTION_REASON,
   INVENTORY_SNAPSHOT_ENTRY_OUTCOME, INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS, INVENTORY_SNAPSHOT_ENTRY_MATCHED_VIA,
-  MEDUSA_SYNC_STATUS, MEDUSA_SYNC_ATTEMPT_LEASE_MS,
+  MEDUSA_SYNC_STATUS, MEDUSA_SYNC_ATTEMPT_LEASE_MS, CARD_CREATION_CLAIM_LEASE_MS,
   isValidInventoryHoldingTransition, isValidInventoryProposalTransition, isValidInventorySnapshotTransition,
   type InventoryHoldingStatus, type InventoryProposalReviewStatus, type InventoryProposalChangeKind,
   type InventoryRecordSource, type InventorySnapshotStatus, type MedusaSyncStatus,
@@ -100,7 +100,7 @@ export interface ApplyInventoryProposalInput extends AuditContext {
 
 export interface ApplyInventoryProposalItemResult {
   proposalId: string
-  localApplicationStatus: "APPLIED" | "ALREADY_APPLIED" | "STALE_BASELINE" | "INVALID_STATE" | "OUT_OF_SCOPE"
+  localApplicationStatus: "APPLIED" | "ALREADY_APPLIED" | "STALE_BASELINE" | "INVALID_STATE" | "OUT_OF_SCOPE" | "SNAPSHOT_DISCARDED"
   transactionId: string | null
   priorQuantity: number | null
   resultingQuantity: number | null
@@ -147,6 +147,7 @@ export interface ImportedSnapshotEntryInput {
   unitMarketPrice?: string | null
   unitSellingPrice?: string | null
   conditionSource?: string | null
+  conditionCandidate?: string | null
   finishCandidate?: string | null
   specialTreatmentCandidate?: string | null
   rarityCandidate?: string | null
@@ -269,6 +270,32 @@ class TradingCardInventoryModuleService extends MedusaService({
         input.reason ?? null, input.source,
       ]
     )
+  }
+
+  /**
+   * Locks a proposal's parent snapshot row (`for update`) and throws if it
+   * has been discarded. `transitionInventorySnapshotStatus` takes the same
+   * row lock when moving a snapshot to DISCARDED, so calling this from
+   * every path that turns a proposal into a real inventory or card-creation
+   * change (review, apply, begin/resolve card-creation claim) serialises
+   * against a concurrent discard: whichever transaction commits its lock
+   * first decides the outcome, and the loser always sees the fresh status —
+   * never a stale "not yet discarded" read that lets stock move after the
+   * snapshot was removed from the working list. A proposal with no snapshot
+   * (`inventory_snapshot_id` is nullable) has nothing to discard, so it's a
+   * no-op.
+   */
+  private async lockAndAssertSnapshotNotDiscarded(manager: TxManager, snapshotId: string | null): Promise<void> {
+    if (!snapshotId) return
+    const [snapshot] = await manager.execute<Record<string, unknown>>(
+      `select status from trading_card_inventory_snapshot where id = ? for update`, [snapshotId]
+    )
+    if (snapshot && snapshot.status === INVENTORY_SNAPSHOT_STATUS.DISCARDED) {
+      throw new MedusaError(
+        MedusaError.Types.NOT_ALLOWED,
+        "This proposal's inventory snapshot has been discarded and can no longer be acted on"
+      )
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -474,7 +501,7 @@ class TradingCardInventoryModuleService extends MedusaService({
     idSchema.parse(input.inventorySourceId)
     const [existing] = await this.manager_.execute<Record<string, unknown>>(
       `select * from trading_card_inventory_snapshot
-       where inventory_source_id = ? and content_hash = ? and status not in ('REJECTED', 'FAILED') and deleted_at is null`,
+       where inventory_source_id = ? and content_hash = ? and status not in ('REJECTED', 'FAILED', 'DISCARDED') and deleted_at is null`,
       [input.inventorySourceId, input.contentHash],
     )
     return existing ?? null
@@ -505,7 +532,7 @@ class TradingCardInventoryModuleService extends MedusaService({
       }
       const [existing] = await manager.execute<Record<string, unknown>>(
         `select id from trading_card_inventory_snapshot
-         where inventory_source_id = ? and content_hash = ? and status not in ('REJECTED', 'FAILED') and deleted_at is null`,
+         where inventory_source_id = ? and content_hash = ? and status not in ('REJECTED', 'FAILED', 'DISCARDED') and deleted_at is null`,
         [input.inventorySourceId, input.contentHash],
       )
       if (existing) throw new DuplicateSnapshotError(existing.id as string)
@@ -551,6 +578,20 @@ class TradingCardInventoryModuleService extends MedusaService({
         `update trading_card_inventory_snapshot set ${assignments.join(", ")}, updated_at = now() where id = ?`,
         [...values, input.id]
       )
+      if (input.targetStatus === INVENTORY_SNAPSHOT_STATUS.DISCARDED) {
+        // Belt-and-braces alongside the `for update` lock above and the
+        // snapshot-status check every actionable proposal path now takes
+        // (`lockAndAssertSnapshotNotDiscarded`): a live card-creation claim
+        // for one of this snapshot's proposals is no longer honourable once
+        // the snapshot is gone, so clear it here rather than leaving it to
+        // expire on its own lease.
+        await manager.execute(
+          `update trading_card_inventory_proposal
+           set card_creation_claim_token = null, card_creation_claimed_at = null, updated_at = now()
+           where inventory_snapshot_id = ? and card_creation_claim_token is not null and deleted_at is null`,
+          [input.id]
+        )
+      }
       await this.writeAudit(manager, {
         ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_SNAPSHOT, entityId: input.id,
         action: INVENTORY_AUDIT_ACTION.SNAPSHOT_STATUS_CHANGED,
@@ -661,7 +702,7 @@ class TradingCardInventoryModuleService extends MedusaService({
         const chunk = input.rows.slice(offset, offset + 500)
         const chunkIds = chunk.map(() => generateEntityId(undefined, "tcisentry"))
         entryIds.push(...chunkIds)
-        const placeholders = chunk.map(() => `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)`).join(", ")
+        const placeholders = chunk.map(() => `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)`).join(", ")
         const params = chunk.flatMap((row, index) => {
           // A blank/malformed row may have no usable provider reference; a
           // synthetic bounded placeholder keeps the NOT-NULL/length
@@ -673,15 +714,16 @@ class TradingCardInventoryModuleService extends MedusaService({
             row.tradingCardVariantId ?? null, row.quantity ?? 0, row.currencyCode ?? null,
             canonicalDecimal(row.unitAcquisitionCost ?? null), canonicalDecimal(row.unitMarketPrice ?? null),
             canonicalDecimal(row.unitSellingPrice ?? null), row.rowNumber, row.outcome, row.conditionSource ?? null,
-            row.finishCandidate ?? null, row.specialTreatmentCandidate ?? null, row.rarityCandidate ?? null,
-            row.rarityRaw ?? null, row.languageConflict, row.rawFields ? JSON.stringify(row.rawFields) : null,
+            row.conditionCandidate ?? null, row.finishCandidate ?? null, row.specialTreatmentCandidate ?? null,
+            row.rarityCandidate ?? null, row.rarityRaw ?? null, row.languageConflict,
+            row.rawFields ? JSON.stringify(row.rawFields) : null,
           ]
         })
         await manager.execute(
           `insert into trading_card_inventory_snapshot_entry
            (id, inventory_snapshot_id, provider_reference, provider_reference_type, trading_card_variant_id, quantity,
             currency_code, unit_acquisition_cost, unit_market_price, unit_selling_price, row_number, outcome,
-            condition_source, finish_candidate, special_treatment_candidate, rarity_candidate, rarity_raw,
+            condition_source, condition_candidate, finish_candidate, special_treatment_candidate, rarity_candidate, rarity_raw,
             language_conflict, raw_fields) values ${placeholders}`,
           params,
         )
@@ -1071,6 +1113,28 @@ class TradingCardInventoryModuleService extends MedusaService({
               (count(*) - count(distinct provider_reference))::text as duplicate_rows
        from trading_card_inventory_snapshot_entry where inventory_snapshot_id = ? and deleted_at is null`, [snapshotId]
     )
+    const [{ approved_cards, approved_quantity }] = await this.manager_.execute<{ approved_cards: string; approved_quantity: string }>(
+      `select count(distinct e.provider_reference)::text as approved_cards,
+              coalesce(sum(e.quantity), 0)::text as approved_quantity
+       from trading_card_inventory_snapshot_entry e
+       inner join trading_card_inventory_snapshot_entry_match m
+         on m.snapshot_entry_id = e.id and m.matching_status = 'MATCHED' and m.deleted_at is null
+       inner join trading_card_inventory_snapshot s
+         on s.id = e.inventory_snapshot_id and s.deleted_at is null
+       inner join trading_card_inventory_source src
+         on src.id = s.inventory_source_id and src.deleted_at is null
+       inner join trading_card_provider_set_mapping set_mapping
+         on set_mapping.provider = 'PULSE' and set_mapping.game = 'POKEMON'
+        and set_mapping.language = src.language and set_mapping.deleted_at is null
+        and lower(set_mapping.provider_set_code) = lower(replace(split_part(e.provider_reference, '|', 1), 'card:', ''))
+       inner join trading_card_tcgdex_lookup_candidate lookup_candidate
+         on lookup_candidate.provider = 'PULSE' and lookup_candidate.language = src.language
+        and lookup_candidate.tcgdex_set_id = set_mapping.tcgdex_set_id
+        and lookup_candidate.card_number = split_part(split_part(e.provider_reference, '|', 2), '/', 1)
+        and lookup_candidate.match_outcome = 'MATCHED' and lookup_candidate.review_status = 'ACCEPTED'
+        and lookup_candidate.deleted_at is null
+       where e.inventory_snapshot_id = ? and e.deleted_at is null`, [snapshotId]
+    )
     return {
       snapshotId: snapshot.id, inventorySourceId: snapshot.inventory_source_id, status: snapshot.status,
       inventorySourceDisplayName: snapshot.inventory_source_display_name,
@@ -1080,15 +1144,72 @@ class TradingCardInventoryModuleService extends MedusaService({
       byMatchingStatus: Object.fromEntries(byMatchingStatus.map((row) => [row.key, Number(row.count)])),
       byDiagnosticSeverity: Object.fromEntries(byDiagnosticSeverity.map((row) => [row.key, Number(row.count)])),
       uniqueProviderReferences: Number(unique_references), duplicateRowCount: Number(duplicate_rows),
+      approvedCardCount: Number(approved_cards), approvedQuantity: Number(approved_quantity),
     }
+  }
+
+  /**
+   * Distinct trading-card variants this snapshot has actually matched to,
+   * used to gate "assign images before approval" — never includes rows still
+   * unmatched, since those have no variant (and so no image) yet.
+   */
+  async listDistinctMatchedVariantIds(snapshotId: string): Promise<string[]> {
+    idSchema.parse(snapshotId)
+    const rows = await this.manager_.execute<{ trading_card_variant_id: string }>(
+      `select distinct trading_card_variant_id from trading_card_inventory_snapshot_entry_match
+       where inventory_snapshot_id = ? and matching_status = 'MATCHED' and trading_card_variant_id is not null and deleted_at is null`,
+      [snapshotId]
+    )
+    return rows.map((row) => row.trading_card_variant_id)
+  }
+
+  /**
+   * Distinct raw provider references for a snapshot's still-unmatched rows —
+   * the caller parses each into a candidate set code (via `parseProductId`)
+   * to find which sets need a TCGdex mapping before matching can resolve
+   * them. Scoped to unmatched rows only: a row already matched doesn't need
+   * its set re-checked.
+   */
+  async listDistinctUnmatchedProviderReferences(snapshotId: string): Promise<string[]> {
+    idSchema.parse(snapshotId)
+    const rows = await this.manager_.execute<{ provider_reference: string }>(
+      `select distinct e.provider_reference from trading_card_inventory_snapshot_entry e
+       inner join trading_card_inventory_snapshot_entry_match m on m.snapshot_entry_id = e.id and m.deleted_at is null
+       where e.inventory_snapshot_id = ? and e.deleted_at is null
+         and m.matching_status in ('UNMATCHED', 'AMBIGUOUS', 'REVIEW_REQUIRED')`,
+      [snapshotId]
+    )
+    return rows.map((row) => row.provider_reference)
+  }
+
+  /**
+   * Full rows (not just references) for a snapshot's still-unmatched
+   * entries — the parsed-candidate columns a bulk TCGdex-match accept needs
+   * to decide, per row, whether it has enough information to create a
+   * variant automatically. One row per entry, not deduplicated by reference
+   * (unlike `listDistinctUnmatchedProviderReferences`): a duplicate CSV row
+   * still needs its own proposal resolved.
+   */
+  async listUnmatchedSnapshotEntriesForAdmin(snapshotId: string): Promise<Record<string, unknown>[]> {
+    idSchema.parse(snapshotId)
+    return this.manager_.execute<Record<string, unknown>>(
+      `select e.*, m.matching_status, m.matched_via, m.retry_count,
+              m.trading_card_variant_id as matched_trading_card_variant_id
+       from trading_card_inventory_snapshot_entry e
+       inner join trading_card_inventory_snapshot_entry_match m on m.snapshot_entry_id = e.id and m.deleted_at is null
+       where e.inventory_snapshot_id = ? and e.deleted_at is null
+         and m.matching_status in ('UNMATCHED', 'AMBIGUOUS', 'REVIEW_REQUIRED')`,
+      [snapshotId]
+    )
   }
 
   /** Stage 5B.1: paginated, filterable entry listing for the Admin preview screen. */
   async listSnapshotEntriesForAdmin(
     snapshotId: string,
     filters: {
-      outcome?: string; matchingStatus?: string; finishCandidate?: string; specialTreatmentCandidate?: string
-      rarityCandidate?: string; duplicateReferenceOnly?: boolean; snapshotEntryId?: string
+      outcome?: string; reviewStatus?: string; finishCandidate?: string; specialTreatmentCandidate?: string
+      rarityCandidate?: string; duplicateReferenceOnly?: boolean; snapshotEntryId?: string; providerReference?: string
+      sortBy?: string; sortDirection?: "asc" | "desc"
     },
     pagination: { limit: number; offset: number },
   ) {
@@ -1096,11 +1217,39 @@ class TradingCardInventoryModuleService extends MedusaService({
     const conditions = ["e.inventory_snapshot_id = ?", "e.deleted_at is null"]
     const params: unknown[] = [snapshotId]
     if (filters.outcome) { conditions.push("e.outcome = ?"); params.push(filters.outcome) }
-    if (filters.matchingStatus) { conditions.push("m.matching_status = ?"); params.push(filters.matchingStatus) }
+    const pendingTcgdexCandidate = `exists (
+      select 1
+      from trading_card_inventory_snapshot review_snapshot
+      inner join trading_card_inventory_source review_source
+        on review_source.id = review_snapshot.inventory_source_id and review_source.deleted_at is null
+      inner join trading_card_provider_set_mapping set_mapping
+        on set_mapping.provider = 'PULSE' and set_mapping.game = 'POKEMON'
+       and set_mapping.language = review_source.language and set_mapping.deleted_at is null
+       and lower(set_mapping.provider_set_code) = lower(replace(split_part(e.provider_reference, '|', 1), 'card:', ''))
+      inner join trading_card_tcgdex_lookup_candidate lookup_candidate
+        on lookup_candidate.provider = 'PULSE' and lookup_candidate.language = review_source.language
+       and lookup_candidate.tcgdex_set_id = set_mapping.tcgdex_set_id
+       and lookup_candidate.card_number = split_part(split_part(e.provider_reference, '|', 2), '/', 1)
+       and lookup_candidate.match_outcome = 'MATCHED' and lookup_candidate.review_status = 'PENDING'
+       and lookup_candidate.deleted_at is null
+      where review_snapshot.id = e.inventory_snapshot_id and review_snapshot.deleted_at is null
+    )`
+    if (filters.reviewStatus === "ACTION_REQUIRED") {
+      conditions.push(`(m.matching_status is null or m.matching_status <> 'MATCHED' or ${pendingTcgdexCandidate})`)
+    } else if (filters.reviewStatus === "AWAITING_REVIEW") {
+      conditions.push(`(m.matching_status = 'REVIEW_REQUIRED' or ${pendingTcgdexCandidate})`)
+    } else if (filters.reviewStatus === "NOT_MATCHED") {
+      conditions.push(`(m.matching_status is null or m.matching_status = 'UNMATCHED') and not ${pendingTcgdexCandidate}`)
+    } else if (filters.reviewStatus === "MATCHED") {
+      conditions.push("m.matching_status = 'MATCHED'")
+    } else if (filters.reviewStatus === "AMBIGUOUS") {
+      conditions.push("m.matching_status = 'AMBIGUOUS'")
+    }
     if (filters.finishCandidate) { conditions.push("e.finish_candidate = ?"); params.push(filters.finishCandidate) }
     if (filters.specialTreatmentCandidate) { conditions.push("e.special_treatment_candidate = ?"); params.push(filters.specialTreatmentCandidate) }
     if (filters.rarityCandidate) { conditions.push("e.rarity_candidate = ?"); params.push(filters.rarityCandidate) }
     if (filters.snapshotEntryId) { conditions.push("e.id = ?"); params.push(filters.snapshotEntryId) }
+    if (filters.providerReference) { conditions.push("e.provider_reference = ?"); params.push(filters.providerReference) }
     if (filters.duplicateReferenceOnly) {
       conditions.push(
         `e.provider_reference in (
@@ -1111,17 +1260,71 @@ class TradingCardInventoryModuleService extends MedusaService({
       params.push(snapshotId)
     }
     const where = conditions.join(" and ")
+    const sortExpressions: Record<string, string> = {
+      cardName: "sort_card_name",
+      set: "sort_set_name",
+      quantity: "aggregated_quantity",
+      purchasePrice: "unit_acquisition_cost",
+      marketPrice: "unit_market_price",
+      salePrice: "unit_selling_price",
+      finish: "finish_candidate",
+      variant: "special_treatment_candidate",
+      rarity: "coalesce(rarity_candidate, rarity_raw)",
+      reviewStatus: "sort_review_status",
+    }
+    const sortExpression = sortExpressions[filters.sortBy ?? "cardName"] ?? sortExpressions.cardName
+    const sortDirection = filters.sortDirection === "desc" ? "desc" : "asc"
     const [{ count }] = await this.manager_.execute<{ count: string }>(
-      `select count(*)::text as count from trading_card_inventory_snapshot_entry e
+      `select count(distinct coalesce(e.provider_reference, e.id))::text as count from trading_card_inventory_snapshot_entry e
        left join trading_card_inventory_snapshot_entry_match m on m.snapshot_entry_id = e.id and m.deleted_at is null
        where ${where}`, params,
     )
     const rows = await this.manager_.execute<Record<string, unknown>>(
-      `select e.*, m.matching_status, m.matched_via, m.retry_count,
-              m.trading_card_variant_id as matched_trading_card_variant_id
-       from trading_card_inventory_snapshot_entry e
-       left join trading_card_inventory_snapshot_entry_match m on m.snapshot_entry_id = e.id and m.deleted_at is null
-       where ${where} order by e.row_number asc nulls last limit ? offset ?`,
+      `with ranked_entries as (
+         select e.*, m.matching_status, m.matched_via, m.retry_count,
+                m.trading_card_variant_id as matched_trading_card_variant_id,
+                coalesce(matched_card.name, lookup_candidate.enrichment->>'name', e.provider_reference, '') as sort_card_name,
+                coalesce(matched_set.display_name, set_mapping.tcgdex_set_name, '') as sort_set_name,
+                case
+                  when m.matching_status = 'REVIEW_REQUIRED' or lookup_candidate.id is not null then 'AWAITING_REVIEW'
+                  when m.matching_status = 'MATCHED' then 'MATCHED'
+                  when m.matching_status = 'AMBIGUOUS' then 'AMBIGUOUS'
+                  else 'NOT_MATCHED'
+                end as sort_review_status,
+                (sum(e.quantity) over (partition by coalesce(e.provider_reference, e.id)))::int as aggregated_quantity,
+                row_number() over (
+                  partition by coalesce(e.provider_reference, e.id)
+                  order by e.row_number asc nulls last, e.id asc
+                ) as duplicate_rank
+         from trading_card_inventory_snapshot_entry e
+         left join trading_card_inventory_snapshot_entry_match m on m.snapshot_entry_id = e.id and m.deleted_at is null
+         left join trading_card_inventory_snapshot sort_snapshot
+           on sort_snapshot.id = e.inventory_snapshot_id and sort_snapshot.deleted_at is null
+         left join trading_card_inventory_source sort_source
+           on sort_source.id = sort_snapshot.inventory_source_id and sort_source.deleted_at is null
+         left join trading_card_provider_set_mapping set_mapping
+           on set_mapping.provider = 'PULSE' and set_mapping.game = 'POKEMON'
+          and set_mapping.language = sort_source.language and set_mapping.deleted_at is null
+          and lower(set_mapping.provider_set_code) = lower(replace(split_part(e.provider_reference, '|', 1), 'card:', ''))
+         left join trading_card_tcgdex_lookup_candidate lookup_candidate
+           on lookup_candidate.provider = 'PULSE' and lookup_candidate.language = sort_source.language
+          and lookup_candidate.tcgdex_set_id = set_mapping.tcgdex_set_id
+          and lookup_candidate.card_number = split_part(split_part(e.provider_reference, '|', 2), '/', 1)
+          and lookup_candidate.match_outcome = 'MATCHED' and lookup_candidate.review_status = 'PENDING'
+          and lookup_candidate.deleted_at is null
+         left join trading_card_variant matched_variant
+           on matched_variant.id = m.trading_card_variant_id and matched_variant.deleted_at is null
+         left join trading_card matched_card
+           on matched_card.id = matched_variant.trading_card_id and matched_card.deleted_at is null
+         left join trading_card_set matched_set
+           on matched_set.id = matched_card.card_set_id and matched_set.deleted_at is null
+         where ${where}
+       )
+       select ranked_entries.*, aggregated_quantity as quantity
+       from ranked_entries
+       where duplicate_rank = 1
+       order by ${sortExpression} ${sortDirection} nulls last, row_number asc nulls last
+       limit ? offset ?`,
       [...params, pagination.limit, pagination.offset],
     )
     return { rows, count: Number(count) }
@@ -1180,7 +1383,7 @@ class TradingCardInventoryModuleService extends MedusaService({
       const [latestEligibleBaseline] = await manager.execute<Record<string, unknown>>(
         `select * from trading_card_inventory_snapshot
          where inventory_source_id = ? and sequence_number < ? and approved_at is not null
-           and status not in ('REJECTED', 'FAILED', 'SUPERSEDED') and deleted_at is null
+           and status not in ('REJECTED', 'FAILED', 'SUPERSEDED', 'DISCARDED') and deleted_at is null
          order by sequence_number desc limit 1 for share`,
         [input.inventorySourceId, snapshot.sequence_number],
       )
@@ -1188,7 +1391,7 @@ class TradingCardInventoryModuleService extends MedusaService({
       if (input.previousApprovedSnapshotId) {
         ;[baseline] = await manager.execute<Record<string, unknown>>(
           `select * from trading_card_inventory_snapshot
-           where id = ? and inventory_source_id = ? and approved_at is not null and status not in ('REJECTED', 'FAILED', 'SUPERSEDED')
+           where id = ? and inventory_source_id = ? and approved_at is not null and status not in ('REJECTED', 'FAILED', 'SUPERSEDED', 'DISCARDED')
              and deleted_at is null for share`,
           [input.previousApprovedSnapshotId, input.inventorySourceId],
         )
@@ -1595,6 +1798,7 @@ class TradingCardInventoryModuleService extends MedusaService({
             `Proposal ${row.id} is ${currentStatus}, not PENDING — bulk review aborted with no changes`
           )
         }
+        await this.lockAndAssertSnapshotNotDiscarded(manager, (row.inventory_snapshot_id as string | null) ?? null)
       }
       const saved: Record<string, unknown>[] = []
       for (const row of rows) {
@@ -1667,6 +1871,7 @@ class TradingCardInventoryModuleService extends MedusaService({
       | { outcome: "INVALID_STATE"; row: Record<string, unknown> }
       | { outcome: "OUT_OF_SCOPE"; row: Record<string, unknown> }
       | { outcome: "STALE_BASELINE"; row: Record<string, unknown>; liveQuantity: number }
+      | { outcome: "SNAPSHOT_DISCARDED"; row: Record<string, unknown> }
 
     const phaseAResult = await this.manager_.transactional(async (manager): Promise<PhaseAOutcome> => {
       const [proposal] = await manager.execute<Record<string, unknown>>(
@@ -1677,6 +1882,16 @@ class TradingCardInventoryModuleService extends MedusaService({
       const reviewStatus = proposal.review_status as InventoryProposalReviewStatus
       if (reviewStatus === INVENTORY_PROPOSAL_REVIEW_STATUS.APPLIED) {
         return { outcome: "ALREADY_APPLIED", row: proposal }
+      }
+      // Locks the snapshot row (blocking a concurrent discard, and vice
+      // versa — see `lockAndAssertSnapshotNotDiscarded`) before any further
+      // check, so a snapshot discarded moments ago can never let this
+      // request slip through and still move stock.
+      const [snapshot] = await manager.execute<Record<string, unknown>>(
+        `select status from trading_card_inventory_snapshot where id = ? for update`, [proposal.inventory_snapshot_id]
+      )
+      if (snapshot && snapshot.status === INVENTORY_SNAPSHOT_STATUS.DISCARDED) {
+        return { outcome: "SNAPSHOT_DISCARDED", row: proposal }
       }
       if (reviewStatus !== INVENTORY_PROPOSAL_REVIEW_STATUS.APPROVED) {
         return { outcome: "INVALID_STATE", row: proposal }
@@ -1782,6 +1997,21 @@ class TradingCardInventoryModuleService extends MedusaService({
         priorQuantity: phaseAResult.liveQuantity, resultingQuantity: null,
         medusaSyncStatus: phaseAResult.row.medusa_sync_status as MedusaSyncStatus,
         errorCode: "STALE_BASELINE", errorMessage: "The proposal's expected baseline quantity no longer matches the current holding.",
+      }
+    }
+
+    if (phaseAResult.outcome === "SNAPSHOT_DISCARDED") {
+      await this.manager_.transactional(async (manager) => {
+        await this.writeAudit(manager, {
+          ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_PROPOSAL, entityId: parsed.id,
+          action: INVENTORY_AUDIT_ACTION.PROPOSAL_APPLICATION_REJECTED_SNAPSHOT_DISCARDED,
+        })
+      })
+      return {
+        proposalId: parsed.id, localApplicationStatus: "SNAPSHOT_DISCARDED", transactionId: null,
+        priorQuantity: null, resultingQuantity: null, medusaSyncStatus: MEDUSA_SYNC_STATUS.NOT_APPLICABLE,
+        errorCode: "SNAPSHOT_DISCARDED",
+        errorMessage: "This proposal's inventory snapshot has been discarded and can no longer be applied.",
       }
     }
 
@@ -1942,6 +2172,138 @@ class TradingCardInventoryModuleService extends MedusaService({
         })
       }
       const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_inventory_proposal where id = ?`, [parsed.proposalId])
+      return saved
+    })
+  }
+
+  // ---------------------------------------------------------------------
+  // Card-creation-from-inventory-row: claim/lease + atomic resolution.
+  // Mirrors beginMedusaSyncAttempt/recordMedusaSyncResult's exact protocol —
+  // see the module comments on `card_creation_claim_token` in the model.
+  // ---------------------------------------------------------------------
+
+  /**
+   * Marks the start of a "create a card from this unmatched row" attempt,
+   * minting a fresh claim token the caller must round-trip back through
+   * `resolveInventoryProposalVariant`. Refuses (no-ops, `claimToken: null`)
+   * if the proposal isn't a pending, unresolved row, or if another attempt
+   * already holds a live claim. If the proposal is already resolved to a
+   * variant, this is the idempotent-replay case: returns that variant id
+   * immediately, no claim minted, nothing to create.
+   */
+  async beginCardCreationClaim(input: AuditContext & { proposalId: string }): Promise<{
+    claimToken: string | null; alreadyResolved: boolean; tradingCardVariantId: string | null
+  }> {
+    idSchema.parse(input.proposalId)
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    return this.manager_.transactional(async (manager) => {
+      const [proposal] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_inventory_proposal where id = ? and deleted_at is null for update`, [input.proposalId]
+      )
+      if (!proposal) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory proposal not found")
+      // Checked before the `review_status` gate below: a proposal this
+      // workflow already resolved to a variant keeps that resolution across
+      // a later, independent approve/reject of the (now NEW_HOLDING)
+      // proposal — `resolveInventoryProposalVariant` only ever changes
+      // `change_kind`, never `review_status`. A delayed/retried duplicate
+      // request must still hit this idempotent-replay case even after the
+      // reviewer has since approved or rejected it, not the "only a pending
+      // proposal" error below.
+      if (proposal.change_kind === INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING && proposal.trading_card_variant_id) {
+        return { claimToken: null, alreadyResolved: true, tradingCardVariantId: proposal.trading_card_variant_id as string }
+      }
+      // Locks the snapshot row (blocking a concurrent discard, and vice
+      // versa) before minting a new claim — see `lockAndAssertSnapshotNotDiscarded`.
+      await this.lockAndAssertSnapshotNotDiscarded(manager, (proposal.inventory_snapshot_id as string | null) ?? null)
+      if (proposal.review_status !== INVENTORY_PROPOSAL_REVIEW_STATUS.PENDING) {
+        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Only a pending proposal can start card creation")
+      }
+      if (proposal.change_kind !== INVENTORY_PROPOSAL_CHANGE_KIND.UNRESOLVED_VARIANT) {
+        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Only an unresolved-variant proposal can start card creation")
+      }
+      if (proposal.card_creation_claim_token) {
+        const claimedAt = new Date(proposal.card_creation_claimed_at as string | Date).getTime()
+        if (Number.isFinite(claimedAt) && Date.now() - claimedAt < CARD_CREATION_CLAIM_LEASE_MS) {
+          return { claimToken: null, alreadyResolved: false, tradingCardVariantId: null }
+        }
+      }
+      const claimToken = randomUUID()
+      await manager.execute(
+        `update trading_card_inventory_proposal set card_creation_claim_token = ?, card_creation_claimed_at = now(), updated_at = now() where id = ?`,
+        [claimToken, input.proposalId]
+      )
+      return { claimToken, alreadyResolved: false, tradingCardVariantId: null }
+    })
+  }
+
+  /**
+   * Atomically resolves an UNRESOLVED_VARIANT proposal to a real
+   * TradingCardVariant, once a card has been created/found for it — the
+   * final step of the create-card-from-inventory-row workflow. Requires the
+   * live `card_creation_claim_token` so a superseded/expired attempt can
+   * never complete after a newer one has taken ownership (see
+   * `beginCardCreationClaim`). Also updates the corresponding snapshot-entry
+   * match row (`matched_via = 'MANUAL'`) so a future retry-matching run
+   * doesn't revert it, after verifying the match row and proposal actually
+   * describe the same snapshot entry.
+   */
+  async resolveInventoryProposalVariant(input: AuditContext & {
+    proposalId: string; claimToken: string; tradingCardVariantId: string
+  }): Promise<Record<string, unknown>> {
+    idSchema.parse(input.proposalId)
+    idSchema.parse(input.tradingCardVariantId)
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    return this.manager_.transactional(async (manager) => {
+      const [proposal] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_inventory_proposal where id = ? and deleted_at is null for update`, [input.proposalId]
+      )
+      if (!proposal) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory proposal not found")
+
+      if (proposal.change_kind === INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING && proposal.trading_card_variant_id) {
+        if (proposal.trading_card_variant_id !== input.tradingCardVariantId) {
+          throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This proposal is already resolved to a different trading card variant")
+        }
+        return proposal
+      }
+      // Locks the snapshot row (blocking a concurrent discard, and vice
+      // versa) before completing resolution — see `lockAndAssertSnapshotNotDiscarded`.
+      await this.lockAndAssertSnapshotNotDiscarded(manager, (proposal.inventory_snapshot_id as string | null) ?? null)
+      if (proposal.change_kind !== INVENTORY_PROPOSAL_CHANGE_KIND.UNRESOLVED_VARIANT || proposal.review_status !== INVENTORY_PROPOSAL_REVIEW_STATUS.PENDING) {
+        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Only a pending, unresolved-variant proposal can be resolved this way")
+      }
+      if (proposal.card_creation_claim_token !== input.claimToken) {
+        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This card-creation attempt's claim is stale — a newer attempt has taken ownership of this proposal")
+      }
+
+      const [matchRow] = await manager.execute<Record<string, unknown>>(
+        `select m.* from trading_card_inventory_snapshot_entry_match m
+         join trading_card_inventory_snapshot_entry e on e.id = m.snapshot_entry_id
+         where e.inventory_snapshot_id = ? and e.provider_reference = ? and m.deleted_at is null and e.deleted_at is null
+         for update of m`,
+        [proposal.inventory_snapshot_id, proposal.provider_reference]
+      )
+      if (!matchRow) {
+        throw new MedusaError(MedusaError.Types.UNEXPECTED_STATE, "No matching snapshot entry was found for this proposal's provider reference")
+      }
+
+      await manager.execute(
+        `update trading_card_inventory_proposal
+         set trading_card_variant_id = ?, change_kind = ?, card_creation_claim_token = null, card_creation_claimed_at = null, updated_at = now()
+         where id = ?`,
+        [input.tradingCardVariantId, INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING, input.proposalId]
+      )
+      await manager.execute(
+        `update trading_card_inventory_snapshot_entry_match
+         set matching_status = ?, trading_card_variant_id = ?, matched_via = ?, updated_at = now()
+         where id = ?`,
+        [INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS.MATCHED, input.tradingCardVariantId, INVENTORY_SNAPSHOT_ENTRY_MATCHED_VIA.MANUAL, matchRow.id]
+      )
+      await this.writeAudit(manager, {
+        ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_PROPOSAL, entityId: input.proposalId,
+        action: INVENTORY_AUDIT_ACTION.PROPOSAL_VARIANT_RESOLVED,
+        oldValue: { changeKind: proposal.change_kind }, newValue: { changeKind: INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING, tradingCardVariantId: input.tradingCardVariantId },
+      })
+      const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_inventory_proposal where id = ?`, [input.proposalId])
       return saved
     })
   }

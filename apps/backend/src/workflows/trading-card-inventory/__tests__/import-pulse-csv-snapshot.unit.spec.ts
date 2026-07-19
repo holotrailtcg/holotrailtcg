@@ -32,6 +32,7 @@ function fakeInventory(overrides: Partial<Record<string, unknown>> = {}) {
     })),
     listSnapshotEntryDiagnostics: jest.fn(async () => ({ rows: [], count: 0 })),
     listSnapshotEntriesForAdmin: jest.fn(async () => ({ rows: [], count: 0 })),
+    listUnmatchedSnapshotEntriesForAdmin: jest.fn(async () => []),
     listSnapshotVariantIds: jest.fn(async () => []),
     reconcileInventorySnapshot: jest.fn(async () => ({
       snapshotId: "tcisnap_1", inventorySourceId: "tcisrc_1", status: "PENDING_REVIEW",

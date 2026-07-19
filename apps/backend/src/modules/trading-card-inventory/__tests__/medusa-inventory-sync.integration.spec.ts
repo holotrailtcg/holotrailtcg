@@ -110,12 +110,44 @@ async function createStockLocation(name: string) {
   return stockLocations.createStockLocations({ name })
 }
 
+/**
+ * Runs `fn` with `IStockLocationService#listStockLocations` overridden to
+ * return exactly `locations`, regardless of what else exists in the shared
+ * test database (legitimate fixture locations such as a seeded default
+ * warehouse must not make these tests' "zero" or "exactly one" location
+ * preconditions unreliable). Every other method — `retrieveStockLocation`,
+ * used by the configured-location path — still delegates to the real
+ * service, so this only isolates the listing this file's own tests care
+ * about. The real registration is restored afterwards even if `fn` throws.
+ */
+async function withStockLocations<T>(locations: Awaited<ReturnType<IStockLocationService["listStockLocations"]>>, fn: () => Promise<T>): Promise<T> {
+  const real = container.resolve<IStockLocationService>(Modules.STOCK_LOCATION)
+  // Only `listStockLocations` and `retrieveStockLocation` are ever called on
+  // this service by the code under test (`resolveMedusaStockLocationId`) —
+  // no need to proxy the whole class.
+  container.register({
+    [Modules.STOCK_LOCATION]: asValue({
+      listStockLocations: async () => locations,
+      retrieveStockLocation: real.retrieveStockLocation.bind(real),
+    } as unknown as IStockLocationService),
+  })
+  try {
+    return await fn()
+  } finally {
+    container.register({ [Modules.STOCK_LOCATION]: asValue(real) })
+  }
+}
+
 describe("syncInventoryProposalToMedusa", () => {
   it("fails NO_STOCK_LOCATION when the fallback finds no stock locations", async () => {
     const { variant } = await cardVariantFixture()
-    const result = await syncInventoryProposalToMedusa(container, {
+    // Isolated from whatever legitimate fixture locations already exist in
+    // the shared test database (e.g. a seeded default warehouse) — this
+    // test only needs the fallback lookup to observe zero locations, not
+    // for the database to genuinely contain none.
+    const result = await withStockLocations([], () => syncInventoryProposalToMedusa(container, {
       proposalId: "tciprop_x", tradingCardVariantId: variant.id, proposedQuantity: 4, attemptToken: "token-0",
-    })
+    }))
     expect(result).toMatchObject({ outcome: "FAILED", category: "NO_STOCK_LOCATION" })
   })
 
@@ -150,14 +182,14 @@ describe("syncInventoryProposalToMedusa", () => {
     const item = await createInventoryItem(`ITEM-${suffix()}`)
     await linkProductVariantToInventoryItem(productVariant.id, item.id)
 
-    const stockLocations = container.resolve<IStockLocationService>(Modules.STOCK_LOCATION)
-    const preExisting = await stockLocations.listStockLocations({})
-    expect(preExisting).toHaveLength(0) // guarantees this test genuinely exercises the auto-pick-if-exactly-one path
-
+    // Isolated from any legitimate fixture locations already in the shared
+    // test database: the fallback lookup must observe exactly one location
+    // — this test's own — regardless of how many real locations coexist
+    // with it in practice.
     const location = await createStockLocation(`Sole Loc ${suffix()}`)
-    const result = await syncInventoryProposalToMedusa(container, {
+    const result = await withStockLocations([location], () => syncInventoryProposalToMedusa(container, {
       proposalId: "tciprop_x", tradingCardVariantId: variant.id, proposedQuantity: 4, attemptToken: "token-1",
-    })
+    }))
     expect(result).toMatchObject({ outcome: "SYNCED", medusaStockLocationId: location.id })
   })
 
