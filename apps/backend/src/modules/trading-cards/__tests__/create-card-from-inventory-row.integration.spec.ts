@@ -55,6 +55,19 @@ beforeAll(async () => {
       [Modules.PRODUCT]: { resolve: "@medusajs/medusa/product" },
       [Modules.INVENTORY]: { resolve: "@medusajs/medusa/inventory" },
       [Modules.STOCK_LOCATION]: { resolve: "@medusajs/medusa/stock-location" },
+      // Stage 5B.3 concurrency fix: the real PostgreSQL-backed provider,
+      // exactly as configured in medusa-config.ts — this suite deliberately
+      // exercises the configured provider, not an in-memory mock, since the
+      // whole point of the fix is that a lock only means something when it
+      // is visible across processes/instances sharing this database.
+      [Modules.LOCKING]: {
+        resolve: "@medusajs/medusa/locking",
+        options: {
+          providers: [
+            { resolve: "@medusajs/medusa/locking-postgres", id: "locking-postgres", is_default: true },
+          ],
+        },
+      },
     },
     injectedDependencies: { [ContainerRegistrationKeys.PG_CONNECTION]: pgConnection },
     cwd: process.cwd(),
@@ -1258,6 +1271,345 @@ describe("createCardFromInventoryRowWorkflow — same-step link failures never d
       }
     },
     60000,
+  )
+})
+
+describe("createCardFromInventoryRowWorkflow — PostgreSQL-locked InventoryItem repair serializes concurrent callers (Codex remediation, fourth pass)", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function isInventoryItemLinkPayload(payload: any): boolean {
+    const productSide = payload?.[Modules.PRODUCT]
+    return !!productSide && "variant_id" in productSide
+  }
+
+  async function readInventoryItemLinks(productVariantId: string): Promise<string[]> {
+    const query = container.resolve(ContainerRegistrationKeys.QUERY)
+    const { data } = await query.graph({
+      entity: "product_variant", fields: ["id", "inventory_items.inventory_item_id"], filters: { id: productVariantId },
+    })
+    const links = (data[0]?.inventory_items ?? []) as Array<{ inventory_item_id?: string }>
+    return links.map((l) => l.inventory_item_id).filter((id): id is string => Boolean(id))
+  }
+
+  /**
+   * Directly constructs the exact incomplete state a died mid-attempt would
+   * leave: a real committed TradingCardVariant, linked to a real committed
+   * ProductVariant, with zero InventoryItems linked to that ProductVariant
+   * — isolating the InventoryItem-repair race from everything upstream of
+   * it (CardSet/TradingCard/TradingCardVariant/ProductVariant identity
+   * resolution, already covered by the third-pass describe block above).
+   */
+  async function createBareIncompleteVariant(
+    seedResult: { tradingCardId: string; productId: string }, conditionSuffix: string,
+  ): Promise<{ productVariantId: string; tradingCardVariantId: string }> {
+    const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+    const optionValue = `LIGHTLY PLAYED · HOLO · ${conditionSuffix}`
+    const product = await products.retrieveProduct(seedResult.productId, { relations: ["options", "options.values"] })
+    const option = product.options?.find((o) => o.title === "Card Variant")
+    if (!option) throw new Error("Expected seed product to have a Card Variant option")
+    await products.updateProductOptionValuesOnProduct({ product_id: seedResult.productId, product_option_id: option.id, add: [{ value: optionValue }] })
+    const productVariant = await products.createProductVariants({
+      product_id: seedResult.productId, title: optionValue, sku: `SKU-BARE-${suffix().toUpperCase()}`, manage_inventory: true, options: { "Card Variant": optionValue },
+    })
+    const tradingCardVariant = await cards.createTradingCardVariants({
+      trading_card_id: seedResult.tradingCardId, condition: "LIGHTLY_PLAYED", condition_source: "EXPLICIT",
+      finish: "HOLO", finish_confirmed: true, special_treatment: "NONE", special_treatment_confirmed: true,
+      sku: `SKU-BARE-TCV-${suffix().toUpperCase()}`, origin: "PULSE",
+    })
+    const link = medusaApp.link
+    if (!link) throw new Error("Expected Medusa link container")
+    await link.create({ [Modules.PRODUCT]: { product_variant_id: productVariant.id }, [TRADING_CARDS_MODULE]: { trading_card_variant_id: tradingCardVariant.id } })
+    return { productVariantId: productVariant.id, tradingCardVariantId: tradingCardVariant.id }
+  }
+
+  async function seedCard(setCode: string, cardNumber: string, source: { id: string }) {
+    const seedInput = baseCardInput({ cardSetProviderSetCode: setCode, cardNumber, name: "Locked Repair Card" })
+    const seedProposal = await unresolvedVariantProposal(source.id, `locked-repair-seed-${suffix()}`)
+    const seedClaim = await inventory.beginCardCreationClaim({ proposalId: seedProposal.id, actor: "seed", source: "MANUAL" })
+    const { result } = await createCardFromInventoryRowWorkflow(container).run({
+      input: { ...seedInput, proposalId: seedProposal.id, claimToken: seedClaim.claimToken as string },
+    })
+    return result
+  }
+
+  it(
+    "two concurrent repairers for the same incomplete ProductVariant are serialized by the real PostgreSQL lock — only one InventoryItem is created and linked, both resolve to it",
+    async () => {
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      const locking = container.resolve<{ execute: (...args: unknown[]) => Promise<unknown> }>(Modules.LOCKING)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const originalExecute = (locking.execute as any).bind(locking)
+      const executeSpy = jest.spyOn(locking, "execute")
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const originalLinkCreate = (medusaApp.link as any).create.bind(medusaApp.link)
+      const linkSpy = jest.spyOn(medusaApp.link as any, "create")
+      try {
+        const source = await createSource()
+        const setCode = `set_lockrace_${suffix()}`
+        const cardNumber = numericSuffix()
+        const seedResult = await seedCard(setCode, cardNumber, source)
+        const bare = await createBareIncompleteVariant(seedResult, suffix())
+        const lockKey = `trading-card-inventory-repair:${bare.productVariantId}`
+
+        // This suite never invents its own in-memory locking: the only
+        // provider registered for `Modules.LOCKING` anywhere in this file's
+        // `modulesConfig` (see `beforeAll` above) is
+        // `@medusajs/medusa/locking-postgres`, marked `is_default: true` —
+        // there is no in-memory fallback for `execute` to have silently
+        // used instead, and `originalExecute` below calls straight through
+        // to that same real provider.
+
+        let executeCallsForKey = 0
+        let loserExecuteCalledResolve: () => void
+        const loserExecuteCalled = new Promise<void>((resolve) => { loserExecuteCalledResolve = resolve })
+        executeSpy.mockImplementation(async (...args: unknown[]) => {
+          const [keys] = args as [string, () => Promise<unknown>, unknown?]
+          if (keys === lockKey) {
+            executeCallsForKey += 1
+            if (executeCallsForKey === 2) loserExecuteCalledResolve()
+          }
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return originalExecute(...(args as any))
+        })
+
+        let winnerReachedLinkResolve: () => void
+        const winnerReachedLink = new Promise<void>((resolve) => { winnerReachedLinkResolve = resolve })
+        let releaseWinner: () => void
+        const winnerGate = new Promise<void>((resolve) => { releaseWinner = resolve })
+        let winnerLinkSeen = false
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        linkSpy.mockImplementation(async (payload: any) => {
+          if (isInventoryItemLinkPayload(payload) && !winnerLinkSeen) {
+            winnerLinkSeen = true
+            winnerReachedLinkResolve()
+            // Holds the winner's real transaction open — and therefore its
+            // real `pg_advisory_xact_lock` held — until the test releases
+            // it, so the loser's own `execute()` call is genuinely blocked
+            // at the database level for the whole window below, not merely
+            // "called later" by coincidence of JS scheduling.
+            await winnerGate
+          }
+          return originalLinkCreate(payload)
+        })
+
+        const proposalA = await unresolvedVariantProposal(source.id, `lockrace-a-${suffix()}`)
+        const proposalB = await unresolvedVariantProposal(source.id, `lockrace-b-${suffix()}`)
+        const claimA = await inventory.beginCardCreationClaim({ proposalId: proposalA.id, actor: "reviewer-a", source: "MANUAL" })
+        const claimB = await inventory.beginCardCreationClaim({ proposalId: proposalB.id, actor: "reviewer-b", source: "MANUAL" })
+
+        const sharedInput = baseCardInput({
+          cardSetProviderSetCode: setCode, cardSetDisplayName: "Locked Repair Card Set", cardNumber, name: "Locked Repair Card",
+          condition: CARD_CONDITION.LIGHTLY_PLAYED, finish: CARD_FINISH.HOLO, specialTreatment: SPECIAL_TREATMENT.NONE,
+        })
+
+        const runA = createCardFromInventoryRowWorkflow(container).run({
+          input: { ...sharedInput, proposalId: proposalA.id, claimToken: claimA.claimToken as string },
+        })
+        // A (or B — whichever the DB scheduled first — "the winner") has
+        // created its InventoryItem and level and is paused immediately
+        // before linking it: both callers independently found zero linked
+        // InventoryItems for this ProductVariant before either attempted to
+        // create one.
+        await winnerReachedLink
+
+        const runB = createCardFromInventoryRowWorkflow(container).run({
+          input: { ...sharedInput, proposalId: proposalB.id, claimToken: claimB.claimToken as string },
+        })
+        // The loser's own `execute()` call for the identical lock key has
+        // now been issued and is genuinely blocked on the real Postgres
+        // advisory lock the winner is still holding.
+        await loserExecuteCalled
+
+        releaseWinner!()
+        const [outcomeA, outcomeB] = await Promise.allSettled([runA, runB])
+
+        expect(outcomeA.status).toBe("fulfilled")
+        expect(outcomeB.status).toBe("fulfilled")
+        if (outcomeA.status !== "fulfilled" || outcomeB.status !== "fulfilled") throw new Error("unreachable")
+
+        // Both reused the exact same pre-existing TradingCardVariant/ProductVariant.
+        expect(outcomeA.value.result.tradingCardVariantId).toBe(bare.tradingCardVariantId)
+        expect(outcomeB.value.result.tradingCardVariantId).toBe(bare.tradingCardVariantId)
+
+        // Exactly one InventoryItem is now linked — the loser reused the
+        // winner's, never created a second one.
+        const links = await readInventoryItemLinks(bare.productVariantId)
+        expect(links).toHaveLength(1)
+
+        // Exactly one inventory level exists for the configured location —
+        // no duplicate level from a duplicate item.
+        const inventoryService = container.resolve<IInventoryService>(Modules.INVENTORY)
+        const levels = await inventoryService.listInventoryLevels({ inventory_item_id: links[0], location_id: location.id })
+        expect(levels).toHaveLength(1)
+
+        // No duplicate link row for this ProductVariant (already implied by
+        // `links` having length 1, restated explicitly per the requirement).
+        expect(executeCallsForKey).toBe(2)
+      } finally {
+        linkSpy.mockRestore()
+        executeSpy.mockRestore()
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    },
+    60000,
+  )
+
+  it(
+    "a thrown operation inside the lock's critical section still releases the lock (rolled back, per the real provider's own transaction) — a later retry for the same ProductVariant succeeds",
+    async () => {
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const originalLinkCreate = (medusaApp.link as any).create.bind(medusaApp.link)
+      const linkSpy = jest.spyOn(medusaApp.link as any, "create")
+      try {
+        const source = await createSource()
+        const setCode = `set_lockthrow_${suffix()}`
+        const cardNumber = numericSuffix()
+        const seedResult = await seedCard(setCode, cardNumber, source)
+        const bare = await createBareIncompleteVariant(seedResult, suffix())
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        linkSpy.mockImplementation(async (payload: any) => {
+          if (isInventoryItemLinkPayload(payload)) {
+            throw new Error("Injected: inventory-item link genuinely fails, nothing committed")
+          }
+          return originalLinkCreate(payload)
+        })
+
+        const failProposal = await unresolvedVariantProposal(source.id, `lockthrow-fail-${suffix()}`)
+        const failClaim = await inventory.beginCardCreationClaim({ proposalId: failProposal.id, actor: "reviewer", source: "MANUAL" })
+        const sharedInput = baseCardInput({
+          cardSetProviderSetCode: setCode, cardSetDisplayName: "Locked Repair Card Set", cardNumber, name: "Locked Repair Card",
+          condition: CARD_CONDITION.LIGHTLY_PLAYED, finish: CARD_FINISH.HOLO, specialTreatment: SPECIAL_TREATMENT.NONE,
+        })
+
+        await expect(createCardFromInventoryRowWorkflow(container).run({
+          input: { ...sharedInput, proposalId: failProposal.id, claimToken: failClaim.claimToken as string },
+        })).rejects.toBeTruthy()
+
+        // No link was ever created by the failed attempt.
+        expect(await readInventoryItemLinks(bare.productVariantId)).toHaveLength(0)
+
+        linkSpy.mockRestore()
+
+        // The lock the failed attempt held (and the transaction it ran in)
+        // was released on rollback — a fresh attempt for the exact same
+        // ProductVariant is not stuck waiting forever, and succeeds.
+        const retryProposal = await unresolvedVariantProposal(source.id, `lockthrow-retry-${suffix()}`)
+        const retryClaim = await inventory.beginCardCreationClaim({ proposalId: retryProposal.id, actor: "reviewer", source: "MANUAL" })
+        const { result } = await createCardFromInventoryRowWorkflow(container).run({
+          input: { ...sharedInput, proposalId: retryProposal.id, claimToken: retryClaim.claimToken as string },
+        })
+        expect(result.tradingCardVariantId).toBe(bare.tradingCardVariantId)
+
+        const links = await readInventoryItemLinks(bare.productVariantId)
+        expect(links).toHaveLength(1)
+      } finally {
+        linkSpy.mockRestore()
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    },
+    30000,
+  )
+
+  it(
+    "an ambiguous InventoryItem link outcome (the call commits, but still reports an error) is resolved by rereading committed state while still holding the lock, not treated as a failure or a duplicate",
+    async () => {
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const originalLinkCreate = (medusaApp.link as any).create.bind(medusaApp.link)
+      const linkSpy = jest.spyOn(medusaApp.link as any, "create")
+      try {
+        const source = await createSource()
+        const setCode = `set_lockambiguous_${suffix()}`
+        const cardNumber = numericSuffix()
+        const seedResult = await seedCard(setCode, cardNumber, source)
+        const bare = await createBareIncompleteVariant(seedResult, suffix())
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        linkSpy.mockImplementation(async (payload: any) => {
+          if (isInventoryItemLinkPayload(payload)) {
+            await originalLinkCreate(payload) // really commits...
+            throw new Error("Injected: the call reports failure even though it committed")
+          }
+          return originalLinkCreate(payload)
+        })
+
+        const proposal = await unresolvedVariantProposal(source.id, `lockambiguous-${suffix()}`)
+        const claim = await inventory.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer", source: "MANUAL" })
+        const input = baseCardInput({
+          cardSetProviderSetCode: setCode, cardSetDisplayName: "Locked Repair Card Set", cardNumber, name: "Locked Repair Card",
+          condition: CARD_CONDITION.LIGHTLY_PLAYED, finish: CARD_FINISH.HOLO, specialTreatment: SPECIAL_TREATMENT.NONE,
+        })
+
+        // Succeeds — the ambiguous outcome is resolved by re-reading
+        // committed state (finds its own just-committed link) rather than
+        // trusting the thrown error or retrying the create.
+        const { result } = await createCardFromInventoryRowWorkflow(container).run({
+          input: { ...input, proposalId: proposal.id, claimToken: claim.claimToken as string },
+        })
+        expect(result.tradingCardVariantId).toBe(bare.tradingCardVariantId)
+
+        const links = await readInventoryItemLinks(bare.productVariantId)
+        expect(links).toHaveLength(1)
+      } finally {
+        linkSpy.mockRestore()
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    },
+    30000,
+  )
+
+  it(
+    "more than one existing InventoryItem link on a ProductVariant fails clearly with a catalogue-integrity error, never silently selecting inventory_items[0]",
+    async () => {
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      try {
+        const source = await createSource()
+        const setCode = `set_lockduplicate_${suffix()}`
+        const cardNumber = numericSuffix()
+        const seedResult = await seedCard(setCode, cardNumber, source)
+        const bare = await createBareIncompleteVariant(seedResult, suffix())
+
+        // Directly create two InventoryItems and link both — simulating a
+        // pre-existing catalogue anomaly (e.g. a legacy import), not
+        // anything this workflow itself would produce under the fix above.
+        const inventoryService = container.resolve<IInventoryService>(Modules.INVENTORY)
+        const link = medusaApp.link
+        if (!link) throw new Error("Expected Medusa link container")
+        const itemA = await inventoryService.createInventoryItems({ sku: `SKU-DUP-A-${suffix()}` })
+        const itemB = await inventoryService.createInventoryItems({ sku: `SKU-DUP-B-${suffix()}` })
+        await link.create({ [Modules.PRODUCT]: { variant_id: bare.productVariantId }, [Modules.INVENTORY]: { inventory_item_id: itemA.id } })
+        await link.create({ [Modules.PRODUCT]: { variant_id: bare.productVariantId }, [Modules.INVENTORY]: { inventory_item_id: itemB.id } })
+
+        const proposal = await unresolvedVariantProposal(source.id, `lockduplicate-${suffix()}`)
+        const claim = await inventory.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer", source: "MANUAL" })
+        const input = baseCardInput({
+          cardSetProviderSetCode: setCode, cardSetDisplayName: "Locked Repair Card Set", cardNumber, name: "Locked Repair Card",
+          condition: CARD_CONDITION.LIGHTLY_PLAYED, finish: CARD_FINISH.HOLO, specialTreatment: SPECIAL_TREATMENT.NONE,
+        })
+
+        await expect(createCardFromInventoryRowWorkflow(container).run({
+          input: { ...input, proposalId: proposal.id, claimToken: claim.claimToken as string },
+        })).rejects.toMatchObject({ message: expect.stringMatching(/has 2 linked InventoryItems/i) })
+
+        // Neither existing item was touched, and nothing was deleted.
+        await expect(inventoryService.retrieveInventoryItem(itemA.id)).resolves.toMatchObject({ id: itemA.id })
+        await expect(inventoryService.retrieveInventoryItem(itemB.id)).resolves.toMatchObject({ id: itemB.id })
+        const links = await readInventoryItemLinks(bare.productVariantId)
+        expect(links).toHaveLength(2)
+
+        // The proposal was never resolved.
+        const refreshed = await inventory.retrieveInventoryProposal(proposal.id)
+        expect(refreshed).toMatchObject({ change_kind: "UNRESOLVED_VARIANT", trading_card_variant_id: null })
+      } finally {
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    },
+    30000,
   )
 })
 

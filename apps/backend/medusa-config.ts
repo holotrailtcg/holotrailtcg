@@ -28,6 +28,30 @@ module.exports = defineConfig({
     disable: process.env.MEDUSA_ADMIN_DISABLE === "true",
   },
   modules: [
+    // Stage 5B.3 concurrency fix: a real, cross-instance lock is required to
+    // serialize concurrent InventoryItem repairs for the same ProductVariant
+    // (see `ensureSingleInventoryItemForProductVariant` in
+    // `create-card-from-inventory-row.ts` and ADR 0013). Medusa's default
+    // locking provider is an in-memory map, which only works within a single
+    // process — useless the moment more than one instance (or worker) runs,
+    // which is why the official PostgreSQL advisory-lock provider is
+    // registered explicitly and made the default here. It uses the existing
+    // `DATABASE_URL` connection (via the container's own manager) and needs
+    // no separate environment variable, and requires no new infrastructure
+    // (no Redis) — only its own bundled migration (see ADR 0013 and
+    // docs/operations for the Stage 5B.3 deployment note).
+    {
+      resolve: "@medusajs/medusa/locking",
+      options: {
+        providers: [
+          {
+            resolve: "@medusajs/medusa/locking-postgres",
+            id: "locking-postgres",
+            is_default: true,
+          },
+        ],
+      },
+    },
     {
       resolve: "./src/modules/newsletter",
     },

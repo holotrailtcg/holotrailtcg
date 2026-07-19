@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import type { IInventoryService, IProductModuleService, MedusaContainer } from "@medusajs/framework/types"
+import type { ILockingModule, IInventoryService, IProductModuleService, MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys, MedusaError, Modules } from "@medusajs/framework/utils"
 import { createStep, createWorkflow, StepResponse, transform, WorkflowResponse } from "@medusajs/framework/workflows-sdk"
 import { TRADING_CARDS_MODULE } from "../../modules/trading-cards"
@@ -198,6 +198,9 @@ function handleSegment(value: string): string {
  * whether `createProductsWorkflow`/`createProductVariantsWorkflow` create an
  * InventoryItem on their own, so this recipe (verified against the real
  * fixture in `medusa-inventory-sync.integration.spec.ts`) is used instead.
+ *
+ * Only ever called from inside `ensureSingleInventoryItemForProductVariant`'s
+ * locked critical section below — never directly by a step.
  */
 async function createAndLinkInventoryItem(
   container: MedusaContainer, sku: string, productVariantId: string,
@@ -226,6 +229,111 @@ async function createAndLinkInventoryItem(
   const link = container.resolve(ContainerRegistrationKeys.LINK)
   await link.create({ [Modules.PRODUCT]: { variant_id: productVariantId }, [Modules.INVENTORY]: { inventory_item_id: item.id } })
   return item.id
+}
+
+/**
+ * Reads a ProductVariant's *currently linked* InventoryItem ids directly, as
+ * a full list — never `inventory_items[0]`. Medusa's `product_variant` ↔
+ * `inventory_item` link is `isList: true` on both sides (it exists to
+ * support inventory kits: one variant can genuinely have several inventory
+ * items, and one item can serve several variants), so there is no built-in
+ * constraint making "the first one" a safe stand-in for "the only one".
+ * Holo Trail's own narrower invariant — exactly one InventoryItem per
+ * trading-card ProductVariant — is enforced by
+ * `ensureSingleInventoryItemForProductVariant` below, not assumed here.
+ */
+async function readInventoryItemLinksForProductVariant(
+  container: MedusaContainer, productVariantId: string,
+): Promise<string[]> {
+  const query = container.resolve(ContainerRegistrationKeys.QUERY)
+  const { data } = await query.graph({
+    entity: "product_variant", fields: ["id", "inventory_items.inventory_item_id"], filters: { id: productVariantId },
+  })
+  const links = (data[0]?.inventory_items ?? []) as Array<{ inventory_item_id?: string }>
+  return links.map((link) => link.inventory_item_id).filter((id): id is string => Boolean(id))
+}
+
+/** Creates a stock level for `inventoryItemId` at the configured location, only if one doesn't already exist there — repairs a level without touching an otherwise-intact InventoryItem/link. */
+async function ensureInventoryLevelForItem(container: MedusaContainer, inventoryItemId: string): Promise<void> {
+  const locationResolution = await resolveMedusaStockLocationId(container)
+  if (locationResolution.outcome === "FAILED") {
+    throw new MedusaError(MedusaError.Types.NOT_ALLOWED, `Could not resolve a Medusa stock location to repair inventory item ${inventoryItemId} (${locationResolution.category}): ${locationResolution.message}`)
+  }
+  const inventory = container.resolve<IInventoryService>(Modules.INVENTORY)
+  const existingLevels = await inventory.listInventoryLevels({ inventory_item_id: inventoryItemId, location_id: locationResolution.locationId })
+  if (existingLevels.length > 0) return
+  await inventory.createInventoryLevels([{ inventory_item_id: inventoryItemId, location_id: locationResolution.locationId, stocked_quantity: 0 }])
+}
+
+/**
+ * The single, PostgreSQL-lock-serialized path every step in this file goes
+ * through to get "the one InventoryItem" for a ProductVariant — whether the
+ * variant is brand new (no links yet, needs creating), reused from an
+ * earlier complete attempt (exactly one link, only its stock level might
+ * need repairing), or reused from an earlier incomplete attempt (a
+ * previously created ProductVariant whose InventoryItem step never
+ * finished).
+ *
+ * Without a lock, two concurrent repairers for the *same* productVariantId
+ * (e.g. two different Pulse rows resolving to the same existing card
+ * variant at once) could both read "no links yet" before either commits,
+ * and both create and link their own InventoryItem — the exact duplicate
+ * Holo Trail's one-InventoryItem-per-variant invariant must prevent. A
+ * process-local mutex cannot close this window (a second server instance,
+ * or worker process, would not see it); only a lock backed by the shared
+ * database can serialize callers across every process sharing it. See
+ * ADR 0013 and the Stage 5B.3 operations guide for the full rationale,
+ * the lock key convention, and cross-instance behaviour.
+ *
+ * The lock itself is acquired and released by the Locking Module's own
+ * `execute` — it acquires the lock before running the callback and always
+ * releases it afterwards, including when the callback throws (see
+ * `@medusajs/locking-postgres`'s `PostgresAdvisoryLockProvider.execute`,
+ * which runs the callback inside a `pg_advisory_xact_lock`-guarded
+ * transaction and releases via that transaction's own commit/rollback).
+ * Everything inside the callback re-reads committed state — nothing read
+ * *before* this call (e.g. an earlier bounded/optimistic check elsewhere in
+ * this file) is trusted once the lock is held.
+ */
+async function ensureSingleInventoryItemForProductVariant(
+  container: MedusaContainer, productVariantId: string, skuForNewItem: string,
+): Promise<string> {
+  const locking = container.resolve<ILockingModule>(Modules.LOCKING)
+  const lockKey = `trading-card-inventory-repair:${productVariantId}`
+
+  return locking.execute(lockKey, async () => {
+    const existingLinks = await readInventoryItemLinksForProductVariant(container, productVariantId)
+
+    if (existingLinks.length > 1) {
+      throw new CatalogueIntegrityError(
+        `Product variant ${productVariantId} has ${existingLinks.length} linked InventoryItems — Holo Trail expects exactly one for a trading-card variant. Refusing to guess which is authoritative; this needs manual repair.`,
+      )
+    }
+
+    if (existingLinks.length === 1) {
+      const inventoryItemId = existingLinks[0]
+      await ensureInventoryLevelForItem(container, inventoryItemId)
+      return inventoryItemId
+    }
+
+    // Genuinely missing — create and link one. An ambiguous outcome (the
+    // call threw but may have actually committed) is resolved the same way
+    // as every other link attempt in this file: re-read committed state
+    // — still holding the lock, so no concurrent repairer could have raced
+    // us here — rather than trusting the thrown error.
+    try {
+      return await createAndLinkInventoryItem(container, skuForNewItem, productVariantId)
+    } catch (error) {
+      const afterError = await readInventoryItemLinksForProductVariant(container, productVariantId)
+      if (afterError.length === 1) return afterError[0]
+      if (afterError.length > 1) {
+        throw new CatalogueIntegrityError(
+          `Product variant ${productVariantId} unexpectedly has ${afterError.length} linked InventoryItems after a failed create attempt — needs manual repair.`,
+        )
+      }
+      throw error
+    }
+  })
 }
 
 /** Resolves a product variant's owning product id (for the hierarchy assertion). */
@@ -264,7 +372,7 @@ const resolveOrCreateCardSetStep = createStep(
 // Step 2: resolve-or-create TradingCard + Medusa Product (+ its first variant/item, if new)
 // ---------------------------------------------------------------------
 
-interface FreshProductVariant { productVariantId: string; inventoryItemId: string; dimensions: VariantDimensions }
+interface FreshProductVariant { productVariantId: string; dimensions: VariantDimensions }
 
 /** Single, no-retry read of a TradingCard's currently-linked Medusa product id, or `undefined` if none exists right now. */
 async function readTradingCardProductId(container: MedusaContainer, tradingCardId: string): Promise<string | undefined> {
@@ -318,7 +426,7 @@ async function ensureProductChainForTradingCard(
   })
   const productVariantId = product.variants?.[0]?.id
   if (!productVariantId) throw new MedusaError(MedusaError.Types.UNEXPECTED_STATE, "Product was created without its variant")
-  const inventoryItemId = await createAndLinkInventoryItem(container, variantSku, productVariantId)
+  await ensureSingleInventoryItemForProductVariant(container, productVariantId, variantSku)
 
   const link = container.resolve(ContainerRegistrationKeys.LINK)
   try {
@@ -332,7 +440,7 @@ async function ensureProductChainForTradingCard(
     throw linkError
   }
 
-  return { productId: product.id, freshProductVariant: { productVariantId, inventoryItemId, dimensions } }
+  return { productId: product.id, freshProductVariant: { productVariantId, dimensions } }
 }
 
 const resolveOrCreateCardStep = createStep(
@@ -381,18 +489,23 @@ const resolveOrCreateCardStep = createStep(
 
 interface CardStepResult { tradingCardId: string; productId: string; freshProductVariant: FreshProductVariant | null }
 
-/** Single, no-retry read of a TradingCardVariant's currently-linked ProductVariant id and InventoryItem id (either may be missing right now). */
-async function readVariantChainState(
+/**
+ * Single, no-retry read of a TradingCardVariant's currently-linked
+ * ProductVariant id (may be missing right now). InventoryItem resolution is
+ * deliberately not this function's concern — that's
+ * `ensureSingleInventoryItemForProductVariant`'s job, under its lock, since
+ * a ProductVariant can have more than one linked InventoryItem (inventory
+ * kits) and picking one here without the lock/count-check would reintroduce
+ * exactly the unsafe `inventory_items[0]` assumption this file removed.
+ */
+async function readVariantProductVariantId(
   container: MedusaContainer, tradingCardVariantId: string,
-): Promise<{ productVariantId?: string; inventoryItemId?: string }> {
+): Promise<string | undefined> {
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
   const { data } = await query.graph({
-    entity: "trading_card_variant",
-    fields: ["id", "product_variant.id", "product_variant.inventory_items.inventory_item_id"],
-    filters: { id: tradingCardVariantId },
+    entity: "trading_card_variant", fields: ["id", "product_variant.id"], filters: { id: tradingCardVariantId },
   })
-  const productVariant = data[0]?.product_variant as { id?: string; inventory_items?: Array<{ inventory_item_id?: string }> | null } | null
-  return { productVariantId: productVariant?.id, inventoryItemId: productVariant?.inventory_items?.[0]?.inventory_item_id }
+  return (data[0]?.product_variant as { id?: string } | null)?.id
 }
 
 /** Finds an existing ProductVariant on `productId` whose "Card Variant" option value matches `optionValue`, if any. */
@@ -504,29 +617,24 @@ async function ensureProductVariantForDimensions(
  * InventoryItem chain, repairing whichever part is missing — never
  * deleting anything. Mirrors `ensureProductChainForTradingCard`'s shape:
  *
- *   1. Bounded re-read for the common case (already complete, or a
- *      transient commit-visibility window).
- *   2. If the ProductVariant link itself is missing: reuse the `fresh`
- *      pair step 2 handed down when its dimensions match (the card's very
- *      first variant, created atomically with its Product) or ensure one
- *      via `ensureProductVariantForDimensions`, then attempt the
+ *   1. Bounded re-read for the common case (already linked, or a transient
+ *      commit-visibility window).
+ *   2. If the ProductVariant link itself is missing: reuse the `fresh` pair
+ *      step 2 handed down when its dimensions match (the card's very first
+ *      variant, created atomically with its Product) or ensure one via
+ *      `ensureProductVariantForDimensions`, then attempt the
  *      TradingCardVariant ↔ ProductVariant link — its own 1:1 constraint
  *      makes "attempt, then re-read on failure" race-safe here too.
- *   3. If only the InventoryItem is missing (a ProductVariant is already
- *      linked, but no InventoryItem is): create and link a new one.
+ *   3. Whatever ProductVariant id is now known, resolve its single
+ *      InventoryItem through `ensureSingleInventoryItemForProductVariant` —
+ *      always, even when the ProductVariant came from `fresh` — so every
+ *      path through this function goes through the same lock (see that
+ *      function's own doc comment for why).
  */
 async function ensureVariantProductChain(
   container: MedusaContainer, cardResult: CardStepResult, dimensions: VariantDimensions, tradingCardVariantId: string,
 ): Promise<{ productVariantId: string; inventoryItemId: string }> {
-  const complete = await retryUntilDefined(async () => {
-    const state = await readVariantChainState(container, tradingCardVariantId)
-    if (!state.productVariantId || !state.inventoryItemId) return undefined
-    return { productVariantId: state.productVariantId, inventoryItemId: state.inventoryItemId }
-  })
-  if (complete) return complete
-
-  const state = await readVariantChainState(container, tradingCardVariantId)
-  let productVariantId = state.productVariantId
+  let productVariantId = await retryUntilDefined(() => readVariantProductVariantId(container, tradingCardVariantId))
 
   if (!productVariantId) {
     const cards = container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
@@ -544,14 +652,13 @@ async function ensureVariantProductChain(
     } catch (linkError) {
       // Ambiguous outcome — trust a fresh read over the thrown error, same
       // as `ensureProductChainForTradingCard`'s own link attempt.
-      const afterState = await readVariantChainState(container, tradingCardVariantId)
-      if (!afterState.productVariantId) throw linkError
-      productVariantId = afterState.productVariantId
+      const afterProductVariantId = await readVariantProductVariantId(container, tradingCardVariantId)
+      if (!afterProductVariantId) throw linkError
+      productVariantId = afterProductVariantId
     }
   }
 
-  const inventoryItemId = (await readVariantChainState(container, tradingCardVariantId)).inventoryItemId
-    ?? await createAndLinkInventoryItem(container, `HT-PULSE-${shortId()}`, productVariantId)
+  const inventoryItemId = await ensureSingleInventoryItemForProductVariant(container, productVariantId, `HT-PULSE-${shortId()}`)
 
   return { productVariantId, inventoryItemId }
 }

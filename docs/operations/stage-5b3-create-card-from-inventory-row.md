@@ -88,6 +88,74 @@ the legacy branch (and this note) once every environment that matters is
 confirmed migrated and no row anywhere still has a legacy-shaped
 `card_number_normalised`.
 
+## Concurrent InventoryItem repair: the PostgreSQL locking fix
+
+`ensureSingleInventoryItemForProductVariant` (in
+`create-card-from-inventory-row.ts`) is the single path every step goes
+through to get "the one InventoryItem" for a ProductVariant. It runs its
+whole read-decide-create/repair-link sequence inside a lock acquired via
+Medusa's Locking Module, using the official PostgreSQL advisory-lock
+provider (`@medusajs/medusa/locking-postgres`) — see
+[ADR 0013](../decisions/0013-create-card-compensation-never-deletes-discoverable-rows.md)
+for why this was necessary (Medusa's default in-memory locking provider only
+works within a single process) and the full design rationale.
+
+### Infrastructure
+
+- **Dependency**: `@medusajs/locking-postgres` (pinned to the same version as
+  `@medusajs/medusa`, 2.17.2) is a direct `package.json` dependency.
+- **Registration**: `medusa-config.ts` registers the Locking Module
+  (`@medusajs/medusa/locking`) with `@medusajs/medusa/locking-postgres` as its
+  sole, default (`is_default: true`) provider.
+- **Database**: the provider uses the application's existing `DATABASE_URL`
+  connection for its advisory locks — no separate connection string, no new
+  environment variable, no Redis.
+- **Migration**: the provider ships its own bundled migration
+  (`Migration20241009222919_InitialSetupMigration`, part of
+  `@medusajs/locking-postgres`), which creates a `locking` table. It runs
+  through the normal Medusa migration system —
+  `npx medusa db:migrate` (with `NODE_ENV` set to the target environment) —
+  the same as any other module's migration. It must be applied once in every
+  environment (dev, test, and eventually production) before this workflow's
+  concurrent-repair path can run there.
+- **Production configuration**: because the PostgreSQL provider is registered
+  with `is_default: true` and is the *only* provider in the `providers` array,
+  there is no in-memory fallback available to silently take over if the
+  provider fails to resolve — Medusa's module loader fails the application's
+  own boot if the locking module itself cannot be constructed, rather than
+  degrading to the single-instance-only in-memory implementation.
+
+### Why not a unique constraint instead?
+
+Medusa's `product_variant` ↔ `inventory_item` link is deliberately `isList:
+true` on both sides, to support inventory kits (one variant genuinely backed
+by several inventory items, one item shared by several variants). A unique
+constraint on that link table would break that platform-level feature for
+every other module, not just trading cards. Holo Trail's own, narrower rule
+— exactly one InventoryItem per trading-card ProductVariant — is enforced in
+application code instead (`ensureSingleInventoryItemForProductVariant`'s own
+count check, backed by the lock), not by widening or narrowing a schema
+constraint that isn't ours to change.
+
+### Handling of a pre-existing duplicate
+
+If a ProductVariant is ever found with more than one linked InventoryItem
+(e.g. a legacy import or a manual repair gone wrong, not something this
+workflow's own fixed code path can produce), the workflow fails clearly with
+a `CatalogueIntegrityError` naming the count, rather than guessing which item
+is authoritative by picking `inventory_items[0]`. Neither existing item is
+touched or deleted; this needs a human to resolve which item is correct.
+
+### Cross-instance behaviour
+
+The advisory lock is scoped to the database, not to a single Node process —
+two requests handled by two different application instances (or two worker
+processes on the same instance) racing to repair the *same* ProductVariant's
+InventoryItem are serialized exactly the same way as two concurrent requests
+within one process. This is the property the in-memory default provider
+cannot offer, and the reason the fix requires a real database-backed lock
+rather than a process-local mutex.
+
 ## Explicit exclusions (confirmed out of scope)
 
 A finish/specialTreatment pairing validation rule (e.g. `ENERGY_REVERSE`
@@ -100,13 +168,23 @@ deployment pipeline (none exists yet in this repository).
 ## Testing
 
 - `create-card-from-inventory-row.integration.spec.ts` — the real workflow
-  against real Product/Inventory modules: orphan-safety and cross-proposal
-  concurrency (two concurrent unresolved proposals for the same never-seen
-  card converge on one identity chain; a second variant on an existing card
-  converges without duplicating the product/item); the Stage 5B.2
-  stock-location policy reused by card creation; and a dedicated proof that
-  an existing card migrated from the pre-Phase-8 normalisation algorithm is
-  reused, not duplicated, by a fresh request.
+  against real Product/Inventory modules (and, since the locking fix, the
+  real `@medusajs/medusa/locking-postgres` provider, never an in-memory
+  mock): orphan-safety and cross-proposal concurrency (two concurrent
+  unresolved proposals for the same never-seen card converge on one identity
+  chain; a second variant on an existing card converges without duplicating
+  the product/item); same-step link failures never delete a committed row
+  and repair completes a preserved incomplete chain; PostgreSQL-locked
+  InventoryItem repair — two concurrent repairers for the same incomplete
+  ProductVariant are genuinely serialized by the real advisory lock (a
+  deterministic barrier proves both would have raced without it), a thrown
+  operation inside the lock releases it (a later retry succeeds), an
+  ambiguous link outcome (commits but reports an error) is resolved by
+  rereading rather than duplicating, and more than one existing linked
+  InventoryItem fails clearly instead of picking `inventory_items[0]`; the
+  Stage 5B.2 stock-location policy reused by card creation; and a dedicated
+  proof that an existing card migrated from the pre-Phase-8 normalisation
+  algorithm is reused, not duplicated, by a fresh request.
 - `card-number-normalisation-migration.integration.spec.ts` — the migration
   itself: legacy denominator-inclusive/lowercase-suffix values re-normalised,
   leading zeros preserved, idempotent re-run, collision detected and aborts
@@ -132,3 +210,16 @@ deployment pipeline (none exists yet in this repository).
 - `tcgdex-enrichment-migration.integration.spec.ts` has a known, pre-existing
   failure (a check-constraint violation from shared test-database state)
   unrelated to this stage's work; left unresolved and out of scope here.
+- A separate, unrelated read in `syncInventoryProposalToMedusa`
+  (`medusa-inventory-sync.ts`, Stage 5B.2) still resolves a ProductVariant's
+  InventoryItem via `inventory_items?.[0]`. That workflow only ever
+  consumes an already-complete chain this workflow produced (by the time a
+  proposal is applied and synced, its variant's InventoryItem already
+  exists, uniquely, per the invariant above) rather than creating or
+  repairing one, so it was left out of this fix's scope — deliberately, per
+  the approved stage boundary — but is worth revisiting if that workflow
+  is ever changed to run before this one's InventoryItem guarantee holds.
+- The Product/InventoryItem repair asymmetry described in ADR 0013 (a
+  Product unlinked from its TradingCard cannot be rediscovered and reused
+  the way an unlinked-but-still-present ProductVariant can) still applies;
+  the locking fix does not change it.
