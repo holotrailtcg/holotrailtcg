@@ -41,17 +41,25 @@ const ReplaceCardImageDialog = ({ tradingCardId, tradingCardVariantId, onClose, 
       setUploadError("This image could not be saved. The previous image, if there was one, has been kept.")
       return
     }
-    setUploadError(null)
-    toast.success("Image saved")
+    // Archiving the old primary image is what actually makes the new one
+    // primary (`archiveCardImage` compacts the remaining ready images' sort
+    // order, moving the new upload into position 0) — a replacement is not
+    // complete until this succeeds. Reporting success beforehand, or when
+    // this fails, would leave the old image as primary while telling the
+    // reviewer the swap worked.
     if (existingReadyImage && existingReadyImage.id !== image.id) {
       try {
         await postAction(`/admin/trading-cards/images/${encodeURIComponent(existingReadyImage.id)}/archive`)
       } catch {
-        // best-effort — the new image is already saved and correct either way
+        setUploadError("The new photo was uploaded, but the old one could not be archived, so it is still the primary image. Please try again.")
+        await imagesQuery.refetch()
+        return
       }
     }
+    setUploadError(null)
+    toast.success("Image saved")
     setReplacing(false)
-    imagesQuery.refetch()
+    await imagesQuery.refetch()
     onUploaded()
   }
 

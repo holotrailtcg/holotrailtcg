@@ -137,19 +137,27 @@ const CreateCardDialog = ({ row, onClose, onCreated }: CreateCardDialogProps) =>
       setUploadError("This image could not be saved. The previous image, if there was one, has been kept.")
       return
     }
-    setUploadError(null)
-    toast.success("Image saved")
     // Archive the prior image only after the new one is confirmed READY —
-    // never before, so a rejected replacement leaves the working image intact.
+    // never before, so a rejected replacement leaves the working image
+    // intact. This is also what actually makes the new image primary
+    // (`archiveCardImage` compacts the remaining ready images' sort order,
+    // moving the new upload into position 0), so a replacement is not
+    // complete until it succeeds — reporting success beforehand, or when
+    // this fails, would leave the old image as primary while telling the
+    // reviewer the swap worked.
     if (existingReadyImage && existingReadyImage.id !== image.id) {
       try {
         await postAction(`/admin/trading-cards/images/${encodeURIComponent(existingReadyImage.id)}/archive`)
       } catch {
-        // best-effort — the new image is already saved and correct either way
+        setUploadError("The new photo was uploaded, but the old one could not be archived, so it is still the primary image. Please try again.")
+        await imagesQuery.refetch()
+        return
       }
     }
+    setUploadError(null)
+    toast.success("Image saved")
     setReplacing(false)
-    imagesQuery.refetch()
+    await imagesQuery.refetch()
   }
 
   const handleClose = () => {
@@ -212,16 +220,26 @@ const CreateCardDialog = ({ row, onClose, onCreated }: CreateCardDialogProps) =>
                   id="cc-finish"
                   className="rounded-none border p-2 text-sm"
                   value={finish}
-                  onChange={(event) => { setFinish(event.target.value); setFinishConfirmed(true) }}
+                  onChange={(event) => { setFinish(event.target.value); setFinishConfirmed(false) }}
                 >
                   <option value="">Select the finish of this card</option>
                   {FINISH_OPTIONS.map((option) => (
                     <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
                 </select>
-                <Text size="xsmall" className="text-ui-fg-subtle">
-                  {finish && !finishConfirmed ? "Suggested from the import — please check it and select it again to confirm." : null}
-                </Text>
+                {finish && (
+                  <label htmlFor="cc-finish-confirm" className="flex items-center gap-2 pt-1">
+                    <input
+                      id="cc-finish-confirm"
+                      type="checkbox"
+                      checked={finishConfirmed}
+                      onChange={(event) => setFinishConfirmed(event.target.checked)}
+                    />
+                    <Text size="xsmall" className="text-ui-fg-subtle">
+                      Suggested from the import — confirm this finish is correct.
+                    </Text>
+                  </label>
+                )}
               </div>
 
               <div className="flex flex-col gap-1">
@@ -230,16 +248,26 @@ const CreateCardDialog = ({ row, onClose, onCreated }: CreateCardDialogProps) =>
                   id="cc-special"
                   className="rounded-none border p-2 text-sm"
                   value={specialTreatment}
-                  onChange={(event) => { setSpecialTreatment(event.target.value); setSpecialTreatmentConfirmed(true) }}
+                  onChange={(event) => { setSpecialTreatment(event.target.value); setSpecialTreatmentConfirmed(false) }}
                 >
                   <option value="">Select the special treatment of this card</option>
                   {SPECIAL_TREATMENT_OPTIONS.map((option) => (
                     <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
                 </select>
-                <Text size="xsmall" className="text-ui-fg-subtle">
-                  {specialTreatment && !specialTreatmentConfirmed ? "Suggested from the import — please check it and select it again to confirm." : null}
-                </Text>
+                {specialTreatment && (
+                  <label htmlFor="cc-special-confirm" className="flex items-center gap-2 pt-1">
+                    <input
+                      id="cc-special-confirm"
+                      type="checkbox"
+                      checked={specialTreatmentConfirmed}
+                      onChange={(event) => setSpecialTreatmentConfirmed(event.target.checked)}
+                    />
+                    <Text size="xsmall" className="text-ui-fg-subtle">
+                      Suggested from the import — confirm this special treatment is correct.
+                    </Text>
+                  </label>
+                )}
               </div>
 
               {submitError && <Text size="small" className="text-ui-fg-error">{submitError}</Text>}
