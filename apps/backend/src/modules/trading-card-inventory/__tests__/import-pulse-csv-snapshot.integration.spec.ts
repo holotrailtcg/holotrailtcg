@@ -3,6 +3,7 @@ import { ContainerRegistrationKeys, createPgConnection } from "@medusajs/framewo
 import { TRADING_CARD_INVENTORY_MODULE } from "../index"
 import { TRADING_CARDS_MODULE } from "../../trading-cards"
 import { importPulseCsvSnapshot } from "../../../workflows/trading-card-inventory/import-pulse-csv-snapshot"
+import { normaliseCardNumberComparisonForm } from "../../trading-cards/identity/card-number"
 
 let pgConnection: ReturnType<typeof createPgConnection>
 let rootConnection: ReturnType<typeof createPgConnection>
@@ -54,9 +55,14 @@ async function createMatchableVariant(cardNumber: string) {
   const set = await cards.createCardSets({
     game: "POKEMON", language: "EN", display_name: `Pulse Workflow Test Set ${id}`, provider_set_code: `pulsewftest${id}`,
   })
+  // Uses the same authoritative normalisation every real writer goes
+  // through (see card-number.ts) — `cardNumber` here includes a denominator
+  // (e.g. "044/072"), which `findVariantCandidatesForPulseMatch` compares
+  // against a denominator-stripped `card_number_normalised`; writing the raw
+  // value here would silently desync this fixture from every real writer.
   const card = await cards.createTradingCards({
     card_set_id: set.id, name: `Crobat ${id}`, search_name: `crobat ${id}`,
-    card_number: cardNumber, card_number_normalised: cardNumber, origin: "PULSE",
+    card_number: cardNumber, card_number_normalised: normaliseCardNumberComparisonForm(cardNumber), origin: "PULSE",
   })
   const variant = await cards.createTradingCardVariants({
     trading_card_id: card.id, condition: "NEAR_MINT", condition_source: "EXPLICIT",

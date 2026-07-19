@@ -33,7 +33,7 @@ const InventorySnapshot = model
       name: "IDX_trading_card_inventory_snapshot_live_content_hash",
       on: ["inventory_source_id", "content_hash"],
       unique: true,
-      where: "content_hash is not null and deleted_at is null and status not in ('REJECTED', 'FAILED')",
+      where: "content_hash is not null and deleted_at is null and status not in ('REJECTED', 'FAILED', 'DISCARDED')",
     },
     {
       name: "IDX_trading_card_inventory_snapshot_single_applying",

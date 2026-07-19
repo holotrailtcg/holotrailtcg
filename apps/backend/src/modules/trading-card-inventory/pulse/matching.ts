@@ -54,7 +54,7 @@ export async function matchSnapshotEntry(row: ParsedPulseRow, lookup: TradingCar
       return { matchingStatus: "MATCHED", tradingCardVariantId: trusted.tradingCardVariantId, matchedVia: "TRUSTED_REFERENCE", shouldPersistTrustedReference: false, diagnostics: [] }
     }
     // Case 2: trusted reference to the card only — attempt an exact-attribute match scoped to that one card.
-    if (row.finishCandidate && row.specialTreatmentCandidate && row.conditionSource === "EXPLICIT" && row.languageCandidate && !row.languageConflict) {
+    if (row.finishCandidate && row.specialTreatmentCandidate && !row.conditionUnknownToken && row.languageCandidate && !row.languageConflict) {
       const candidates = (await lookup.findCandidateVariants({
         setCodeCandidate: row.setCodeCandidate ?? "", cardNumberCandidate: row.cardNumberCandidate ?? "",
         language: row.languageCandidate, condition: row.conditionCandidate ?? "", finish: row.finishCandidate,
@@ -76,9 +76,11 @@ export async function matchSnapshotEntry(row: ParsedPulseRow, lookup: TradingCar
     }
   }
 
-  // Case 3: no trusted reference at all — only attempt when every attribute is explicit, never on a defaulted/guessed field.
+  // Case 3: no trusted reference at all — only attempt when every attribute is either explicit or a
+  // cleanly-absent condition defaulted to Near Mint (never on a genuinely unrecognized/garbled condition
+  // token, nor a guessed finish/treatment/language/identity).
   const canAttemptUniqueMatch =
-    row.finishCandidate && row.specialTreatmentCandidate && row.conditionSource === "EXPLICIT" &&
+    row.finishCandidate && row.specialTreatmentCandidate && !row.conditionUnknownToken &&
     row.languageCandidate && !row.languageConflict && row.setCodeCandidate && row.cardNumberCandidate
 
   if (!canAttemptUniqueMatch) {

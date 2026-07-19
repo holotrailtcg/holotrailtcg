@@ -474,7 +474,7 @@ class TradingCardInventoryModuleService extends MedusaService({
     idSchema.parse(input.inventorySourceId)
     const [existing] = await this.manager_.execute<Record<string, unknown>>(
       `select * from trading_card_inventory_snapshot
-       where inventory_source_id = ? and content_hash = ? and status not in ('REJECTED', 'FAILED') and deleted_at is null`,
+       where inventory_source_id = ? and content_hash = ? and status not in ('REJECTED', 'FAILED', 'DISCARDED') and deleted_at is null`,
       [input.inventorySourceId, input.contentHash],
     )
     return existing ?? null
@@ -505,7 +505,7 @@ class TradingCardInventoryModuleService extends MedusaService({
       }
       const [existing] = await manager.execute<Record<string, unknown>>(
         `select id from trading_card_inventory_snapshot
-         where inventory_source_id = ? and content_hash = ? and status not in ('REJECTED', 'FAILED') and deleted_at is null`,
+         where inventory_source_id = ? and content_hash = ? and status not in ('REJECTED', 'FAILED', 'DISCARDED') and deleted_at is null`,
         [input.inventorySourceId, input.contentHash],
       )
       if (existing) throw new DuplicateSnapshotError(existing.id as string)
@@ -1181,7 +1181,7 @@ class TradingCardInventoryModuleService extends MedusaService({
       const [latestEligibleBaseline] = await manager.execute<Record<string, unknown>>(
         `select * from trading_card_inventory_snapshot
          where inventory_source_id = ? and sequence_number < ? and approved_at is not null
-           and status not in ('REJECTED', 'FAILED', 'SUPERSEDED') and deleted_at is null
+           and status not in ('REJECTED', 'FAILED', 'SUPERSEDED', 'DISCARDED') and deleted_at is null
          order by sequence_number desc limit 1 for share`,
         [input.inventorySourceId, snapshot.sequence_number],
       )
@@ -1189,7 +1189,7 @@ class TradingCardInventoryModuleService extends MedusaService({
       if (input.previousApprovedSnapshotId) {
         ;[baseline] = await manager.execute<Record<string, unknown>>(
           `select * from trading_card_inventory_snapshot
-           where id = ? and inventory_source_id = ? and approved_at is not null and status not in ('REJECTED', 'FAILED', 'SUPERSEDED')
+           where id = ? and inventory_source_id = ? and approved_at is not null and status not in ('REJECTED', 'FAILED', 'SUPERSEDED', 'DISCARDED')
              and deleted_at is null for share`,
           [input.previousApprovedSnapshotId, input.inventorySourceId],
         )
@@ -1972,11 +1972,19 @@ class TradingCardInventoryModuleService extends MedusaService({
         `select * from trading_card_inventory_proposal where id = ? and deleted_at is null for update`, [input.proposalId]
       )
       if (!proposal) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory proposal not found")
-      if (proposal.review_status !== INVENTORY_PROPOSAL_REVIEW_STATUS.PENDING) {
-        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Only a pending proposal can start card creation")
-      }
+      // Checked before the `review_status` gate below: a proposal this
+      // workflow already resolved to a variant keeps that resolution across
+      // a later, independent approve/reject of the (now NEW_HOLDING)
+      // proposal — `resolveInventoryProposalVariant` only ever changes
+      // `change_kind`, never `review_status`. A delayed/retried duplicate
+      // request must still hit this idempotent-replay case even after the
+      // reviewer has since approved or rejected it, not the "only a pending
+      // proposal" error below.
       if (proposal.change_kind === INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING && proposal.trading_card_variant_id) {
         return { claimToken: null, alreadyResolved: true, tradingCardVariantId: proposal.trading_card_variant_id as string }
+      }
+      if (proposal.review_status !== INVENTORY_PROPOSAL_REVIEW_STATUS.PENDING) {
+        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Only a pending proposal can start card creation")
       }
       if (proposal.change_kind !== INVENTORY_PROPOSAL_CHANGE_KIND.UNRESOLVED_VARIANT) {
         throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Only an unresolved-variant proposal can start card creation")

@@ -84,6 +84,8 @@ export interface ParsedPulseRow {
   unitSellingPrice: string | null
   conditionSource: "EXPLICIT" | "DEFAULTED" | null
   conditionCandidate: string | null
+  /** Only set when a condition token was present but unrecognized (garbled/unknown) — never for a cleanly absent token. Distinguishes "no condition stated" (safe to auto-match on the Near Mint default) from "a condition value we can't parse" (must stay review-required). */
+  conditionUnknownToken: string | null
   finishCandidate: string | null
   specialTreatmentCandidate: string | null
   rarityCandidate: string | null

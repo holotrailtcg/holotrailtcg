@@ -39,7 +39,7 @@ export function parsePulseRow(record: PulseCsvRecord, rowNumber: number, sourceL
     return {
       rowNumber, outcome: "SKIPPED", providerReference: "", quantity: null, currencyCode: null,
       unitAcquisitionCost: null, unitMarketPrice: null, unitSellingPrice: null, conditionSource: null,
-      conditionCandidate: null, finishCandidate: null, specialTreatmentCandidate: null, rarityCandidate: null,
+      conditionCandidate: null, conditionUnknownToken: null, finishCandidate: null, specialTreatmentCandidate: null, rarityCandidate: null,
       rarityRaw: null, languageConflict: false, languageCandidate: sourceLanguage, cardNumberCandidate: null,
       setCodeCandidate: null, gradedCardDetected: false, rawFields: {},
       diagnostics: [{ rowNumber, phase: "PARSE", code: "BLANK_ROW", severity: "INFO", fieldRef: null, message: "Row has no populated fields and was skipped." }],
@@ -69,11 +69,13 @@ export function parsePulseRow(record: PulseCsvRecord, rowNumber: number, sourceL
   }
   const anyMoneyPresent = [avgCost, marketPrice, stickerPrice].some((parsed) => parsed.status === "value" || parsed.status === "zero")
 
+  // A cleanly-absent condition token is standard for this provider's export
+  // format (it defaults to Near Mint, changeable later by the reviewer) and is
+  // deliberately not surfaced as a diagnostic — only a genuinely unrecognised
+  // token is a true anomaly worth flagging.
   const condition = resolveCondition(productId.conditionCandidate)
   if (productId.conditionCandidate && condition.unknownToken) {
     addDiagnostic("UNKNOWN_CONDITION_TOKEN", "WARNING", `Condition token "${condition.unknownToken}" is not recognised; defaulted to Near Mint pending review.`, "Product ID")
-  } else if (!productId.conditionCandidate) {
-    addDiagnostic("CONDITION_DEFAULTED", "INFO", "No explicit condition was present; defaulted to Near Mint.", "Product ID")
   }
 
   const languageHint = inferProviderLanguageHint(productId.setCodeCandidate)
@@ -105,11 +107,14 @@ export function parsePulseRow(record: PulseCsvRecord, rowNumber: number, sourceL
     !material.recognized || (Boolean(rarity.raw) && !rarity.candidate) || language.conflict ||
     !language.language || gradedCardDetected || Boolean(condition.unknownToken)
 
+  // A cleanly-absent condition token (no token stated at all, defaulted to Near
+  // Mint) is standard for this provider's export format, not a warning-worthy
+  // event — only a genuinely missing price signal still downgrades the outcome.
   const outcome = hasFatalError
     ? "INVALID"
     : needsReview
       ? "REVIEW_REQUIRED"
-      : condition.source === "DEFAULTED" || !anyMoneyPresent
+      : !anyMoneyPresent
         ? "VALID_WITH_WARNINGS"
         : "VALID"
 
@@ -124,6 +129,7 @@ export function parsePulseRow(record: PulseCsvRecord, rowNumber: number, sourceL
     unitSellingPrice: stickerPrice.status === "value" || stickerPrice.status === "zero" ? stickerPrice.canonical : null,
     conditionSource: condition.source,
     conditionCandidate: condition.condition,
+    conditionUnknownToken: condition.unknownToken,
     finishCandidate: material.finishCandidate,
     specialTreatmentCandidate: material.specialTreatmentCandidate,
     rarityCandidate: rarity.candidate,

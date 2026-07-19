@@ -11,6 +11,7 @@ import {
 } from "../../modules/trading-card-inventory/types"
 import { matchSnapshotEntry, type TradingCardMatchLookup } from "../../modules/trading-card-inventory/pulse/matching"
 import { parseProductId } from "../../modules/trading-card-inventory/pulse/product-id"
+import { resolveCondition } from "../../modules/trading-card-inventory/pulse/condition"
 import { inferProviderLanguageHint, resolveRowLanguage } from "../../modules/trading-card-inventory/pulse/language"
 import type { ParsedPulseRow } from "../../modules/trading-card-inventory/pulse/types"
 import { reconcileInventorySnapshotWithPriceLocks } from "./reconcile-inventory-snapshot"
@@ -65,6 +66,10 @@ export function entryRowToMatchInput(entryRow: Record<string, unknown>, sourceLa
   const productId = parseProductId(providerReference)
   const languageHint = inferProviderLanguageHint(productId.setCodeCandidate)
   const language = resolveRowLanguage(sourceLanguage, languageHint)
+  // Re-resolved from the raw product-ID token (not read back from the persisted `condition_source`
+  // column) so this stays a pure function of the provider reference — the same helper `parsePulseRow`
+  // itself uses, so a retry sees exactly the same condition/source/unknownToken as the original parse.
+  const condition = resolveCondition(productId.conditionCandidate)
   return {
     rowNumber: Number(entryRow.row_number ?? 0),
     outcome: String(entryRow.outcome) as ParsedPulseRow["outcome"],
@@ -74,8 +79,9 @@ export function entryRowToMatchInput(entryRow: Record<string, unknown>, sourceLa
     unitAcquisitionCost: entryRow.unit_acquisition_cost === null || entryRow.unit_acquisition_cost === undefined ? null : String(entryRow.unit_acquisition_cost),
     unitMarketPrice: entryRow.unit_market_price === null || entryRow.unit_market_price === undefined ? null : String(entryRow.unit_market_price),
     unitSellingPrice: entryRow.unit_selling_price === null || entryRow.unit_selling_price === undefined ? null : String(entryRow.unit_selling_price),
-    conditionSource: (entryRow.condition_source as ParsedPulseRow["conditionSource"]) ?? null,
-    conditionCandidate: productId.conditionCandidate,
+    conditionSource: condition.source,
+    conditionCandidate: condition.condition,
+    conditionUnknownToken: condition.unknownToken,
     finishCandidate: (entryRow.finish_candidate as string | null) ?? null,
     specialTreatmentCandidate: (entryRow.special_treatment_candidate as string | null) ?? null,
     rarityCandidate: (entryRow.rarity_candidate as string | null) ?? null,

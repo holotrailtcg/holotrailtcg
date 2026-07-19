@@ -940,7 +940,7 @@
           "constraint": false,
           "primary": false,
           "unique": false,
-          "expression": "CREATE UNIQUE INDEX IF NOT EXISTS \"IDX_trading_card_inventory_snapshot_live_content_hash\" ON \"trading_card_inventory_snapshot\" (\"inventory_source_id\", \"content_hash\") WHERE content_hash is not null and deleted_at is null and status not in ('REJECTED', 'FAILED')"
+          "expression": "CREATE UNIQUE INDEX IF NOT EXISTS \"IDX_trading_card_inventory_snapshot_live_content_hash\" ON \"trading_card_inventory_snapshot\" (\"inventory_source_id\", \"content_hash\") WHERE content_hash is not null and deleted_at is null and status not in ('REJECTED', 'FAILED', 'DISCARDED')"
         },
         {
           "keyName": "IDX_trading_card_inventory_snapshot_single_applying",

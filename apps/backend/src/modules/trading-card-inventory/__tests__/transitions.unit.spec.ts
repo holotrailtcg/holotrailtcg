@@ -23,11 +23,32 @@ describe("inventory snapshot lifecycle transitions", () => {
     expect(isValidInventorySnapshotTransition(INVENTORY_SNAPSHOT_STATUS.DRAFT, INVENTORY_SNAPSHOT_STATUS.APPLIED)).toBe(false)
   })
 
-  it("treats every terminal state as having no further transitions", () => {
-    for (const terminal of [INVENTORY_SNAPSHOT_STATUS.REJECTED, INVENTORY_SNAPSHOT_STATUS.FAILED, INVENTORY_SNAPSHOT_STATUS.SUPERSEDED]) {
+  it("treats SUPERSEDED and DISCARDED as having no further transitions", () => {
+    for (const terminal of [INVENTORY_SNAPSHOT_STATUS.SUPERSEDED, INVENTORY_SNAPSHOT_STATUS.DISCARDED]) {
       for (const target of Object.values(INVENTORY_SNAPSHOT_STATUS)) {
         expect(isValidInventorySnapshotTransition(terminal, target)).toBe(false)
       }
+    }
+  })
+
+  it("allows discarding a REJECTED or FAILED snapshot (an Admin manually clearing it), but nothing else", () => {
+    for (const terminal of [INVENTORY_SNAPSHOT_STATUS.REJECTED, INVENTORY_SNAPSHOT_STATUS.FAILED]) {
+      for (const target of Object.values(INVENTORY_SNAPSHOT_STATUS)) {
+        const expected = target === INVENTORY_SNAPSHOT_STATUS.DISCARDED
+        expect(isValidInventorySnapshotTransition(terminal, target)).toBe(expected)
+      }
+    }
+  })
+
+  it("allows discarding a not-yet-applied snapshot (DRAFT/VALIDATED/PENDING_REVIEW/APPROVED), but never an APPLYING or APPLIED one", () => {
+    for (const preApplication of [
+      INVENTORY_SNAPSHOT_STATUS.DRAFT, INVENTORY_SNAPSHOT_STATUS.VALIDATED,
+      INVENTORY_SNAPSHOT_STATUS.PENDING_REVIEW, INVENTORY_SNAPSHOT_STATUS.APPROVED,
+    ]) {
+      expect(isValidInventorySnapshotTransition(preApplication, INVENTORY_SNAPSHOT_STATUS.DISCARDED)).toBe(true)
+    }
+    for (const stockTouched of [INVENTORY_SNAPSHOT_STATUS.APPLYING, INVENTORY_SNAPSHOT_STATUS.APPLIED]) {
+      expect(isValidInventorySnapshotTransition(stockTouched, INVENTORY_SNAPSHOT_STATUS.DISCARDED)).toBe(false)
     }
   })
 
