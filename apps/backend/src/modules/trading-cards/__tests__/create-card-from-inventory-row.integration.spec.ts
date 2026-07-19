@@ -821,6 +821,446 @@ describe("createCardFromInventoryRowWorkflow — compensation never deletes a di
   )
 })
 
+describe("createCardFromInventoryRowWorkflow — same-step link failures never delete, and repair completes preserved chains (Codex remediation, third pass)", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function isTradingCardProductLinkPayload(payload: any): boolean {
+    const cardsSide = payload?.[TRADING_CARDS_MODULE]
+    return !!cardsSide && "trading_card_id" in cardsSide && !("trading_card_variant_id" in cardsSide)
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function isVariantProductLinkPayload(payload: any): boolean {
+    const cardsSide = payload?.[TRADING_CARDS_MODULE]
+    return !!cardsSide && "trading_card_variant_id" in cardsSide
+  }
+
+  it(
+    "TradingCard <-> Product link: A pauses mid-link and genuinely fails; B discovers the already-committed TradingCard meanwhile and completes; A's own orphaned Product is never deleted",
+    async () => {
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const originalLinkCreate = (medusaApp.link as any).create.bind(medusaApp.link)
+      const linkSpy = jest.spyOn(medusaApp.link as any, "create")
+      try {
+        const source = await createSource()
+        const setCode = `set_cardlinkrace_${suffix()}`
+        const cardNumber = numericSuffix()
+        const shared = baseCardInput({ cardSetProviderSetCode: setCode, cardNumber, name: `Card Link Race Card ${suffix()}` })
+
+        const proposalA = await unresolvedVariantProposal(source.id, `cardlinkrace-a-${suffix()}`)
+        const proposalB = await unresolvedVariantProposal(source.id, `cardlinkrace-b-${suffix()}`)
+        const claimA = await inventory.beginCardCreationClaim({ proposalId: proposalA.id, actor: "reviewer-a", source: "MANUAL" })
+        const claimB = await inventory.beginCardCreationClaim({ proposalId: proposalB.id, actor: "reviewer-b", source: "MANUAL" })
+
+        let releaseA: () => void
+        const gateA = new Promise<void>((resolve) => { releaseA = resolve })
+        let aReachedLinkResolve: () => void
+        const aReachedLink = new Promise<void>((resolve) => { aReachedLinkResolve = resolve })
+        let releaseB: () => void
+        const gateB = new Promise<void>((resolve) => { releaseB = resolve })
+        let bReachedLinkResolve: () => void
+        const bReachedLink = new Promise<void>((resolve) => { bReachedLinkResolve = resolve })
+
+        let aLinkSeen = false
+        let bLinkSeen = false
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        linkSpy.mockImplementation(async (payload: any) => {
+          if (isTradingCardProductLinkPayload(payload)) {
+            if (!aLinkSeen) {
+              aLinkSeen = true
+              aReachedLinkResolve()
+              await gateA
+              throw new Error("Injected failure: A's TradingCard<->Product link")
+            }
+            if (!bLinkSeen) {
+              bLinkSeen = true
+              bReachedLinkResolve()
+              await gateB
+            }
+          }
+          return originalLinkCreate(payload)
+        })
+
+        const runA = createCardFromInventoryRowWorkflow(container).run({
+          input: { ...shared, proposalId: proposalA.id, claimToken: claimA.claimToken as string },
+        })
+        await aReachedLink
+
+        // B independently runs steps 1–2 for the same identity: its own
+        // CardSet/TradingCard lookup finds A's already-committed rows (A's
+        // TradingCard insert completed before A ever attempted its link),
+        // which is "B discovers that TradingCard and begins reuse" — B then
+        // reaches its own (not-yet-attempted) link call and pauses there too.
+        const runB = createCardFromInventoryRowWorkflow(container).run({
+          input: { ...shared, proposalId: proposalB.id, claimToken: claimB.claimToken as string },
+        })
+        await bReachedLink
+
+        // A's own link attempt fails for good — B has not linked anything
+        // yet either, so A's ambiguous-outcome re-read finds no winner and
+        // genuinely rethrows. This is "A completes its failure handling."
+        releaseA!()
+        await expect(runA).rejects.toBeTruthy()
+
+        // Only now does B's own link proceed.
+        releaseB!()
+        const { result: resultB } = await runB
+
+        // Exactly one TradingCard for the shared identity — A created it,
+        // B discovered and reused it; neither duplicated it.
+        const [cardSet] = await cards.listCardSets({ provider_set_code: setCode })
+        const matchingCards = await cards.listTradingCards({ card_set_id: cardSet.id, card_number_normalised: shared.cardNumber })
+        expect(matchingCards).toHaveLength(1)
+        expect(matchingCards[0].id).toBe(resultB.tradingCardId)
+
+        // B's own chain is complete, linked and retrievable — "the final
+        // successful proposal points to a complete active chain."
+        const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+        await expect(products.retrieveProduct(resultB.productId)).resolves.toMatchObject({ id: resultB.productId })
+        const refreshedB = await inventory.retrieveInventoryProposal(proposalB.id)
+        expect(refreshedB).toMatchObject({ change_kind: "NEW_HOLDING", trading_card_variant_id: resultB.tradingCardVariantId, card_creation_claim_token: null })
+
+        // A's own Product (created before its link attempt failed) was
+        // never deleted — it is left behind, unlinked, per ADR 0013: two
+        // products share this title (A's orphan, B's linked one).
+        const allProductsForName = await products.listProducts({ title: shared.name })
+        expect(allProductsForName.length).toBe(2)
+      } finally {
+        linkSpy.mockRestore()
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    },
+    60000,
+  )
+
+  it(
+    "TradingCardVariant <-> ProductVariant link: A pauses mid-link and genuinely fails; B discovers the already-committed TradingCardVariant meanwhile and completes; A's own orphaned ProductVariant is never deleted",
+    async () => {
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const originalLinkCreate = (medusaApp.link as any).create.bind(medusaApp.link)
+      const linkSpy = jest.spyOn(medusaApp.link as any, "create")
+      try {
+        const source = await createSource()
+        const setCode = `set_variantlinkrace_${suffix()}`
+        const cardNumber = numericSuffix()
+
+        // Seed the card itself first (uncontested — its own single-caller
+        // path is covered by earlier tests), so both A and B below are
+        // racing purely at the variant level, on an existing card.
+        const seedInput = baseCardInput({ cardSetProviderSetCode: setCode, cardNumber, name: "Variant Link Race Card" })
+        const seedProposal = await unresolvedVariantProposal(source.id, `variantlinkrace-seed-${suffix()}`)
+        const seedClaim = await inventory.beginCardCreationClaim({ proposalId: seedProposal.id, actor: "seed", source: "MANUAL" })
+        await createCardFromInventoryRowWorkflow(container).run({
+          input: { ...seedInput, proposalId: seedProposal.id, claimToken: seedClaim.claimToken as string },
+        })
+
+        const shared = baseCardInput({
+          cardSetProviderSetCode: setCode, cardNumber, name: "Variant Link Race Card",
+          condition: CARD_CONDITION.LIGHTLY_PLAYED, finish: CARD_FINISH.NORMAL, specialTreatment: SPECIAL_TREATMENT.NONE,
+        })
+        const proposalA = await unresolvedVariantProposal(source.id, `variantlinkrace-a-${suffix()}`)
+        const proposalB = await unresolvedVariantProposal(source.id, `variantlinkrace-b-${suffix()}`)
+        const claimA = await inventory.beginCardCreationClaim({ proposalId: proposalA.id, actor: "reviewer-a", source: "MANUAL" })
+        const claimB = await inventory.beginCardCreationClaim({ proposalId: proposalB.id, actor: "reviewer-b", source: "MANUAL" })
+
+        let releaseA: () => void
+        const gateA = new Promise<void>((resolve) => { releaseA = resolve })
+        let aReachedLinkResolve: () => void
+        const aReachedLink = new Promise<void>((resolve) => { aReachedLinkResolve = resolve })
+        let releaseB: () => void
+        const gateB = new Promise<void>((resolve) => { releaseB = resolve })
+        let bReachedLinkResolve: () => void
+        const bReachedLink = new Promise<void>((resolve) => { bReachedLinkResolve = resolve })
+
+        let aLinkSeen = false
+        let bLinkSeen = false
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        linkSpy.mockImplementation(async (payload: any) => {
+          if (isVariantProductLinkPayload(payload)) {
+            if (!aLinkSeen) {
+              aLinkSeen = true
+              aReachedLinkResolve()
+              await gateA
+              throw new Error("Injected failure: A's TradingCardVariant<->ProductVariant link")
+            }
+            if (!bLinkSeen) {
+              bLinkSeen = true
+              bReachedLinkResolve()
+              await gateB
+            }
+          }
+          return originalLinkCreate(payload)
+        })
+
+        const runA = createCardFromInventoryRowWorkflow(container).run({
+          input: { ...shared, proposalId: proposalA.id, claimToken: claimA.claimToken as string },
+        })
+        await aReachedLink
+
+        const runB = createCardFromInventoryRowWorkflow(container).run({
+          input: { ...shared, proposalId: proposalB.id, claimToken: claimB.claimToken as string },
+        })
+        await bReachedLink
+
+        releaseA!()
+        await expect(runA).rejects.toBeTruthy()
+
+        releaseB!()
+        const { result: resultB } = await runB
+
+        const matchingVariants = await cards.listTradingCardVariants({
+          trading_card_id: resultB.tradingCardId, condition: shared.condition, finish: shared.finish, special_treatment: shared.specialTreatment,
+        })
+        expect(matchingVariants).toHaveLength(1)
+        expect(matchingVariants[0].id).toBe(resultB.tradingCardVariantId)
+
+        const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+        const product = await products.retrieveProduct(resultB.productId, { relations: ["variants"] })
+        // The seed variant plus exactly one variant for this dimension —
+        // A's own orphaned ProductVariant attempt was never linked to the
+        // product's "Card Variant" option combination search path, but did
+        // still add a real ProductVariant row (never deleted).
+        expect(product.variants?.length).toBeGreaterThanOrEqual(2)
+
+        const refreshedB = await inventory.retrieveInventoryProposal(proposalB.id)
+        expect(refreshedB).toMatchObject({ change_kind: "NEW_HOLDING", trading_card_variant_id: resultB.tradingCardVariantId, card_creation_claim_token: null })
+      } finally {
+        linkSpy.mockRestore()
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    },
+    60000,
+  )
+
+  it(
+    "TradingCard <-> Product link: a link call that actually commits but still reports an error is treated as success, not a failure or a duplicate",
+    async () => {
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const originalLinkCreate = (medusaApp.link as any).create.bind(medusaApp.link)
+      const linkSpy = jest.spyOn(medusaApp.link as any, "create")
+      try {
+        const source = await createSource()
+        const setCode = `set_ambiguouslink_${suffix()}`
+        const cardNumber = numericSuffix()
+        const input = baseCardInput({ cardSetProviderSetCode: setCode, cardNumber, name: `Ambiguous Link Card ${suffix()}` })
+        const proposal = await unresolvedVariantProposal(source.id, `ambiguouslink-${suffix()}`)
+        const claim = await inventory.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer", source: "MANUAL" })
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        linkSpy.mockImplementation(async (payload: any) => {
+          if (isTradingCardProductLinkPayload(payload)) {
+            await originalLinkCreate(payload) // really commits...
+            throw new Error("Injected: the call reports failure even though it committed")
+          }
+          return originalLinkCreate(payload)
+        })
+
+        // The workflow succeeds — the ambiguous outcome is resolved by
+        // re-reading committed state (finds its own just-committed link),
+        // not by treating the thrown error as fatal or retrying the link.
+        const { result } = await createCardFromInventoryRowWorkflow(container).run({
+          input: { ...input, proposalId: proposal.id, claimToken: claim.claimToken as string },
+        })
+
+        const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+        const matchingProducts = await products.listProducts({ title: input.name })
+        expect(matchingProducts).toHaveLength(1)
+        expect(matchingProducts[0].id).toBe(result.productId)
+      } finally {
+        linkSpy.mockRestore()
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    },
+    30000,
+  )
+
+  it(
+    "retry repairs a preserved incomplete TradingCard chain (identity exists, Product link missing) without duplicating the TradingCard or Product",
+    async () => {
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      try {
+        const setCode = `set_repaircard_${suffix()}`
+        const cardNumber = numericSuffix()
+        // Directly constructs the exact incomplete state a died mid-attempt
+        // would leave: a committed TradingCard identity with no Product at
+        // all (not even an unlinked orphan) — the simplest "missing part".
+        const cardName = `Repair Card ${suffix()}`
+        const set = await cards.createCardSets({ game: "POKEMON", language: "EN", display_name: "Repair Card Set", provider_set_code: setCode })
+        const bareCard = await cards.createTradingCards({
+          card_set_id: set.id, name: cardName, search_name: cardName.toLowerCase(),
+          card_number: cardNumber, card_number_normalised: cardNumber, origin: "PULSE",
+        })
+
+        const source = await createSource()
+        const proposal = await unresolvedVariantProposal(source.id, `repaircard-${suffix()}`)
+        const claim = await inventory.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer", source: "MANUAL" })
+        const input = baseCardInput({ cardSetProviderSetCode: setCode, cardSetDisplayName: "Repair Card Set", cardNumber, name: cardName })
+
+        const { result } = await createCardFromInventoryRowWorkflow(container).run({
+          input: { ...input, proposalId: proposal.id, claimToken: claim.claimToken as string },
+        })
+
+        // The pre-existing (bare) TradingCard identity was reused, not duplicated.
+        expect(result.tradingCardId).toBe(bareCard.id)
+        const matchingCards = await cards.listTradingCards({ card_set_id: set.id, card_number_normalised: cardNumber })
+        expect(matchingCards).toHaveLength(1)
+
+        const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+        const matchingProducts = await products.listProducts({ title: cardName })
+        expect(matchingProducts).toHaveLength(1)
+        expect(matchingProducts[0].id).toBe(result.productId)
+
+        const refreshed = await inventory.retrieveInventoryProposal(proposal.id)
+        expect(refreshed).toMatchObject({ change_kind: "NEW_HOLDING", trading_card_variant_id: result.tradingCardVariantId, card_creation_claim_token: null })
+      } finally {
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    },
+    30000,
+  )
+
+  it(
+    "retry repairs a preserved incomplete TradingCardVariant chain (identity exists, ProductVariant link missing) without duplicating the TradingCardVariant or ProductVariant",
+    async () => {
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      try {
+        const source = await createSource()
+        const setCode = `set_repairvariant_${suffix()}`
+        const cardNumber = numericSuffix()
+        const seedInput = baseCardInput({ cardSetProviderSetCode: setCode, cardNumber, name: "Repair Variant Card" })
+        const seedProposal = await unresolvedVariantProposal(source.id, `repairvariant-seed-${suffix()}`)
+        const seedClaim = await inventory.beginCardCreationClaim({ proposalId: seedProposal.id, actor: "seed", source: "MANUAL" })
+        const { result: seedResult } = await createCardFromInventoryRowWorkflow(container).run({
+          input: { ...seedInput, proposalId: seedProposal.id, claimToken: seedClaim.claimToken as string },
+        })
+
+        // Directly constructs the exact incomplete state a died mid-attempt
+        // would leave: a committed TradingCardVariant identity (for a
+        // *different* dimension combination than the seed) with no
+        // ProductVariant at all.
+        const bareVariant = await cards.createTradingCardVariants({
+          trading_card_id: seedResult.tradingCardId, condition: "LIGHTLY_PLAYED", condition_source: "EXPLICIT",
+          finish: "NORMAL", finish_confirmed: true, special_treatment: "NONE", special_treatment_confirmed: true,
+          sku: `SKU-REPAIR-${suffix().toUpperCase()}`, origin: "PULSE",
+        })
+
+        const proposal = await unresolvedVariantProposal(source.id, `repairvariant-${suffix()}`)
+        const claim = await inventory.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer", source: "MANUAL" })
+        const input = baseCardInput({
+          cardSetProviderSetCode: setCode, cardNumber, name: "Repair Variant Card",
+          condition: CARD_CONDITION.LIGHTLY_PLAYED, finish: CARD_FINISH.NORMAL, specialTreatment: SPECIAL_TREATMENT.NONE,
+        })
+
+        const { result } = await createCardFromInventoryRowWorkflow(container).run({
+          input: { ...input, proposalId: proposal.id, claimToken: claim.claimToken as string },
+        })
+
+        // The pre-existing (bare) TradingCardVariant identity was reused, not duplicated.
+        expect(result.tradingCardVariantId).toBe(bareVariant.id)
+        const matchingVariants = await cards.listTradingCardVariants({
+          trading_card_id: seedResult.tradingCardId, condition: "LIGHTLY_PLAYED", finish: "NORMAL", special_treatment: "NONE",
+        })
+        expect(matchingVariants).toHaveLength(1)
+
+        const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+        const product = await products.retrieveProduct(seedResult.productId, { relations: ["variants"] })
+        // The seed variant plus exactly the one just repaired — no duplicate.
+        expect(product.variants).toHaveLength(2)
+
+        const refreshed = await inventory.retrieveInventoryProposal(proposal.id)
+        expect(refreshed).toMatchObject({ change_kind: "NEW_HOLDING", trading_card_variant_id: result.tradingCardVariantId, card_creation_claim_token: null })
+      } finally {
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    },
+    30000,
+  )
+
+  it(
+    "no committed CardSet, TradingCard, TradingCardVariant, Product, ProductVariant or InventoryItem row count ever decreases across a sequence of distinct failure modes",
+    async () => {
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const originalLinkCreate = (medusaApp.link as any).create.bind(medusaApp.link)
+      const linkSpy = jest.spyOn(medusaApp.link as any, "create")
+      try {
+        const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+        const inventoryService = container.resolve<IInventoryService>(Modules.INVENTORY)
+
+        async function counts() {
+          return {
+            cardSets: (await cards.listCardSets({})).length,
+            tradingCards: (await cards.listTradingCards({})).length,
+            tradingCardVariants: (await cards.listTradingCardVariants({})).length,
+            products: (await products.listProducts({})).length,
+            productVariants: (await products.listProductVariants({})).length,
+            inventoryItems: (await inventoryService.listInventoryItems({})).length,
+          }
+        }
+
+        const before = await counts()
+        const source = await createSource()
+
+        // Failure 1: stale claim token — fails at the final proposal-resolution step.
+        const setCodeA = `set_nodecrease_a_${suffix()}`
+        const cardNumberA = numericSuffix()
+        const proposalA = await unresolvedVariantProposal(source.id, `nodecrease-a-${suffix()}`)
+        await inventory.beginCardCreationClaim({ proposalId: proposalA.id, actor: "reviewer", source: "MANUAL" })
+        await expect(createCardFromInventoryRowWorkflow(container).run({
+          input: { ...baseCardInput({ cardSetProviderSetCode: setCodeA, cardNumber: cardNumberA, name: "No Decrease Card A" }), proposalId: proposalA.id, claimToken: "not-the-real-claim-token" },
+        })).rejects.toMatchObject({ message: expect.stringMatching(/stale/i) })
+        const afterFailure1 = await counts()
+
+        // Failure 2: injected TradingCard<->Product link failure.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        linkSpy.mockImplementation(async (payload: any) => {
+          if (isTradingCardProductLinkPayload(payload)) throw new Error("Injected link failure")
+          return originalLinkCreate(payload)
+        })
+        const setCodeB = `set_nodecrease_b_${suffix()}`
+        const cardNumberB = numericSuffix()
+        const proposalB = await unresolvedVariantProposal(source.id, `nodecrease-b-${suffix()}`)
+        const claimB = await inventory.beginCardCreationClaim({ proposalId: proposalB.id, actor: "reviewer", source: "MANUAL" })
+        await expect(createCardFromInventoryRowWorkflow(container).run({
+          input: { ...baseCardInput({ cardSetProviderSetCode: setCodeB, cardNumber: cardNumberB, name: "No Decrease Card B" }), proposalId: proposalB.id, claimToken: claimB.claimToken as string },
+        })).rejects.toBeTruthy()
+        const afterFailure2 = await counts()
+        linkSpy.mockRestore()
+
+        // Failure 3: AMBIGUOUS_STOCK_LOCATION — a second stock location makes the location ambiguous.
+        await createStockLocation(`Loc ${suffix()}`)
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+        const setCodeC = `set_nodecrease_c_${suffix()}`
+        const cardNumberC = numericSuffix()
+        const proposalC = await unresolvedVariantProposal(source.id, `nodecrease-c-${suffix()}`)
+        const claimC = await inventory.beginCardCreationClaim({ proposalId: proposalC.id, actor: "reviewer", source: "MANUAL" })
+        await expect(createCardFromInventoryRowWorkflow(container).run({
+          input: { ...baseCardInput({ cardSetProviderSetCode: setCodeC, cardNumber: cardNumberC, name: "No Decrease Card C" }), proposalId: proposalC.id, claimToken: claimC.claimToken as string },
+        })).rejects.toMatchObject({ message: expect.stringMatching(/AMBIGUOUS_STOCK_LOCATION/) })
+        const afterFailure3 = await counts()
+
+        for (const key of Object.keys(before) as Array<keyof typeof before>) {
+          expect(afterFailure1[key]).toBeGreaterThanOrEqual(before[key])
+          expect(afterFailure2[key]).toBeGreaterThanOrEqual(afterFailure1[key])
+          expect(afterFailure3[key]).toBeGreaterThanOrEqual(afterFailure2[key])
+        }
+      } finally {
+        linkSpy.mockRestore()
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    },
+    60000,
+  )
+})
+
 describe("Stage 5B.2 stock-location policy, reused by card creation (Phase 7)", () => {
   it(
     "createCardFromInventoryRowWorkflow fails clearly (AMBIGUOUS_STOCK_LOCATION) rather than silently picking a location, when more than one exists and none is configured",
@@ -838,21 +1278,25 @@ describe("Stage 5B.2 stock-location policy, reused by card creation (Phase 7)", 
         input: { ...input, proposalId: proposal.id, claimToken: claim.claimToken as string },
       })).rejects.toMatchObject({ message: expect.stringMatching(/AMBIGUOUS_STOCK_LOCATION/) })
 
-      // The CardSet step 1 already created is deliberately left in place
-      // (ADR 0013) — step 1 has already returned by the time step 2 fails,
-      // so there is nothing for the orchestrator to compensate even in
-      // principle. The TradingCard/Product never persisted here, though:
-      // step 2's own failure happens *inside* its single invocation, before
-      // it ever returns a `StepResponse` for the orchestrator to see, so
-      // its own inline catch-cleanup (a separate, narrower case than
-      // cross-step compensation — see the workflow file) still applies.
+      // Per ADR 0013 (third pass), nothing this workflow has already
+      // committed is ever deleted, including inside a single step's own
+      // failure handling. The CardSet (step 1) and the bare TradingCard
+      // identity row (step 2's own insert, which itself never touches
+      // stock locations) are both preserved. The Product this same step 2
+      // invocation created for its first variant is preserved too — its
+      // failure happens inside `createAndLinkInventoryItem`, resolving the
+      // stock location, which is *after* the Product already committed —
+      // left behind unlinked to the TradingCard (a `retryUntilDefined` read
+      // of `trading_card.product` finds nothing until a later attempt
+      // repairs it; see the "retry repairs a preserved incomplete
+      // TradingCard chain" test below for that repair in action).
       const matchingCardSets = await cards.listCardSets({ provider_set_code: setCode })
       expect(matchingCardSets).toHaveLength(1)
       const matchingCards = await cards.listTradingCards({ card_number: cardNumber })
-      expect(matchingCards).toHaveLength(0)
+      expect(matchingCards).toHaveLength(1)
       const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
       const orphanProducts = await products.listProducts({ title: input.name })
-      expect(orphanProducts).toHaveLength(0)
+      expect(orphanProducts).toHaveLength(1)
     },
     30000,
   )

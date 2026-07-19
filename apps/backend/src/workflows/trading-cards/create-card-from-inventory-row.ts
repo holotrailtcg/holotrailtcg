@@ -99,36 +99,74 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
- * Codex remediation (second pass): steps 1–3 below no longer register a
- * compensation callback at all. A CardSet/TradingCard/TradingCardVariant
- * (and the Product/ProductVariant/InventoryItem created alongside them)
- * become discoverable — by identity lookup, exactly like each step's own
- * "does this already exist?" query above — the moment they commit, not the
- * moment the whole workflow finishes. A "still unreferenced?" check
- * immediately before a delete is always a check-then-delete: safe against
- * nothing that starts existing *after* the check, including a concurrent
- * request's discovery. A bounded delay before that check (the previous
- * remediation) only ever changed the odds, never closed the window — see
- * the Codex re-review this addresses. There is no cross-step/cross-module
- * transaction available to make check-and-delete atomic here (each workflow
- * step commits independently; see `resolveOrCreateVariantStep`'s
- * compensation history below for why a same-module CHECK-based guard, which
- * *is* atomic, was never available for this one).
+ * Codex remediation (third pass) — the governing invariant for this whole
+ * file:
  *
- * So compensation for these three steps does nothing: a failed request
- * leaves its created chain in place, exactly as if it had succeeded, and
- * relies on the same identity lookups every step already performs to make
- * that chain retrievable and reusable by a retry of the same request or by
- * an unrelated concurrent request for the same card. This trades a
- * possible unreferenced row after a failed, never-retried request for the
- * guarantee that a live, reused chain is never deleted out from under
- * whoever is depending on it.
+ *   Once a CardSet, TradingCard, TradingCardVariant, Product,
+ *   ProductVariant or InventoryItem has been committed, this workflow must
+ *   never synchronously delete it.
  *
- * Sweeping up rows that truly are orphaned (created, then never claimed by
- * any successful request) is deliberately deferred, not implemented here —
- * see ADR 0013. It needs a durable ownership/lease/reference mechanism (an
- * async reconciliation job reasoning about a retention window), not another
- * ad-hoc check-then-delete on the synchronous compensation path.
+ * The first two remediation passes fixed this for cross-step *compensation*
+ * (steps 1–3 register no compensation callback — see `createStep` calls
+ * below) but left the same defect inside each step's own same-invocation
+ * `catch` block: on a later sub-operation's failure (almost always the
+ * final module-link call), those blocks deleted the TradingCard/Product/
+ * InventoryItem (step 2) or TradingCardVariant/ProductVariant/InventoryItem
+ * (step 3) *this very call* had just committed — which is exactly as
+ * discoverable, by the same identity lookup every step performs, as
+ * anything cross-step compensation could reach. A concurrent request's
+ * lookup can observe a row the instant it commits, independent of which
+ * function (a compensation callback or an inline `catch`) would eventually
+ * try to delete it — the invariant does not distinguish between them, and
+ * neither should this file.
+ *
+ * So no code path in this file deletes a committed CardSet, TradingCard,
+ * TradingCardVariant, Product, ProductVariant or InventoryItem, ever. A
+ * step that fails partway through preserves everything it already
+ * committed. This means every step's job is really two separable
+ * questions, both idempotent and re-run safe:
+ *
+ *   1. Does the identity (CardSet / TradingCard / TradingCardVariant) exist?
+ *      If not, create it — its own database unique constraint
+ *      (`IDX_trading_card_identity`, `IDX_trading_card_variant_identity`) is
+ *      what breaks a concurrent creation race, exactly as it always has.
+ *   2. Is that identity's Medusa-side chain (Product/ProductVariant/
+ *      InventoryItem + module links) complete? If not — whether because
+ *      this is a brand-new identity or because a previous attempt committed
+ *      the identity but died before finishing its chain — create or
+ *      restore only whatever part is missing, then link it. `ensureProduct
+ *      ChainForTradingCard` (step 2) and `ensureVariantProductChain`
+ *      (step 3) below are that repair logic: they always re-read the
+ *      actual committed state before deciding anything is missing (an
+ *      "ambiguous" link outcome — the call threw, but may have committed
+ *      anyway, or a concurrent repairer may have finished first — is
+ *      resolved by trusting that re-read over the thrown error), and they
+ *      only ever create-or-reuse, never delete. The 1:1 module links this
+ *      file creates (`trading_card` ↔ `product`, `trading_card_variant` ↔
+ *      `product_variant`) themselves reject a second link for an identity
+ *      that already has one, which is what makes "attempt the link, and on
+ *      failure re-read who actually won" race-safe without a cross-step
+ *      transaction — the same pattern this file already used for the
+ *      identity rows themselves.
+ *
+ * This preserves both the identity and its dependents, so a retry of the
+ * same failed request — or a concurrent, unrelated request for the same
+ * card — always finds and repairs (never duplicates) whatever the previous
+ * attempt left behind. `CatalogueIntegrityError` is now reserved for state
+ * this repair logic cannot safely reconcile on its own (e.g. a
+ * ProductVariant that legitimately belongs to a different Product than its
+ * TradingCard — see `assertVariantProductHierarchy`, or a Product missing
+ * the "Card Variant" option entirely — see `addCardVariantOptionValue`),
+ * not for an ordinary missing link, which this file now repairs instead.
+ *
+ * The only accepted residual: a same-invocation retry can leave behind a
+ * harmless, unlinked orphan (e.g. an InventoryItem whose level/link call
+ * failed, or a losing race's Product/ProductVariant) — see the "Deferred:
+ * orphan reconciliation" section of ADR 0013. That is a tidiness concern,
+ * never a correctness or data-loss one: nothing this file ever creates is
+ * discoverable by its own identity lookups until it is actually linked, so
+ * an orphan like this can never be the thing a concurrent request depends
+ * on.
  */
 
 /**
@@ -175,17 +213,18 @@ async function createAndLinkInventoryItem(
   }
   const locationId = locationResolution.locationId
   const item = await inventory.createInventoryItems({ sku })
-  try {
-    await inventory.createInventoryLevels([{ inventory_item_id: item.id, location_id: locationId, stocked_quantity: 0 }])
-    const link = container.resolve(ContainerRegistrationKeys.LINK)
-    await link.create({ [Modules.PRODUCT]: { variant_id: productVariantId }, [Modules.INVENTORY]: { inventory_item_id: item.id } })
-  } catch (error) {
-    // Self-cleaning: this function either fully succeeds (item + level +
-    // link all exist) or leaves nothing behind. Callers only need to
-    // compensate the InventoryItem id once it has actually been returned.
-    try { await inventory.deleteInventoryItems([item.id]) } catch { /* best-effort */ }
-    throw error
-  }
+  // No cleanup on failure below — see the invariant note above `delay()`.
+  // Once created, this InventoryItem is never deleted, even if its level or
+  // its link to `productVariantId` never commits. It has no identity a
+  // later retry can look it up by (its `sku` is a random, disposable
+  // value), so a retry simply creates another one via a fresh call to this
+  // same function; the earlier attempt is left behind as a harmless,
+  // unlinked, deferred-reconciliation orphan (see ADR 0013) rather than
+  // risking a delete racing a concurrent request that has already linked it
+  // and started depending on it.
+  await inventory.createInventoryLevels([{ inventory_item_id: item.id, location_id: locationId, stocked_quantity: 0 }])
+  const link = container.resolve(ContainerRegistrationKeys.LINK)
+  await link.create({ [Modules.PRODUCT]: { variant_id: productVariantId }, [Modules.INVENTORY]: { inventory_item_id: item.id } })
   return item.id
 }
 
@@ -227,20 +266,73 @@ const resolveOrCreateCardSetStep = createStep(
 
 interface FreshProductVariant { productVariantId: string; inventoryItemId: string; dimensions: VariantDimensions }
 
-async function resolveProductIdForTradingCard(
-  container: MedusaContainer, tradingCardId: string,
-): Promise<string> {
+/** Single, no-retry read of a TradingCard's currently-linked Medusa product id, or `undefined` if none exists right now. */
+async function readTradingCardProductId(container: MedusaContainer, tradingCardId: string): Promise<string | undefined> {
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
-  const productId = await retryUntilDefined(async () => {
-    const { data } = await query.graph({ entity: "trading_card", fields: ["id", "product.id"], filters: { id: tradingCardId } })
-    return (data[0]?.product as { id?: string } | null)?.id
+  const { data } = await query.graph({ entity: "trading_card", fields: ["id", "product.id"], filters: { id: tradingCardId } })
+  return (data[0]?.product as { id?: string } | null)?.id
+}
+
+/**
+ * Ensures `tradingCardId` has a complete, linked Medusa Product (+ first
+ * ProductVariant + InventoryItem, if the product itself has to be created).
+ * Never deletes anything — see the invariant note above `delay()`. Handles
+ * three cases, all idempotent and safe to re-run:
+ *
+ *   1. The product already exists (the common case, and also what a retry
+ *      of a *complete* prior attempt sees) — a bounded re-read (the same
+ *      transient-commit-visibility window `retryUntilDefined` exists for
+ *      elsewhere in this file) is enough, no creation needed.
+ *   2. Nothing was ever created for this TradingCard (brand new, or a
+ *      previous attempt died before creating anything) — create the
+ *      Product/variant/item and link it.
+ *   3. A previous attempt created the Product/variant/item but the final
+ *      link never committed (or its outcome is ambiguous — the call threw,
+ *      but may have committed anyway) — the link's own 1:1 constraint
+ *      (`trading_card` ↔ `product`) rejects a second link for a
+ *      TradingCard that already has one, so attempting our own link and,
+ *      on failure, re-reading who actually holds it now is race-safe
+ *      without needing a cross-step transaction. If a concurrent repairer
+ *      already won, our own freshly created Product/variant/item are left
+ *      behind, unlinked (see ADR 0013's deferred orphan reconciliation) —
+ *      never deleted, and never reused as anyone's product, since nothing
+ *      ever came to point at them.
+ */
+async function ensureProductChainForTradingCard(
+  container: MedusaContainer, input: CreateCardFromInventoryRowInput, tradingCardId: string,
+): Promise<{ productId: string; freshProductVariant: FreshProductVariant | null }> {
+  const existingProductId = await retryUntilDefined(() => readTradingCardProductId(container, tradingCardId))
+  if (existingProductId) return { productId: existingProductId, freshProductVariant: null }
+
+  const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+  const numberForms = cardNumberForms(input.cardNumber)
+  const handle = `${handleSegment(input.cardSetProviderSetCode)}-${handleSegment(numberForms.normalised)}-${shortId().toLowerCase()}`
+  const variantSku = `HT-PULSE-${shortId()}`
+  const dimensions: VariantDimensions = { condition: input.condition, finish: input.finish, specialTreatment: input.specialTreatment }
+  const optionValue = variantOptionValue(dimensions)
+
+  const product = await products.createProducts({
+    title: input.name, handle, status: "draft",
+    options: [{ title: "Card Variant", values: [optionValue] }],
+    variants: [{ title: optionValue, sku: variantSku, manage_inventory: true, options: { "Card Variant": optionValue } }],
   })
-  if (!productId) {
-    throw new CatalogueIntegrityError(
-      `Trading card ${tradingCardId} has no linked Medusa product — this card's catalogue link is broken and needs manual repair.`,
-    )
+  const productVariantId = product.variants?.[0]?.id
+  if (!productVariantId) throw new MedusaError(MedusaError.Types.UNEXPECTED_STATE, "Product was created without its variant")
+  const inventoryItemId = await createAndLinkInventoryItem(container, variantSku, productVariantId)
+
+  const link = container.resolve(ContainerRegistrationKeys.LINK)
+  try {
+    await link.create({ [Modules.PRODUCT]: { product_id: product.id }, [TRADING_CARDS_MODULE]: { trading_card_id: tradingCardId } })
+  } catch (linkError) {
+    // Ambiguous outcome — trust a fresh read of committed state over the
+    // thrown error (it may have committed anyway, or a concurrent repairer
+    // may have linked a different Product first).
+    const winnerProductId = await readTradingCardProductId(container, tradingCardId)
+    if (winnerProductId) return { productId: winnerProductId, freshProductVariant: null }
+    throw linkError
   }
-  return productId
+
+  return { productId: product.id, freshProductVariant: { productVariantId, inventoryItemId, dimensions } }
 }
 
 const resolveOrCreateCardStep = createStep(
@@ -248,97 +340,39 @@ const resolveOrCreateCardStep = createStep(
   async (input: CreateCardFromInventoryRowInput & { cardSetId: string }, { container }) => {
     const cards = container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
     const numberForms = cardNumberForms(input.cardNumber)
+    const identityFilters = { card_set_id: input.cardSetId, card_number_normalised: numberForms.normalised }
 
-    const [existingCard] = await cards.listTradingCards(
-      { card_set_id: input.cardSetId, card_number_normalised: numberForms.normalised }, { take: 1 },
-    )
+    const [existingCard] = await cards.listTradingCards(identityFilters, { take: 1 })
+    let tradingCardId: string
     if (existingCard) {
-      const productId = await resolveProductIdForTradingCard(container, existingCard.id)
-      return new StepResponse({ tradingCardId: existingCard.id, productId, freshProductVariant: null as FreshProductVariant | null })
+      tradingCardId = existingCard.id
+    } else {
+      try {
+        const created = await cards.createTradingCards({
+          card_set_id: input.cardSetId, name: input.name, search_name: input.name.toLowerCase(),
+          card_number: numberForms.original, card_number_normalised: numberForms.normalised,
+          rarity_raw: input.rarityRaw, rarity_comparison: input.rarityRaw == null ? null : rarityComparisonForm(input.rarityRaw),
+          origin: RECORD_ORIGIN.PULSE,
+        })
+        tradingCardId = created.id
+      } catch (error) {
+        // Identity race: `IDX_trading_card_identity` is what actually broke
+        // the tie — our own insert never committed, so there is nothing of
+        // ours to preserve here (only the winner's row exists).
+        const [afterRace] = await cards.listTradingCards(identityFilters, { take: 1 })
+        if (!afterRace) throw error
+        tradingCardId = afterRace.id
+      }
     }
 
-    // Brand-new card: create the Medusa Product with its first variant, then
-    // link the TradingCard to it — deliberately in that order. A concurrent
-    // lookup above can only ever observe a *committed* TradingCard row once
-    // its Product (and the link between them) already exist, so there is no
-    // window in which another workflow run's lookup sees a real, fully
-    // created TradingCard with a missing product and misreports it as
-    // corrupted catalogue state (see `resolveProductIdForTradingCard`).
-    const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
-    const handle = `${handleSegment(input.cardSetProviderSetCode)}-${handleSegment(numberForms.normalised)}-${shortId().toLowerCase()}`
-    const variantSku = `HT-PULSE-${shortId()}`
-    const optionValue = variantOptionValue({ condition: input.condition, finish: input.finish, specialTreatment: input.specialTreatment })
-
-    let productId: string | undefined
-    let inventoryItemId: string | undefined
-    let tradingCardId: string | undefined
-    try {
-      const product = await products.createProducts({
-        title: input.name, handle, status: "draft",
-        options: [{ title: "Card Variant", values: [optionValue] }],
-        variants: [{ title: optionValue, sku: variantSku, manage_inventory: true, options: { "Card Variant": optionValue } }],
-      })
-      productId = product.id
-      const productVariantId = product.variants?.[0]?.id
-      if (!productVariantId) throw new MedusaError(MedusaError.Types.UNEXPECTED_STATE, "Product was created without its variant")
-      inventoryItemId = await createAndLinkInventoryItem(container, variantSku, productVariantId)
-
-      const tradingCard = await cards.createTradingCards({
-        card_set_id: input.cardSetId, name: input.name, search_name: input.name.toLowerCase(),
-        card_number: numberForms.original, card_number_normalised: numberForms.normalised,
-        rarity_raw: input.rarityRaw, rarity_comparison: input.rarityRaw == null ? null : rarityComparisonForm(input.rarityRaw),
-        origin: RECORD_ORIGIN.PULSE,
-      })
-      tradingCardId = tradingCard.id
-      const link = container.resolve(ContainerRegistrationKeys.LINK)
-      await link.create({ [Modules.PRODUCT]: { product_id: product.id }, [TRADING_CARDS_MODULE]: { trading_card_id: tradingCard.id } })
-
-      const freshProductVariant: FreshProductVariant = {
-        productVariantId, inventoryItemId,
-        dimensions: { condition: input.condition, finish: input.finish, specialTreatment: input.specialTreatment },
-      }
-      return new StepResponse({ tradingCardId: tradingCard.id, productId: product.id, freshProductVariant })
-    } catch (error) {
-      // This step is about to throw without returning a StepResponse, so the
-      // orchestrator will never learn what was created above and will never
-      // call this step's own compensation for it. Clean up everything we
-      // created ourselves before deciding whether this was a recoverable
-      // concurrent-creation race (lost at the TradingCard insert's unique
-      // constraint) or a genuine failure to rethrow.
-      if (tradingCardId) {
-        try { await cards.deleteTradingCards([tradingCardId]) } catch { /* best-effort */ }
-      }
-      if (productId) {
-        try { await products.deleteProducts([productId]) } catch { /* best-effort */ }
-      }
-      if (inventoryItemId) {
-        const inventory = container.resolve<IInventoryService>(Modules.INVENTORY)
-        try { await inventory.deleteInventoryItems([inventoryItemId]) } catch { /* best-effort */ }
-      }
-      // Only the TradingCard insert itself carries a race-breaking unique
-      // constraint (`IDX_trading_card_identity`) — if we got far enough to
-      // create our own tradingCardId, we already won any such race, so a
-      // later failure (e.g. the link) is a genuine failure, not a race.
-      if (!tradingCardId) {
-        const [afterRace] = await cards.listTradingCards(
-          { card_set_id: input.cardSetId, card_number_normalised: numberForms.normalised }, { take: 1 },
-        )
-        if (afterRace) {
-          const winnerProductId = await resolveProductIdForTradingCard(container, afterRace.id)
-          return new StepResponse({ tradingCardId: afterRace.id, productId: winnerProductId, freshProductVariant: null as FreshProductVariant | null })
-        }
-      }
-      throw error
-    }
+    const { productId, freshProductVariant } = await ensureProductChainForTradingCard(container, input, tradingCardId)
+    return new StepResponse({ tradingCardId, productId, freshProductVariant })
   },
-  // No compensation — see the remediation note above `delay()`. A
-  // TradingCard/Product/InventoryItem this step creates is left in place on
-  // a later step's failure. The `catch` block above is a separate, narrower
-  // case out of scope for this fix: it only cleans up when *this step's own*
-  // invocation fails before ever returning a `StepResponse` (e.g. the link
-  // call throws right after creating the TradingCard row) — the orchestrator
-  // never learns anything was created and so never calls a compensation
-  // callback for it either way.
+  // No compensation, and no same-step delete either — see the invariant
+  // note above `delay()`. The TradingCard this step creates or finds is a
+  // committed identity anchor the moment it exists; `ensureProductChainFor
+  // TradingCard` completes or repairs its Product chain by creating or
+  // reusing, never by deleting.
 )
 
 // ---------------------------------------------------------------------
@@ -347,31 +381,32 @@ const resolveOrCreateCardStep = createStep(
 
 interface CardStepResult { tradingCardId: string; productId: string; freshProductVariant: FreshProductVariant | null }
 
-/**
- * Resolves the full linked chain (ProductVariant + InventoryItem) for an
- * already-existing TradingCardVariant, or throws a `CatalogueIntegrityError`
- * if either link is broken. Shared by the fast lookup path and the
- * lose-the-creation-race path below (§ concurrency).
- */
-async function resolveExistingVariantChain(container: MedusaContainer, tradingCardVariantId: string) {
+/** Single, no-retry read of a TradingCardVariant's currently-linked ProductVariant id and InventoryItem id (either may be missing right now). */
+async function readVariantChainState(
+  container: MedusaContainer, tradingCardVariantId: string,
+): Promise<{ productVariantId?: string; inventoryItemId?: string }> {
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
-  const chain = await retryUntilDefined(async () => {
-    const { data } = await query.graph({
-      entity: "trading_card_variant",
-      fields: ["id", "product_variant.id", "product_variant.inventory_items.inventory_item_id"],
-      filters: { id: tradingCardVariantId },
-    })
-    const productVariant = data[0]?.product_variant as { id?: string; inventory_items?: Array<{ inventory_item_id?: string }> | null } | null
-    const inventoryItemId = productVariant?.inventory_items?.[0]?.inventory_item_id
-    if (!productVariant?.id || !inventoryItemId) return undefined
-    return { tradingCardVariantId, productVariantId: productVariant.id, inventoryItemId }
+  const { data } = await query.graph({
+    entity: "trading_card_variant",
+    fields: ["id", "product_variant.id", "product_variant.inventory_items.inventory_item_id"],
+    filters: { id: tradingCardVariantId },
   })
-  if (!chain) {
-    throw new CatalogueIntegrityError(
-      `Trading card variant ${tradingCardVariantId} has broken Medusa linkage (missing product variant or inventory item) — needs manual repair, not a second link.`,
-    )
-  }
-  return chain
+  const productVariant = data[0]?.product_variant as { id?: string; inventory_items?: Array<{ inventory_item_id?: string }> | null } | null
+  return { productVariantId: productVariant?.id, inventoryItemId: productVariant?.inventory_items?.[0]?.inventory_item_id }
+}
+
+/** Finds an existing ProductVariant on `productId` whose "Card Variant" option value matches `optionValue`, if any. */
+async function findProductVariantByOptionValue(
+  container: MedusaContainer, productId: string, optionValue: string,
+): Promise<string | undefined> {
+  const query = container.resolve(ContainerRegistrationKeys.QUERY)
+  const { data } = await query.graph({
+    entity: "product_variant", fields: ["id", "options.value"], filters: { product_id: productId },
+  })
+  const match = (data as Array<{ id: string; options?: Array<{ value?: string }> | null }>).find(
+    (variant) => variant.options?.some((option) => option.value === optionValue),
+  )
+  return match?.id
 }
 
 /**
@@ -415,6 +450,112 @@ async function addCardVariantOptionValue(
   return { optionId: cardVariantOption.id, createdValueId: alreadyPresent ? null : (valueRow?.id ?? null) }
 }
 
+/**
+ * Ensures a ProductVariant exists on `productId` for this exact
+ * `dimensions` combination, never deleting anything. Medusa itself enforces
+ * at most one variant per distinct option-value combination on one
+ * product, so — exactly like the TradingCard/TradingCardVariant identity
+ * rows elsewhere in this file — "attempt the insert, and on failure re-read
+ * who actually holds this combination now" is race-safe without a
+ * cross-step transaction.
+ */
+async function ensureProductVariantForDimensions(
+  container: MedusaContainer, productId: string, dimensions: VariantDimensions,
+): Promise<string> {
+  const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+  const optionValue = variantOptionValue(dimensions)
+
+  const existing = await findProductVariantByOptionValue(container, productId, optionValue)
+  if (existing) return existing
+
+  await addCardVariantOptionValue(products, productId, optionValue)
+
+  const variantSku = `HT-PULSE-${shortId()}`
+  let attempt = 0
+  for (;;) {
+    try {
+      const productVariant = await products.createProductVariants({
+        product_id: productId, title: optionValue, sku: variantSku, manage_inventory: true, options: { "Card Variant": optionValue },
+      })
+      return productVariant.id
+    } catch (variantError) {
+      // Two distinct, both-recoverable causes share this catch: (a) the
+      // option value just added is not yet visible to
+      // `createProductVariants`'s own re-resolution of the product's
+      // options ("does not exist") — re-confirm and retry a bounded number
+      // of times; (b) a concurrent caller already created a variant for
+      // this exact option combination — Medusa's own uniqueness rejects
+      // ours, which is the signal to re-read and reuse rather than a
+      // genuine failure. Re-read for (b) on every attempt, since it can
+      // happen on the very first try.
+      const afterRace = await findProductVariantByOptionValue(container, productId, optionValue)
+      if (afterRace) return afterRace
+      attempt += 1
+      const message = variantError instanceof Error ? variantError.message : String(variantError)
+      if (attempt >= 5 || !/does not exist/i.test(message)) throw variantError
+      await delay(60)
+      await addCardVariantOptionValue(products, productId, optionValue)
+    }
+  }
+}
+
+/**
+ * Ensures `tradingCardVariantId` has a complete, linked ProductVariant +
+ * InventoryItem chain, repairing whichever part is missing — never
+ * deleting anything. Mirrors `ensureProductChainForTradingCard`'s shape:
+ *
+ *   1. Bounded re-read for the common case (already complete, or a
+ *      transient commit-visibility window).
+ *   2. If the ProductVariant link itself is missing: reuse the `fresh`
+ *      pair step 2 handed down when its dimensions match (the card's very
+ *      first variant, created atomically with its Product) or ensure one
+ *      via `ensureProductVariantForDimensions`, then attempt the
+ *      TradingCardVariant ↔ ProductVariant link — its own 1:1 constraint
+ *      makes "attempt, then re-read on failure" race-safe here too.
+ *   3. If only the InventoryItem is missing (a ProductVariant is already
+ *      linked, but no InventoryItem is): create and link a new one.
+ */
+async function ensureVariantProductChain(
+  container: MedusaContainer, cardResult: CardStepResult, dimensions: VariantDimensions, tradingCardVariantId: string,
+): Promise<{ productVariantId: string; inventoryItemId: string }> {
+  const complete = await retryUntilDefined(async () => {
+    const state = await readVariantChainState(container, tradingCardVariantId)
+    if (!state.productVariantId || !state.inventoryItemId) return undefined
+    return { productVariantId: state.productVariantId, inventoryItemId: state.inventoryItemId }
+  })
+  if (complete) return complete
+
+  const state = await readVariantChainState(container, tradingCardVariantId)
+  let productVariantId = state.productVariantId
+
+  if (!productVariantId) {
+    const cards = container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
+    const fresh = cardResult.freshProductVariant
+    productVariantId = (fresh && sameVariantDimensions(fresh.dimensions, dimensions))
+      ? fresh.productVariantId
+      : await ensureProductVariantForDimensions(container, cardResult.productId, dimensions)
+
+    const ownerProductId = await retrieveProductVariantOwner(container, productVariantId)
+    await cards.assertVariantProductHierarchy({ productVariantProductId: ownerProductId, tradingCardProductId: cardResult.productId })
+
+    const link = container.resolve(ContainerRegistrationKeys.LINK)
+    try {
+      await link.create({ [Modules.PRODUCT]: { product_variant_id: productVariantId }, [TRADING_CARDS_MODULE]: { trading_card_variant_id: tradingCardVariantId } })
+    } catch (linkError) {
+      // Ambiguous outcome — trust a fresh read over the thrown error, same
+      // as `ensureProductChainForTradingCard`'s own link attempt.
+      const afterState = await readVariantChainState(container, tradingCardVariantId)
+      if (!afterState.productVariantId) throw linkError
+      productVariantId = afterState.productVariantId
+    }
+  }
+
+  const inventoryItemId = (await readVariantChainState(container, tradingCardVariantId)).inventoryItemId
+    ?? await createAndLinkInventoryItem(container, `HT-PULSE-${shortId()}`, productVariantId)
+
+  return { productVariantId, inventoryItemId }
+}
+
 const resolveOrCreateVariantStep = createStep(
   "resolve-or-create-variant",
   async (input: CreateCardFromInventoryRowInput & { cardResult: CardStepResult }, { container }) => {
@@ -426,137 +567,43 @@ const resolveOrCreateVariantStep = createStep(
     }
 
     const [existingVariant] = await cards.listTradingCardVariants(variantFilters, { take: 1 })
+    let tradingCardVariantId: string
     if (existingVariant) {
-      const chain = await resolveExistingVariantChain(container, existingVariant.id)
-      return new StepResponse(chain)
-    }
-
-    const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
-    let productVariantId: string
-    let inventoryItemId: string
-    let createdProductVariant = false
-    let createdTradingCardVariantId: string | undefined
-
-    // Everything below is one compensatable unit: whichever of these
-    // sub-operations throws, the orchestrator will never see a StepResponse
-    // for this step and so will never learn what needs cleaning up. The
-    // catch block below cleans up in reverse creation order and — only when
-    // our own TradingCardVariant insert never got far enough to succeed
-    // (the point `IDX_trading_card_variant_identity` actually enforces
-    // uniqueness) — re-checks for a concurrent-race winner before rethrowing.
-    try {
-      const fresh = input.cardResult.freshProductVariant
-      if (fresh && sameVariantDimensions(fresh.dimensions, dimensions)) {
-        productVariantId = fresh.productVariantId
-        inventoryItemId = fresh.inventoryItemId
-      } else {
-        const variantSku = `HT-PULSE-${shortId()}`
-        const optionValue = variantOptionValue(dimensions)
-        await addCardVariantOptionValue(products, input.cardResult.productId, optionValue)
-
-        // `createProductVariants` re-resolves the product's own option
-        // values from scratch rather than trusting the row `addCardVariant
-        // OptionValue` just confirmed present. Under two concurrent callers
-        // adding the exact same *new* option value, Medusa's own add/reconcile
-        // path is not safe against the interleaving: one caller's freshly
-        // committed value can be momentarily invisible to the other's variant
-        // creation, or can even be recreated under a different id part-way
-        // through. Bounded retry — re-confirming (and, if needed, re-adding;
-        // `addCardVariantOptionValue` is itself idempotent) the value each
-        // time and using whatever id it reports *right now* — rides out that
-        // window instead of surfacing a spurious failure.
-        let productVariant: Awaited<ReturnType<typeof products.createProductVariants>>
-        let attempt = 0
-        for (;;) {
-          try {
-            productVariant = await products.createProductVariants({
-              product_id: input.cardResult.productId, title: optionValue,
-              sku: variantSku, manage_inventory: true, options: { "Card Variant": optionValue },
-            })
-            break
-          } catch (variantError) {
-            attempt += 1
-            const message = variantError instanceof Error ? variantError.message : String(variantError)
-            if (attempt >= 5 || !/does not exist/i.test(message)) throw variantError
-            await delay(60)
-            await addCardVariantOptionValue(products, input.cardResult.productId, optionValue)
-          }
-        }
-        productVariantId = productVariant.id
-        inventoryItemId = await createAndLinkInventoryItem(container, variantSku, productVariantId)
-        createdProductVariant = true
-      }
-
-      const ownerProductId = await retrieveProductVariantOwner(container, productVariantId)
-      await cards.assertVariantProductHierarchy({ productVariantProductId: ownerProductId, tradingCardProductId: input.cardResult.productId })
-
+      tradingCardVariantId = existingVariant.id
+    } else {
       const sku = generateSku({
         tradingCardId: input.cardResult.tradingCardId, game: input.cardGame, language: input.cardLanguage,
         setCode: input.cardSetProviderSetCode, cardNumber: input.cardNumber, cardName: input.name,
         condition: input.condition, finish: input.finish, specialTreatment: input.specialTreatment,
       })
-      const tradingCardVariant = await cards.createTradingCardVariants({
-        trading_card_id: input.cardResult.tradingCardId, condition: input.condition, condition_source: "EXPLICIT",
-        finish: input.finish, finish_confirmed: input.finishConfirmed,
-        special_treatment: input.specialTreatment, special_treatment_confirmed: input.specialTreatmentConfirmed,
-        sku, origin: RECORD_ORIGIN.PULSE,
-      })
-      createdTradingCardVariantId = tradingCardVariant.id
-      const link = container.resolve(ContainerRegistrationKeys.LINK)
-      await link.create({ [Modules.PRODUCT]: { product_variant_id: productVariantId }, [TRADING_CARDS_MODULE]: { trading_card_variant_id: tradingCardVariant.id } })
-
-      return new StepResponse({ tradingCardVariantId: tradingCardVariant.id, productVariantId, inventoryItemId })
-    } catch (error) {
-      if (createdTradingCardVariantId) {
-        try { await cards.deleteTradingCardVariants([createdTradingCardVariantId]) } catch { /* best-effort */ }
-      }
-      // A stray, unused option value this attempt may have added to the
-      // product's "Card Variant" option is deliberately never cleaned up —
-      // see the remediation note above `delay()`. Removing it here also has
-      // its own inherent TOCTOU race under two concurrent callers adding the
-      // exact same *new* option value (both can observe "not present" before
-      // either commits), so it is left in place rather than risking deletion
-      // of a value the other caller is actively relying on. An unused option
-      // value on the product is harmless.
-      if (createdProductVariant) {
-        // Only ours to clean up when this step itself created a *new*
-        // ProductVariant/InventoryItem — never the `fresh` pair handed down
-        // from step 2, whose cleanup remains step 2's own compensation.
-        try { await products.deleteProductVariants([productVariantId!]) } catch { /* best-effort */ }
-        const inventory = container.resolve<IInventoryService>(Modules.INVENTORY)
-        try { await inventory.deleteInventoryItems([inventoryItemId!]) } catch { /* best-effort */ }
-      }
-      // Concurrent creation race: another request resolved the exact same
-      // (trading_card_id, condition, finish, special_treatment) tuple first.
-      // Only meaningful to re-check once our own createTradingCardVariants
-      // call never succeeded — if it did, we already won any such race. The
-      // winner's ProductVariant can fail us out here (e.g. Medusa's own
-      // "variant with these options already exists" check) *before* the
-      // winner has itself reached its own createTradingCardVariants call —
-      // retry the lookup rather than giving up on the very first miss.
-      if (!createdTradingCardVariantId) {
+      try {
+        const created = await cards.createTradingCardVariants({
+          trading_card_id: input.cardResult.tradingCardId, condition: input.condition, condition_source: "EXPLICIT",
+          finish: input.finish, finish_confirmed: input.finishConfirmed,
+          special_treatment: input.specialTreatment, special_treatment_confirmed: input.specialTreatmentConfirmed,
+          sku, origin: RECORD_ORIGIN.PULSE,
+        })
+        tradingCardVariantId = created.id
+      } catch (error) {
+        // Identity race: `IDX_trading_card_variant_identity` broke the tie
+        // — our own insert never committed, nothing of ours to preserve.
         const afterRace = await retryUntilDefined(async () => {
           const [found] = await cards.listTradingCardVariants(variantFilters, { take: 1 })
           return found
         })
-        if (afterRace) {
-          const chain = await resolveExistingVariantChain(container, afterRace.id)
-          return new StepResponse(chain)
-        }
+        if (!afterRace) throw error
+        tradingCardVariantId = afterRace.id
       }
-      throw error
     }
+
+    const { productVariantId, inventoryItemId } = await ensureVariantProductChain(container, input.cardResult, dimensions, tradingCardVariantId)
+    return new StepResponse({ tradingCardVariantId, productVariantId, inventoryItemId })
   },
-  // No compensation — see the remediation note above `delay()`. This is the
-  // step the Codex re-review's remaining finding was about: a
-  // TradingCardVariant this step creates has no same-module FK dependent
-  // (the one thing that can make it "reused" is a different, concurrent
-  // request's proposal resolving to it — a plain text id column in the
-  // trading-card-inventory module, not a real foreign key), so a
-  // check-then-delete here was never more than probabilistically safe, no
-  // matter how the check was narrowed. Leaving the row in place removes the
-  // check entirely rather than tightening it further. The same applies to
-  // the ProductVariant/InventoryItem/option value created alongside it.
+  // No compensation, and no same-step delete either — see the invariant
+  // note above `delay()`. The TradingCardVariant this step creates or finds
+  // is a committed identity anchor the moment it exists; `ensureVariant
+  // ProductChain` completes or repairs its ProductVariant/InventoryItem
+  // chain by creating or reusing, never by deleting.
 )
 
 // ---------------------------------------------------------------------

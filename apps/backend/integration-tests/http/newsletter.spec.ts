@@ -2434,13 +2434,13 @@ describe("POST /admin/trading-cards/create-from-inventory-row", () => {
     expect(variantsOfProduct).toHaveLength(2)
   })
 
-  describe("CatalogueIntegrityError — damaged existing catalogue links", () => {
+  describe("damaged existing catalogue links are repaired, not fatal (ADR 0013)", () => {
     /**
      * Deliberately dismisses the `TRADING_CARDS_MODULE`
      * `trading_card_id` <-> `PRODUCT` `product_id` link that
-     * `resolveOrCreateCardStep` relies on, simulating a manually- or
-     * partially-repaired catalogue where the TradingCard row survived but
-     * its Medusa Product link did not.
+     * `ensureProductChainForTradingCard` relies on, simulating a manually-
+     * or partially-repaired catalogue where the TradingCard row survived
+     * but its Medusa Product link did not.
      */
     async function breakTradingCardProductLink(tradingCardId: string, productId: string) {
       const link = app.container.resolve(ContainerRegistrationKeys.LINK)
@@ -2450,7 +2450,7 @@ describe("POST /admin/trading-cards/create-from-inventory-row", () => {
       })
     }
 
-    it("fails clearly, creates no duplicate product, and leaves the proposal unresolved when an existing card's Product link is broken", async () => {
+    it("repairs a broken TradingCard <-> Product link by creating and linking a fresh Product, reusing the same TradingCard", async () => {
       const marker = uniqueMarker("brokenlink")
       const setCode = `sv1-${marker}`
       const cardNumber = "088/196"
@@ -2468,48 +2468,49 @@ describe("POST /admin/trading-cards/create-from-inventory-row", () => {
       const { data: beforeBreak } = await query.graph({
         entity: "trading_card", fields: ["id", "product.id"], filters: { id: tradingCardId },
       })
-      const productId = (beforeBreak[0]?.product as { id: string }).id
-      await breakTradingCardProductLink(tradingCardId, productId)
+      const originalProductId = (beforeBreak[0]?.product as { id: string }).id
+      await breakTradingCardProductLink(tradingCardId, originalProductId)
 
       const products = app.container.resolve<IProductModuleService>(Modules.PRODUCT)
-      const productsBeforeSecondAttempt = await products.listProducts({})
+      app.tcgdexClient.enqueueError(new TcgDexError({ code: TCGDEX_ERROR_CODE.NOT_FOUND, message: "no match", operation: "getCardBySetAndLocalId" }))
 
       // A second row for the SAME card identity (same set/number) resolves
-      // the existing TradingCard, then must fail on the now-broken link
-      // rather than silently fabricating a second Product.
+      // the existing TradingCard, finds its Product link missing, and
+      // repairs it rather than failing — a fresh Product is created and
+      // linked (the original, now-unlinked one has no reverse identity this
+      // workflow can safely rediscover it by, so it is left behind as a
+      // deferred-reconciliation orphan — see ADR 0013).
       const second = await unresolvedVariantProposalFixture(`${marker}-b`, { cardNumber, setCode })
       const secondResponse = await postCreateCard(createCardBody(second.proposal.id, marker, {
         cardSetDisplayName: `Broken Link Set ${marker}`, name: `Broken Link Card ${marker}`, cardNumber,
         condition: "LIGHTLY_PLAYED",
       }))
-      expect(secondResponse.status).toBe(500)
+      expect(secondResponse.status).toBe(201)
       const secondBody = await secondResponse.json()
-      expect(String(secondBody.message)).toMatch(/catalogue link is broken/)
 
-      // No duplicate Product was created as a side effect of the failure.
-      const productsAfterSecondAttempt = await products.listProducts({})
-      expect(productsAfterSecondAttempt).toHaveLength(productsBeforeSecondAttempt.length)
+      // The TradingCard identity is reused, never duplicated.
+      expect(secondBody.result.tradingCardId).toBe(tradingCardId)
 
-      // The second proposal was never resolved — it is exactly as
-      // UNRESOLVED_VARIANT as it was before the failed attempt.
+      const { data: afterRepair } = await query.graph({
+        entity: "trading_card", fields: ["id", "product.id"], filters: { id: tradingCardId },
+      })
+      const repairedProductId = (afterRepair[0]?.product as { id: string }).id
+      expect(repairedProductId).toBeTruthy()
+      // A fresh Product was created for the repair — not the original,
+      // still-orphaned one (verifying real repair happened, not a no-op).
+      expect(repairedProductId).not.toBe(originalProductId)
+      await expect(products.retrieveProduct(repairedProductId)).resolves.toMatchObject({ id: repairedProductId })
+      // The original, now-permanently-unlinked Product is left behind, not
+      // deleted — the accepted, documented residual (ADR 0013).
+      await expect(products.retrieveProduct(originalProductId)).resolves.toMatchObject({ id: originalProductId })
+
+      // The second proposal resolved to a real, complete chain.
       const inventory = app.container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
       const refreshedSecondProposal = await inventory.retrieveInventoryProposal(second.proposal.id)
-      expect(refreshedSecondProposal).toMatchObject({ change_kind: "UNRESOLVED_VARIANT" })
-
-      // The creation claim taken for the second attempt is not released by
-      // any in-workflow compensation (there is none — see the module
-      // comment on `CreateCardFromInventoryRowInput`): it is still held,
-      // so an immediate retry is rejected with 409, exactly like the
-      // "another attempt holds the claim" case above. It only clears via
-      // the claim's own lease expiry, not a saga rollback.
-      const retryResponse = await postCreateCard(createCardBody(second.proposal.id, marker, {
-        cardSetDisplayName: `Broken Link Set ${marker}`, name: `Broken Link Card ${marker}`, cardNumber,
-        condition: "LIGHTLY_PLAYED",
-      }))
-      expect(retryResponse.status).toBe(409)
+      expect(refreshedSecondProposal).toMatchObject({ change_kind: "NEW_HOLDING", card_creation_claim_token: null })
     })
 
-    it("fails clearly when an existing TradingCardVariant's ProductVariant/InventoryItem link is broken, without resolving the proposal", async () => {
+    it("repairs a broken TradingCardVariant <-> ProductVariant link by restoring the exact original ProductVariant, never creating a duplicate", async () => {
       const marker = uniqueMarker("brokenvariant")
       const setCode = `sv1-${marker}`
       const cardNumber = "099/196"
@@ -2538,22 +2539,33 @@ describe("POST /admin/trading-cards/create-from-inventory-row", () => {
       const variantsBeforeSecondAttempt = await products.listProductVariants({})
 
       // A second row for the SAME (card, condition, finish, treatment)
-      // tuple resolves to the existing TradingCardVariant, then must fail
-      // on the now-broken ProductVariant link.
+      // tuple resolves to the existing TradingCardVariant, finds its
+      // ProductVariant link missing, and repairs it. Medusa allows at most
+      // one variant per option-value combination on a product, so the
+      // *original* ProductVariant (never deleted, just unlinked) is the
+      // only one `ensureProductVariantForDimensions` can find — repair
+      // here means restoring the original link, not creating a new variant.
       const second = await unresolvedVariantProposalFixture(`${marker}-b`, { cardNumber, setCode })
       const secondResponse = await postCreateCard(createCardBody(second.proposal.id, marker, {
         cardSetDisplayName: `Broken Variant Set ${marker}`, name: `Broken Variant Card ${marker}`, cardNumber,
       }))
-      expect(secondResponse.status).toBe(500)
+      expect(secondResponse.status).toBe(201)
       const secondBody = await secondResponse.json()
-      expect(String(secondBody.message)).toMatch(/broken Medusa linkage/)
+
+      // The TradingCardVariant identity is reused, never duplicated.
+      expect(secondBody.result.tradingCardVariantId).toBe(tradingCardVariantId)
+      // The exact original ProductVariant was restored — no new one created.
+      const { data: afterRepair } = await query.graph({
+        entity: "trading_card_variant", fields: ["id", "product_variant.id"], filters: { id: tradingCardVariantId },
+      })
+      expect((afterRepair[0]?.product_variant as { id: string }).id).toBe(productVariantId)
 
       const variantsAfterSecondAttempt = await products.listProductVariants({})
       expect(variantsAfterSecondAttempt).toHaveLength(variantsBeforeSecondAttempt.length)
 
       const inventory = app.container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
       const refreshedSecondProposal = await inventory.retrieveInventoryProposal(second.proposal.id)
-      expect(refreshedSecondProposal).toMatchObject({ change_kind: "UNRESOLVED_VARIANT" })
+      expect(refreshedSecondProposal).toMatchObject({ change_kind: "NEW_HOLDING", card_creation_claim_token: null })
     })
   })
 
