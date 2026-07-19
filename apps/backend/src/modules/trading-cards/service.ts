@@ -249,6 +249,42 @@ class TradingCardsModuleService extends MedusaService({
     )
   }
 
+  /**
+   * Codex remediation: `create-card-from-inventory-row`'s compensation steps
+   * must never delete a CardSet/TradingCard that a *different, concurrently
+   * successful* workflow run has since reused (found via this same run's own
+   * lookup-or-create race handling) — deleting it out from under that run
+   * would either throw a foreign-key violation (if it already has children)
+   * or, if the deletion happens to land first, let the other run's later
+   * insert reference a row that no longer exists. A separate "check, then
+   * delete" round trip cannot close that window: another request's insert
+   * could land between the two statements. `delete ... where not exists
+   * (...)` is one statement, so Postgres evaluates the existence check and
+   * the delete atomically — there is no gap for a concurrent insert to land
+   * in. Returns whether the row was actually deleted; `false` means a
+   * dependent now exists and the row was correctly left alone.
+   */
+  async deleteCardSetIfUnreferenced(cardSetId: string): Promise<boolean> {
+    const deleted = await this.manager_.execute<{ id: string }>(
+      `delete from trading_card_set where id = ? and not exists (
+         select 1 from trading_card where card_set_id = ?
+       ) returning id`,
+      [cardSetId, cardSetId]
+    )
+    return deleted.length > 0
+  }
+
+  /** Same atomicity guarantee as `deleteCardSetIfUnreferenced`, guarding a TradingCard against a concurrently-added TradingCardVariant. */
+  async deleteTradingCardIfUnreferenced(tradingCardId: string): Promise<boolean> {
+    const deleted = await this.manager_.execute<{ id: string }>(
+      `delete from trading_card where id = ? and not exists (
+         select 1 from trading_card_variant where trading_card_id = ?
+       ) returning id`,
+      [tradingCardId, tradingCardId]
+    )
+    return deleted.length > 0
+  }
+
   async updateTradingCardIdentity(input: UpdateTradingCardIdentityInput) {
     return this.manager_.transactional(async (manager) => {
       const [current] = await manager.execute<Record<string, unknown>>(

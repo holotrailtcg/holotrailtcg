@@ -99,6 +99,22 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
+ * Codex remediation: a brief, bounded pause before each compensation's
+ * atomic "still unreferenced?" check — not a substitute for that check
+ * (which is what actually makes the delete safe), but a narrowing of the
+ * window in which it runs. Without it, a request whose own failure comes
+ * fast (e.g. an already-stale claim caught on the very first check, no real
+ * work in between) can reach its own compensation before a genuinely
+ * concurrent, slightly-slower request has finished the several real
+ * round-trips (product/variant creation, proposal resolution) needed to
+ * become the dependent the atomic check is looking for. This cannot make
+ * the guard itself unsafe — the guard is a single atomic statement either
+ * way — it only ever gives a real concurrent winner more time to finish
+ * before an unrelated failure's cleanup runs.
+ */
+const COMPENSATION_REUSE_GRACE_MS = 300
+
+/**
  * A single row insert (e.g. a TradingCard or TradingCardVariant) and the
  * module Link that identifies its Medusa counterpart are two separate,
  * sequentially committed statements within the winning workflow run — there
@@ -189,7 +205,12 @@ const resolveOrCreateCardSetStep = createStep(
   async (compensation: CardSetCompensation | undefined, { container }) => {
     if (!compensation?.createdByThisRun) return
     const cards = container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
-    await cards.deleteCardSets([compensation.id])
+    await delay(COMPENSATION_REUSE_GRACE_MS)
+    // Atomically skips the delete if a concurrent request has since created a
+    // TradingCard under this CardSet (e.g. a different card in the same set,
+    // or the same card reused by a request that went on to succeed) — see
+    // `deleteCardSetIfUnreferenced`.
+    await cards.deleteCardSetIfUnreferenced(compensation.id)
   },
 )
 
@@ -324,10 +345,26 @@ const resolveOrCreateCardStep = createStep(
   },
   async (compensation: CardCompensation | undefined, { container }) => {
     if (!compensation) return
+    // The Product and its first InventoryItem are only ever discoverable by
+    // another workflow run through a TradingCardVariant that references this
+    // TradingCard (see `resolveOrCreateVariantStep`'s lookup) — so as soon as
+    // `deleteTradingCardIfUnreferenced` confirms no TradingCardVariant
+    // references it, the fresh Product/InventoryItem this step created are
+    // provably still exclusively ours too. If it's still referenced (a
+    // concurrent request added a variant — its own, or reused ours — before
+    // this run's later failure), none of the three are touched.
+    let tradingCardDeleted = false
     if (compensation.createdTradingCard && compensation.tradingCardId) {
       const cards = container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
-      await cards.deleteTradingCards([compensation.tradingCardId])
+      await delay(COMPENSATION_REUSE_GRACE_MS)
+      tradingCardDeleted = await cards.deleteTradingCardIfUnreferenced(compensation.tradingCardId)
+    } else {
+      // Nothing of ours to protect — this step reused an existing card and
+      // never created one, so the Product/InventoryItem checks below (which
+      // only ever fire alongside `createdTradingCard`) are moot anyway.
+      tradingCardDeleted = true
     }
+    if (!tradingCardDeleted) return
     if (compensation.createdProduct && compensation.productId) {
       const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
       await products.deleteProducts([compensation.productId])
@@ -586,6 +623,24 @@ const resolveOrCreateVariantStep = createStep(
   async (compensation: VariantCompensation | undefined, { container }) => {
     if (!compensation) return
     if (compensation.createdTradingCardVariant && compensation.tradingCardVariantId) {
+      // A TradingCardVariant has no same-module FK dependent to check —
+      // the one thing that can make it "reused" is a different, concurrent
+      // request's proposal already having resolved to it (a plain text id
+      // column in the trading-card-inventory module, not a real foreign
+      // key, so a delete here would never fail loudly; it would silently
+      // orphan that request's already-committed inventory match). Checked
+      // immediately before deleting rather than earlier in this callback so
+      // the window between the check and the delete is as small as this
+      // cross-module boundary allows — Medusa's workflow steps each commit
+      // their own transaction, so a single atomic statement spanning both
+      // modules isn't available here the way it is for the same-module
+      // CardSet/TradingCard guards above.
+      const inventory = container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
+      await delay(COMPENSATION_REUSE_GRACE_MS)
+      const referencingProposals = await inventory.listInventoryProposals({
+        trading_card_variant_id: compensation.tradingCardVariantId,
+      })
+      if (referencingProposals.length > 0) return
       const cards = container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
       await cards.deleteTradingCardVariants([compensation.tradingCardVariantId])
     }

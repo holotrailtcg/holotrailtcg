@@ -518,6 +518,53 @@ describe("grouped identity and link guarantees", () => {
   })
 })
 
+/**
+ * Codex remediation: `create-card-from-inventory-row`'s compensation must
+ * never delete a CardSet/TradingCard a concurrent, successfully-resolved
+ * request has since reused. These two guarded deletes are what the
+ * workflow's compensation callbacks now call instead of the plain
+ * `deleteCardSets`/`deleteTradingCards` — a single atomic
+ * `delete ... where not exists (...)` statement, so there is no separate
+ * "check, then delete" round trip for another request's insert to land in
+ * between.
+ */
+describe("deleteCardSetIfUnreferenced / deleteTradingCardIfUnreferenced (Stage 5B.3 remediation)", () => {
+  it("deletes an unreferenced CardSet and reports true", async () => {
+    const set = await createSet()
+    const deleted = await service.deleteCardSetIfUnreferenced(set.id)
+    expect(deleted).toBe(true)
+    await expect(service.retrieveCardSet(set.id)).rejects.toThrow()
+  })
+
+  it("leaves a CardSet alone and reports false once a TradingCard references it", async () => {
+    const { set, card } = await createCard()
+    const deleted = await service.deleteCardSetIfUnreferenced(set.id)
+    expect(deleted).toBe(false)
+    const stillThere = await service.retrieveCardSet(set.id)
+    expect(stillThere.id).toBe(set.id)
+    // and the TradingCard itself is of course untouched
+    const stillHasCard = await service.retrieveTradingCard(card.id)
+    expect(stillHasCard.id).toBe(card.id)
+  })
+
+  it("deletes an unreferenced TradingCard and reports true", async () => {
+    const { card } = await createCard()
+    const deleted = await service.deleteTradingCardIfUnreferenced(card.id)
+    expect(deleted).toBe(true)
+    await expect(service.retrieveTradingCard(card.id)).rejects.toThrow()
+  })
+
+  it("leaves a TradingCard alone and reports false once a TradingCardVariant references it", async () => {
+    const { card, variant } = await createVariant()
+    const deleted = await service.deleteTradingCardIfUnreferenced(card.id)
+    expect(deleted).toBe(false)
+    const stillThere = await service.retrieveTradingCard(card.id)
+    expect(stillThere.id).toBe(card.id)
+    const stillHasVariant = await service.retrieveTradingCardVariant(variant.id)
+    expect(stillHasVariant.id).toBe(variant.id)
+  })
+})
+
 describe("card image domain", () => {
   // Stage 4A.3's own migration spec exercises Migration20260714150000's
   // up() in isolation, which unconditionally redefines the shared

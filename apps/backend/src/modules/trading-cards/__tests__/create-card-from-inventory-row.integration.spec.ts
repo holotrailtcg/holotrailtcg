@@ -362,6 +362,136 @@ describe("createCardFromInventoryRowWorkflow — orphan-safety and cross-proposa
     },
     30000,
   )
+
+  it(
+    "a request that fails at the final step never deletes a chain a concurrent request has since reused and resolved (Codex remediation)",
+    async () => {
+      // Both requests target the exact same card identity. `claimTokenA` is
+      // deliberately wrong, so request A's own `resolve-proposal` step always
+      // fails, regardless of which of A/B happens to win the earlier
+      // CardSet/TradingCard/TradingCardVariant creation race — that race's
+      // outcome is not controlled here (it doesn't need to be: whichever of
+      // A/B created the chain, A's failure-triggered compensation must never
+      // remove it once B has reused and resolved it). Request B has a
+      // genuine claim and always succeeds.
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      try {
+        const source = await createSource()
+        const setCode = `set_compfail_${suffix()}`
+        const cardNumber = numericSuffix()
+        const shared = baseCardInput({ cardSetProviderSetCode: setCode, cardNumber, name: "Compensation Race Card" })
+
+        const proposalA = await unresolvedVariantProposal(source.id, `compfail-a-${suffix()}`)
+        const proposalB = await unresolvedVariantProposal(source.id, `compfail-b-${suffix()}`)
+        const claimB = await inventory.beginCardCreationClaim({ proposalId: proposalB.id, actor: "reviewer-b", source: "MANUAL" })
+
+        const [outcomeA, outcomeB] = await Promise.allSettled([
+          createCardFromInventoryRowWorkflow(container).run({
+            input: { ...shared, proposalId: proposalA.id, claimToken: "not-the-real-claim-token" },
+          }),
+          createCardFromInventoryRowWorkflow(container).run({
+            input: { ...shared, proposalId: proposalB.id, claimToken: claimB.claimToken as string },
+          }),
+        ])
+
+        expect(outcomeA.status).toBe("rejected")
+        expect(outcomeB.status).toBe("fulfilled")
+        if (outcomeB.status !== "fulfilled") throw new Error("unreachable")
+        const resultB = outcomeB.value.result
+
+        // Exactly one row at every layer — A's compensation never removed
+        // what B is now relying on, no matter which of A/B created it first.
+        const matchingCardSets = await cards.listCardSets({ provider_set_code: setCode })
+        expect(matchingCardSets).toHaveLength(1)
+        const matchingCards = await cards.listTradingCards({
+          card_set_id: matchingCardSets[0].id, card_number_normalised: shared.cardNumber,
+        })
+        expect(matchingCards).toHaveLength(1)
+        expect(matchingCards[0].id).toBe(resultB.tradingCardId)
+        const matchingVariants = await cards.listTradingCardVariants({
+          trading_card_id: matchingCards[0].id, condition: shared.condition, finish: shared.finish, special_treatment: shared.specialTreatment,
+        })
+        expect(matchingVariants).toHaveLength(1)
+        expect(matchingVariants[0].id).toBe(resultB.tradingCardVariantId)
+
+        const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+        const product = await products.retrieveProduct(resultB.productId, { relations: ["variants"] })
+        expect(product.variants).toHaveLength(1)
+
+        const query = container.resolve(ContainerRegistrationKeys.QUERY)
+        const { data: variantChain } = await query.graph({
+          entity: "trading_card_variant",
+          fields: ["id", "product_variant.id", "product_variant.inventory_items.inventory_item_id"],
+          filters: { id: resultB.tradingCardVariantId },
+        })
+        const linkedInventoryItems = (variantChain[0]?.product_variant as { inventory_items?: unknown[] } | null)?.inventory_items ?? []
+        expect(linkedInventoryItems).toHaveLength(1)
+
+        // B's own proposal resolved to the surviving chain and stays retrievable.
+        const refreshedB = await inventory.retrieveInventoryProposal(proposalB.id)
+        expect(refreshedB).toMatchObject({ change_kind: "NEW_HOLDING", trading_card_variant_id: resultB.tradingCardVariantId, card_creation_claim_token: null })
+      } finally {
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    },
+    60000,
+  )
+
+  it(
+    "a failing request for one card never deletes a CardSet a concurrent request for a different card in the same set still depends on (Codex remediation)",
+    async () => {
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      try {
+        const source = await createSource()
+        const setCode = `set_sharedset_${suffix()}`
+
+        const proposalA = await unresolvedVariantProposal(source.id, `sharedset-a-${suffix()}`)
+        const proposalB = await unresolvedVariantProposal(source.id, `sharedset-b-${suffix()}`)
+        const claimB = await inventory.beginCardCreationClaim({ proposalId: proposalB.id, actor: "reviewer-b", source: "MANUAL" })
+
+        const inputA = baseCardInput({ cardSetProviderSetCode: setCode, cardNumber: numericSuffix(), name: "Shared Set Card A" })
+        const inputB = baseCardInput({ cardSetProviderSetCode: setCode, cardNumber: numericSuffix(), name: "Shared Set Card B" })
+
+        const [outcomeA, outcomeB] = await Promise.allSettled([
+          createCardFromInventoryRowWorkflow(container).run({
+            input: { ...inputA, proposalId: proposalA.id, claimToken: "not-the-real-claim-token" },
+          }),
+          createCardFromInventoryRowWorkflow(container).run({
+            input: { ...inputB, proposalId: proposalB.id, claimToken: claimB.claimToken as string },
+          }),
+        ])
+
+        expect(outcomeA.status).toBe("rejected")
+        expect(outcomeB.status).toBe("fulfilled")
+        if (outcomeB.status !== "fulfilled") throw new Error("unreachable")
+        const resultB = outcomeB.value.result
+
+        // Exactly one CardSet for the whole set code — A's failed request's
+        // compensation must never remove it out from under card B, even
+        // though the two cards are otherwise unrelated aside from sharing
+        // this brand-new set.
+        const matchingCardSets = await cards.listCardSets({ provider_set_code: setCode })
+        expect(matchingCardSets).toHaveLength(1)
+
+        const matchingCards = await cards.listTradingCards({
+          card_set_id: matchingCardSets[0].id, card_number_normalised: inputB.cardNumber,
+        })
+        expect(matchingCards).toHaveLength(1)
+        expect(matchingCards[0].id).toBe(resultB.tradingCardId)
+
+        // Card A's own creation was fully rolled back — it never persisted.
+        const orphanCardA = await cards.listTradingCards({
+          card_set_id: matchingCardSets[0].id, card_number_normalised: inputA.cardNumber,
+        })
+        expect(orphanCardA).toHaveLength(0)
+      } finally {
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    },
+    60000,
+  )
 })
 
 describe("Stage 5B.2 stock-location policy, reused by card creation (Phase 7)", () => {
