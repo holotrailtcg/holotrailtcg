@@ -1,7 +1,9 @@
 import { createPgConnection } from "@medusajs/framework/utils"
 import { Migration20260714150000 } from "../migrations/Migration20260714150000"
 
+let rootConnection: ReturnType<typeof createPgConnection>
 let pgConnection: ReturnType<typeof createPgConnection>
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const rows = (result: any): any[] => Array.isArray(result) ? result : result.rows
 
 async function executeMigration(direction: "up" | "down") {
@@ -11,8 +13,42 @@ async function executeMigration(direction: "up" | "down") {
   migration.reset()
 }
 
-beforeAll(() => { pgConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string }) })
-afterAll(async () => { await (pgConnection as any)?.context?.destroy(); await pgConnection?.destroy() })
+beforeAll(async () => {
+  rootConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
+  // Codex remediation: this migration's `down()` re-adds
+  // `CK_trading_card_audit_entity_type`/`CK_trading_card_audit_action` with
+  // their own hardcoded pre-image, pre-TCGdex-widening value lists (it
+  // predates both `CARD_IMAGE` entity rows and every `IMAGE_*` action, added
+  // by the later Migration20260715120000) — an `ADD CONSTRAINT` is checked
+  // against every existing row in the table, not just this file's own
+  // fixtures. Real CARD_IMAGE/IMAGE_* audit rows already exist in the shared
+  // test database from other, real (committed) exercise of the image
+  // feature, so `down()` reliably fails wherever this spec happens to land
+  // in a shared `test:integration:modules` run. By the time this suite runs,
+  // whole-transaction-per-file isolation (this connection is one uncommitted
+  // transaction rolled back in `afterAll`) means reassigning those rows here
+  // is fully invisible outside this test — it is never committed, so it can
+  // never affect real data — and it must happen before the very first
+  // `down()` call.
+  pgConnection = await rootConnection.transaction() as never
+  await pgConnection.raw(
+    `update trading_card_audit_entry set entity_type = 'TRADING_CARD'
+     where entity_type not in ('TRADING_CARD', 'TRADING_CARD_VARIANT', 'EXTERNAL_CARD_REFERENCE')`,
+  )
+  await pgConnection.raw(
+    `update trading_card_audit_entry set action = 'CANONICAL_IDENTITY_CHANGED'
+     where action not in (
+       'CANONICAL_IDENTITY_CHANGED', 'CONDITION_CHANGED', 'FINISH_CHANGED', 'SPECIAL_TREATMENT_CHANGED',
+       'PRICE_LOCKED', 'PRICE_UNLOCKED', 'EXTERNAL_REFERENCE_ADDED', 'EXTERNAL_REFERENCE_CHANGED', 'EXTERNAL_REFERENCE_REMOVED'
+     )`,
+  )
+})
+afterAll(async () => {
+  await (pgConnection as unknown as { rollback: () => Promise<void> }).rollback()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (rootConnection as any)?.context?.destroy()
+  await rootConnection?.destroy()
+})
 
 describe("Stage 4A.3 migration", () => {
   it("supports up/up/down/up and preserves Stage 3 cards", async () => {
