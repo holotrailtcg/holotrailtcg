@@ -4,7 +4,8 @@ const STATUS_LABEL: Record<string, string> = {
   UNMATCHED: "Not matched",
   MATCHED: "Matched",
   AMBIGUOUS: "Ambiguous",
-  REVIEW_REQUIRED: "Needs review",
+  REVIEW_REQUIRED: "Awaiting review",
+  AWAITING_REVIEW: "Awaiting review",
 }
 
 const STATUS_COLOR: Record<string, "grey" | "orange" | "red" | "green" | "blue"> = {
@@ -12,6 +13,7 @@ const STATUS_COLOR: Record<string, "grey" | "orange" | "red" | "green" | "blue">
   MATCHED: "green",
   AMBIGUOUS: "orange",
   REVIEW_REQUIRED: "orange",
+  AWAITING_REVIEW: "orange",
 }
 
 interface MatchingStatusBadgeProps {

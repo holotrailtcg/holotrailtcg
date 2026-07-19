@@ -6,6 +6,7 @@ import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
+import { TooltipProvider } from "@medusajs/ui"
 import InventoryProposalsPage from "../page"
 
 jest.mock("@medusajs/ui", () => {
@@ -42,7 +43,18 @@ const APPROVED_PROPOSAL = {
   ...PENDING_PROPOSAL, id: "tciprop_2", reviewStatus: "APPROVED", resolvedBy: "reviewer", resolvedAt: "2026-07-01T00:00:00.000Z",
 }
 
-function renderPage(proposals = [PENDING_PROPOSAL, APPROVED_PROPOSAL]) {
+const READY_IMAGE_READINESS = { ready: true, totalMatchedCards: 1, cardsWithPhoto: 1 }
+
+function renderPage(
+  proposals = [PENDING_PROPOSAL, APPROVED_PROPOSAL],
+  overrides: {
+    progress?: Partial<typeof BASE_PROGRESS>
+    imageReadiness?: typeof READY_IMAGE_READINESS
+    thumbnails?: Record<string, unknown>
+  } = {},
+) {
+  const progress = { ...BASE_PROGRESS, ...overrides.progress }
+  const imageReadiness = overrides.imageReadiness ?? READY_IMAGE_READINESS
   const fetchMock = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     const method = init?.method ?? "GET"
@@ -55,7 +67,27 @@ function renderPage(proposals = [PENDING_PROPOSAL, APPROVED_PROPOSAL]) {
     if (method === "POST" && url.includes("/apply")) {
       return mockResponse({ result: { proposalId: "tciprop_2", localApplicationStatus: "APPLIED", transactionId: "tcitxn_1", priorQuantity: 0, resultingQuantity: 5, medusaSyncStatus: "SYNCED", errorCode: null, errorMessage: null } })
     }
-    if (url.includes("/summary")) return mockResponse({ summary: { inventorySourceId: "tcisrc_1" }, progress: BASE_PROGRESS })
+    if (url.includes("/summary")) return mockResponse({ summary: { inventorySourceId: "tcisrc_1" }, progress, imageReadiness })
+    if (url.includes("/variants/images?")) return mockResponse({ thumbnails: overrides.thumbnails ?? {} })
+    if (url.includes("/entries?")) {
+      const proposal = proposals[0]
+      const proposalCard = proposal as typeof proposal & { card?: unknown; cardIdentityHint?: string | null }
+      return mockResponse({
+        entries: [{
+          id: "entry_1", rowNumber: 1, providerReference: proposal.providerReference, quantity: proposal.proposedQuantity ?? 1,
+          currencyCode: "GBP", unitAcquisitionCost: "0", unitMarketPrice: "1", unitSellingPrice: "2",
+          conditionSource: null, conditionCandidate: "NEAR_MINT", finishCandidate: "REVERSE_HOLO",
+          specialTreatmentCandidate: null, rarityCandidate: "COMMON", rarityRaw: "Common", languageConflict: false,
+          outcome: "VALID", tradingCardVariantId: proposal.tradingCardVariantId, matchingStatus: "MATCHED", matchedVia: "TCGDEX",
+          retryCount: 0, card: proposalCard.card ?? null, cardIdentityHint: proposalCard.cardIdentityHint ?? null, tcgdexCandidate: null,
+        }],
+        count: 1, limit: 1, offset: 0,
+      })
+    }
+    if (url.includes("/diagnostics?")) return mockResponse({ diagnostics: [], count: 0, limit: 50, offset: 0 })
+    if (url.includes("/admin/trading-cards/") && url.endsWith("/images")) {
+      return mockResponse({ trading_card: { id: "tcard_1", name: "Pikachu", card_number: "025/100" }, card_set: { id: "set_1", display_name: "Base Set", language: "EN" }, tcgdex_reference_artwork_url: null, variants: [] })
+    }
     if (url.includes("/proposals?")) return mockResponse({ proposals, count: proposals.length, limit: 20, offset: 0 })
     if (url.match(/\/proposals\/tciprop_\d$/)) return mockResponse({ proposal: proposals[0], history: [] })
     throw new Error(`Unexpected fetch: ${url}`)
@@ -65,11 +97,15 @@ function renderPage(proposals = [PENDING_PROPOSAL, APPROVED_PROPOSAL]) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={["/imports/snapshots/tcisnap_1/proposals"]}>
-        <Routes>
-          <Route path="/imports/snapshots/:id/proposals" element={<InventoryProposalsPage />} />
-        </Routes>
-      </MemoryRouter>
+      <TooltipProvider>
+        <MemoryRouter initialEntries={["/imports/snapshots/tcisnap_1/proposals"]}>
+          <Routes>
+            <Route path="/imports/snapshots/:id/proposals" element={<InventoryProposalsPage />} />
+            <Route path="/imports/snapshots/:id" element={<div>Snapshot detail (redirected here)</div>} />
+            <Route path="/imports/images" element={<div>Assign card images (redirected here)</div>} />
+          </Routes>
+        </MemoryRouter>
+      </TooltipProvider>
     </QueryClientProvider>
   )
   return { fetchMock }
@@ -88,6 +124,40 @@ describe("InventoryProposalsPage", () => {
     expect(screen.getByText("Approved — not yet applied")).toBeInTheDocument()
     expect(screen.getByText("Pending 1")).toBeInTheDocument()
     expect(screen.getByText("Approved, unapplied 1")).toBeInTheDocument()
+  })
+
+  it("redirects to Assign card images when any matched card still needs a photograph", async () => {
+    renderPage([PENDING_PROPOSAL, APPROVED_PROPOSAL], {
+      imageReadiness: { ready: false, totalMatchedCards: 1, cardsWithPhoto: 0 },
+    })
+    expect(await screen.findByText("Assign card images (redirected here)")).toBeInTheDocument()
+  })
+
+  it("shows uploaded and TCGDex image columns and opens the row detail drawer", async () => {
+    const user = userEvent.setup()
+    const proposal = {
+      ...PENDING_PROPOSAL,
+      card: {
+        tradingCardId: "tcard_1", name: "Pikachu", setDisplayName: "Base Set", cardNumber: "025/100",
+        rarity: "COMMON", rarityRaw: "Common", condition: "NEAR_MINT", finish: "REVERSE_HOLO", specialTreatment: "NONE", sku: "PIKA",
+      },
+    }
+    renderPage([proposal], {
+      thumbnails: {
+        tcvar_1: {
+          tradingCardId: "tcard_1", imageUrl: "https://images.example/uploaded.jpg", source: "PHOTO",
+          photoUrl: "https://images.example/uploaded.jpg", tcgdexImageUrl: "https://assets.tcgdex.net/pikachu.webp",
+        },
+      },
+    })
+
+    expect(await screen.findByRole("columnheader", { name: "Uploaded image" })).toBeInTheDocument()
+    expect(screen.getByRole("columnheader", { name: "TCGDex image" })).toBeInTheDocument()
+    expect(await screen.findByRole("img", { name: "Uploaded image for Pikachu" })).toHaveAttribute("src", "https://images.example/uploaded.jpg")
+    expect(screen.getByRole("img", { name: "TCGDex image for Pikachu" })).toHaveAttribute("src", "https://assets.tcgdex.net/pikachu.webp")
+
+    await user.click(screen.getByText("Pikachu"))
+    expect(await screen.findByText("Import row 1")).toBeInTheDocument()
   })
 
   it("approves a single pending proposal", async () => {

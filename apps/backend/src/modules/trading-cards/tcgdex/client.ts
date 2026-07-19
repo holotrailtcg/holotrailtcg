@@ -1,8 +1,9 @@
+import type { z } from "@medusajs/framework/zod"
 import { loadTcgDexConfig, type TcgDexConfig } from "./config"
 import { TCGDEX_ERROR_CODE, TcgDexError } from "./errors"
 import { mapTcgDexLanguage } from "./language"
-import { tcgDexCardSchema } from "./schemas"
-import type { TcgDexClientDependencies, TcgDexFetch, TcgDexCard, TcgDexLanguage } from "./types"
+import { tcgDexCardSchema, tcgDexSetDetailSchema, tcgDexSetListSchema } from "./schemas"
+import type { TcgDexClientDependencies, TcgDexFetch, TcgDexCard, TcgDexLanguage, TcgDexSetDetail, TcgDexSetSummary } from "./types"
 
 const defaultSleep = (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds))
 
@@ -94,14 +95,24 @@ export class TcgDexClient {
   }
 
   async getCardBySetAndLocalId(language: TcgDexLanguage, setId: string, localId: string): Promise<TcgDexCard> {
-    return this.request(language, ["sets", safeIdentifier(setId, "set ID"), safeIdentifier(localId, "local ID")], "get-card-by-set-and-local-id")
+    return this.request(language, ["sets", safeIdentifier(setId, "set ID"), safeIdentifier(localId, "local ID")], "get-card-by-set-and-local-id", tcgDexCardSchema)
   }
 
   async getCardById(language: TcgDexLanguage, cardId: string): Promise<TcgDexCard> {
-    return this.request(language, ["cards", safeIdentifier(cardId, "card ID")], "get-card-by-id")
+    return this.request(language, ["cards", safeIdentifier(cardId, "card ID")], "get-card-by-id", tcgDexCardSchema)
   }
 
-  private async request(language: TcgDexLanguage, pathParts: string[], operation: string) {
+  /** Every set for one language — used to resolve a provider's own set code to the real TCGdex set id. */
+  async listSets(language: TcgDexLanguage): Promise<TcgDexSetSummary[]> {
+    return this.request(language, ["sets"], "list-sets", tcgDexSetListSchema)
+  }
+
+  /** One verified set with its parent series, persisted alongside a confirmed provider mapping. */
+  async getSetById(language: TcgDexLanguage, setId: string): Promise<TcgDexSetDetail> {
+    return this.request(language, ["sets", safeIdentifier(setId, "set ID")], "get-set-by-id", tcgDexSetDetailSchema)
+  }
+
+  private async request<T>(language: TcgDexLanguage, pathParts: string[], operation: string, schema: z.ZodType<T>): Promise<T> {
     const apiLanguage = mapTcgDexLanguage(language)
     const url = new URL(`${this.config.apiBaseUrl}/v2/${apiLanguage}/`)
     for (const part of pathParts) url.pathname += `${encodeURIComponent(part)}/`
@@ -166,7 +177,7 @@ export class TcgDexClient {
 
         let parsed: unknown
         try { parsed = JSON.parse(body) } catch { throw this.error(TCGDEX_ERROR_CODE.INVALID_RESPONSE, "TCGdex returned malformed JSON", operation, attemptCount) }
-        const result = tcgDexCardSchema.safeParse(parsed)
+        const result = schema.safeParse(parsed)
         if (!result.success) throw this.error(TCGDEX_ERROR_CODE.INVALID_RESPONSE, "TCGdex response failed validation", operation, attemptCount)
         return result.data
       } finally {

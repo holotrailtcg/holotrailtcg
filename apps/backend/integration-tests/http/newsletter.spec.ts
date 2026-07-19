@@ -1482,10 +1482,18 @@ describe("Admin trading-card image list, detail and lifecycle actions", () => {
       const body = await response.json()
 
       expect(body.thumbnails[tcgdexOnlyVariant.id]).toEqual({
-        tradingCardId: tcgdexOnlyCard.id, source: "TCGDEX", imageUrl: "https://assets.tcgdex.net/example/card/tcgdex-only.webp",
+        tradingCardId: tcgdexOnlyCard.id,
+        source: "TCGDEX",
+        imageUrl: "https://assets.tcgdex.net/example/card/tcgdex-only.webp",
+        photoUrl: null,
+        tcgdexImageUrl: "https://assets.tcgdex.net/example/card/tcgdex-only.webp",
       })
-      expect(body.thumbnails[neitherVariant.id]).toEqual({ tradingCardId: expect.any(String), source: null, imageUrl: null })
-      expect(body.thumbnails.tcv_unknown).toEqual({ tradingCardId: null, source: null, imageUrl: null })
+      expect(body.thumbnails[neitherVariant.id]).toEqual({
+        tradingCardId: expect.any(String), source: null, imageUrl: null, photoUrl: null, tcgdexImageUrl: null,
+      })
+      expect(body.thumbnails.tcv_unknown).toEqual({
+        tradingCardId: null, source: null, imageUrl: null, photoUrl: null, tcgdexImageUrl: null,
+      })
     })
   })
 
@@ -2109,9 +2117,10 @@ describe("Admin trading-card-inventory Pulse import", () => {
       expect(allBody.entries).toHaveLength(1)
       expect(Object.keys(allBody.entries[0])).not.toContain("raw_fields")
       expect(Object.keys(allBody.entries[0]).sort()).toEqual([
-        "conditionSource", "currencyCode", "finishCandidate", "id", "languageConflict", "matchedVia",
-        "matchingStatus", "outcome", "providerReference", "quantity", "rarityCandidate", "rarityRaw",
-        "retryCount", "rowNumber", "specialTreatmentCandidate", "tradingCardVariantId",
+        "card", "cardIdentityHint", "conditionCandidate", "conditionSource", "currencyCode", "finishCandidate", "id",
+        "languageConflict", "matchedVia", "matchingStatus", "outcome", "providerReference", "quantity",
+        "rarityCandidate", "rarityRaw", "retryCount", "rowNumber", "specialTreatmentCandidate", "tcgdexCandidate",
+        "tradingCardVariantId",
         "unitAcquisitionCost", "unitMarketPrice", "unitSellingPrice",
       ].sort())
 

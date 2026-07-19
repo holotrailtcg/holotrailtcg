@@ -60,6 +60,8 @@ export interface VariantThumbnail {
   tradingCardId: string | null
   imageUrl: string | null
   source: "PHOTO" | "TCGDEX" | null
+  photoUrl?: string | null
+  tcgdexImageUrl?: string | null
 }
 
 export interface VariantThumbnailsResponse {

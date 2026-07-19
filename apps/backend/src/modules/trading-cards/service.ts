@@ -5,13 +5,15 @@ import TradingCardVariant from "./models/trading-card-variant"
 import ExternalCardReference from "./models/external-card-reference"
 import CardAuditEntry from "./models/card-audit-entry"
 import RarityMapping from "./models/rarity-mapping"
+import ProviderSetMapping from "./models/provider-set-mapping"
+import TcgDexLookupCandidate from "./models/tcgdex-lookup-candidate"
 import TcgDexEnrichmentProposal from "./models/tcgdex-enrichment-proposal"
 import TcgDexEnrichmentAttempt from "./models/tcgdex-enrichment-attempt"
 import CardImage from "./models/card-image"
 import { cardNumberForms, normaliseCardNumberComparisonForm, normaliseComparisonText } from "./identity/card-number"
 import { rarityComparisonForm } from "./rarity/normalise-rarity"
 import {
-  AUDIT_ACTION, AUDIT_ENTITY_TYPE, type CardCondition, type CardFinish,
+  AUDIT_ACTION, AUDIT_ENTITY_TYPE, type CardCondition, type CardFinish, type CardGame,
   type CardLanguage, type ConditionSource, type ExternalProvider, RECORD_ORIGIN, type RecordOrigin, type SpecialTreatment,
   EXTERNAL_PROVIDER, EXTERNAL_REFERENCE_PROVENANCE, type ExternalReferenceProvenance, IMAGE_STATUS,
   MAX_CARD_IMAGE_BYTE_SIZE, CARD_IMAGE_UPLOAD_EXPIRY_MINUTES, CARD_IMAGE_CLEANUP_ACTOR, SUPPORTED_IMAGE_MIME_TYPES,
@@ -162,7 +164,7 @@ const externalReferenceAuditState = (value: Record<string, unknown>) => ({
 
 class TradingCardsModuleService extends MedusaService({
   CardSet, TradingCard, TradingCardVariant, ExternalCardReference, CardAuditEntry, RarityMapping,
-  TcgDexEnrichmentProposal, TcgDexEnrichmentAttempt, CardImage,
+  TcgDexEnrichmentProposal, TcgDexEnrichmentAttempt, CardImage, ProviderSetMapping, TcgDexLookupCandidate,
 }) {
   protected manager_: EntityManager
 
@@ -622,6 +624,113 @@ class TradingCardsModuleService extends MedusaService({
       [input.provider, comparison, input.language ?? null, input.language ?? null]
     )
     return rows[0] ?? null
+  }
+
+  async findProviderSetMapping(input: { provider: ExternalProvider; game: CardGame; language: CardLanguage; providerSetCode: string }) {
+    const [row] = await this.manager_.execute<Record<string, unknown>>(
+      `select * from trading_card_provider_set_mapping
+       where provider = ? and game = ? and language = ? and provider_set_code = ? and deleted_at is null`,
+      [input.provider, input.game, input.language, input.providerSetCode]
+    )
+    return row ?? null
+  }
+
+  /**
+   * Confirms a mapping from one provider's own set code to a real TCGdex set
+   * id. The caller (API layer) is responsible for verifying the TCGdex id
+   * actually exists via a live lookup before calling this — this method only
+   * persists the confirmed result, it never talks to TCGdex itself.
+   */
+  async createProviderSetMapping(input: {
+    provider: ExternalProvider; game: CardGame; language: CardLanguage
+    providerSetCode: string; tcgdexSetId: string; tcgdexSetName: string
+    tcgdexSeriesId: string; tcgdexSeriesName: string
+  }) {
+    const existing = await this.findProviderSetMapping(input)
+    if (existing) {
+      throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This provider set code is already mapped")
+    }
+    const id = generateEntityId(undefined, "tcpsm")
+    await this.manager_.execute(
+      `insert into trading_card_provider_set_mapping
+         (id, provider, game, language, provider_set_code, tcgdex_set_id, tcgdex_set_name, tcgdex_series_id, tcgdex_series_name)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id, input.provider, input.game, input.language, input.providerSetCode, input.tcgdexSetId, input.tcgdexSetName,
+        input.tcgdexSeriesId, input.tcgdexSeriesName,
+      ]
+    )
+    return this.findProviderSetMapping(input)
+  }
+
+  async retrieveTcgdexLookupCandidateById(id: string) {
+    const [row] = await this.manager_.execute<Record<string, unknown>>(
+      `select * from trading_card_tcgdex_lookup_candidate where id = ? and deleted_at is null`, [id]
+    )
+    return row ?? null
+  }
+
+  async findTcgdexLookupCandidate(input: { provider: ExternalProvider; language: CardLanguage; tcgdexSetId: string; cardNumber: string }) {
+    const [row] = await this.manager_.execute<Record<string, unknown>>(
+      `select * from trading_card_tcgdex_lookup_candidate
+       where provider = ? and language = ? and tcgdex_set_id = ? and card_number = ? and deleted_at is null`,
+      [input.provider, input.language, input.tcgdexSetId, input.cardNumber]
+    )
+    return row ?? null
+  }
+
+  /**
+   * Caches one TCGdex lookup outcome, keyed by exact card identity — never
+   * called for `PROVIDER_ERROR` (a transient failure must be retried, not
+   * remembered as a stable result; the caller is responsible for not
+   * caching it). Idempotent: a second call for the same identity is a
+   * harmless no-op, returning the first-ever recorded result rather than
+   * overwriting it, since the whole point is that a card's TCGdex identity
+   * never legitimately changes.
+   */
+  async recordTcgdexLookupCandidate(input: {
+    provider: ExternalProvider; language: CardLanguage; tcgdexSetId: string; cardNumber: string
+    matchOutcome: "MATCHED" | "NO_MATCH" | "UNRESOLVED_SET" | "IDENTITY_MISMATCH"
+    enrichment?: Record<string, unknown> | null
+  }) {
+    const existing = await this.findTcgdexLookupCandidate(input)
+    if (existing) return existing
+    const id = generateEntityId(undefined, "tclookup")
+    const reviewStatus = input.matchOutcome === "MATCHED" ? "PENDING" : null
+    await this.manager_.execute(
+      `insert into trading_card_tcgdex_lookup_candidate
+         (id, provider, language, tcgdex_set_id, card_number, match_outcome, enrichment, review_status)
+       values (?, ?, ?, ?, ?, ?, ?::jsonb, ?)
+       on conflict (provider, language, tcgdex_set_id, card_number) where deleted_at is null do nothing`,
+      [id, input.provider, input.language, input.tcgdexSetId, input.cardNumber, input.matchOutcome,
+        input.enrichment ? JSON.stringify(input.enrichment) : null, reviewStatus]
+    )
+    return this.findTcgdexLookupCandidate(input)
+  }
+
+  /** Batch existence check for a set of exact card identities — used to skip already-cached lookups before spending a live TCGdex call. */
+  async listTcgdexLookupCandidates(input: {
+    provider: ExternalProvider; language: CardLanguage; keys: Array<{ tcgdexSetId: string; cardNumber: string }>
+  }) {
+    if (input.keys.length === 0) return []
+    const placeholders = input.keys.map(() => `(?, ?)`).join(", ")
+    const params = input.keys.flatMap((key) => [key.tcgdexSetId, key.cardNumber])
+    return this.manager_.execute<Record<string, unknown>>(
+      `select * from trading_card_tcgdex_lookup_candidate
+       where provider = ? and language = ? and deleted_at is null
+         and (tcgdex_set_id, card_number) in (${placeholders})`,
+      [input.provider, input.language, ...params]
+    )
+  }
+
+  async reviewTcgdexLookupCandidates(input: { ids: string[]; reviewStatus: "ACCEPTED" | "REJECTED" }) {
+    if (input.ids.length === 0) return
+    const placeholders = input.ids.map(() => "?").join(", ")
+    await this.manager_.execute(
+      `update trading_card_tcgdex_lookup_candidate set review_status = ?, updated_at = now()
+       where id in (${placeholders}) and match_outcome = 'MATCHED' and review_status = 'PENDING' and deleted_at is null`,
+      [input.reviewStatus, ...input.ids]
+    )
   }
 
   async assertVariantProductHierarchy(input: { productVariantProductId?: string | null; tradingCardProductId?: string | null }): Promise<void> {

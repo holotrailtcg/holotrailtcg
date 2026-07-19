@@ -104,6 +104,7 @@
             "PROPOSAL_REVIEWED",
             "PROPOSAL_APPLICATION_ATTEMPTED",
             "PROPOSAL_APPLICATION_REJECTED_STALE_BASELINE",
+            "PROPOSAL_APPLICATION_REJECTED_SNAPSHOT_DISCARDED",
             "PROPOSAL_APPLIED",
             "PROPOSAL_APPLICATION_RETRIED",
             "MEDUSA_SYNC_SUCCEEDED",
@@ -117,7 +118,8 @@
             "IMPORT_RECONCILIATION_STARTED",
             "IMPORT_RECONCILIATION_COMPLETED",
             "IMPORT_PROPOSALS_REFRESHED",
-            "IMPORT_FAILED"
+            "IMPORT_FAILED",
+            "PROPOSAL_VARIANT_RESOLVED"
           ],
           "mappedType": "enum"
         },
@@ -1235,6 +1237,22 @@
           ],
           "mappedType": "enum"
         },
+        "condition_candidate": {
+          "name": "condition_candidate",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
         "finish_candidate": {
           "name": "finish_candidate",
           "type": "text",
@@ -1637,6 +1655,7 @@
           "enumItems": [
             "TRUSTED_REFERENCE",
             "UNIQUE_ATTRIBUTE_MATCH",
+            "MANUAL",
             "NONE"
           ],
           "mappedType": "enum"
@@ -2794,6 +2813,38 @@
           "comment": null,
           "enumItems": [],
           "mappedType": "json"
+        },
+        "card_creation_claim_token": {
+          "name": "card_creation_claim_token",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "card_creation_claimed_at": {
+          "name": "card_creation_claimed_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
         },
         "raw_proposed_unit_acquisition_cost": {
           "name": "raw_proposed_unit_acquisition_cost",

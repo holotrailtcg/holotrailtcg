@@ -25,6 +25,7 @@ const InventorySnapshotEntry = model
     row_number: model.number().nullable(),
     outcome: model.enum(Object.values(INVENTORY_SNAPSHOT_ENTRY_OUTCOME)).nullable(),
     condition_source: model.enum(Object.values(INVENTORY_CONDITION_SOURCE)).nullable(),
+    condition_candidate: model.text().nullable(),
     finish_candidate: model.text().nullable(),
     special_treatment_candidate: model.text().nullable(),
     rarity_candidate: model.text().nullable(),

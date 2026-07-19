@@ -28,6 +28,8 @@ export interface ImportSummary {
   byDiagnosticSeverity: Record<string, number>
   uniqueProviderReferences: number
   duplicateRowCount: number
+  approvedCardCount: number
+  approvedQuantity: number
 }
 
 export interface ReconciliationSummary {
@@ -65,19 +67,6 @@ export type UploadCsvResult =
   | { kind: "NO_USABLE_ROWS"; snapshotId: string; inventorySourceId: string; snapshotStatus: "FAILED" }
   | { kind: "SOURCE_ARCHIVED"; inventorySourceId?: string }
 
-export type RetryMatchingResult =
-  | {
-      kind: "IMPORTED"
-      snapshotId: string
-      inventorySourceId: string
-      snapshotStatus: string
-      importSummary: ImportSummary
-      matchingSummary: Record<string, number>
-      reconciliationSummary?: ReconciliationSummary
-      warnings: ImportWarning[]
-    }
-  | { kind: "NO_USABLE_ROWS"; snapshotId: string; inventorySourceId: string; snapshotStatus: "FAILED" }
-
 export interface SnapshotEntryListItem {
   id: string
   rowNumber: number | null
@@ -88,6 +77,7 @@ export interface SnapshotEntryListItem {
   unitMarketPrice: string | null
   unitSellingPrice: string | null
   conditionSource: string | null
+  conditionCandidate: string | null
   finishCandidate: string | null
   specialTreatmentCandidate: string | null
   rarityCandidate: string | null
@@ -98,6 +88,12 @@ export interface SnapshotEntryListItem {
   matchingStatus: string | null
   matchedVia: string | null
   retryCount: number
+  card: InventoryProposalCardIdentity | null
+  cardIdentityHint: string | null
+  tcgdexCandidate: {
+    id: string; reviewStatus: "PENDING" | "ACCEPTED"; name: string; setName: string; seriesName: string | null
+    referenceArtworkUrl: string | null; providerRarity: string | null
+  } | null
 }
 
 export interface SnapshotEntryListResponse {
@@ -147,9 +143,12 @@ export interface InventoryProposalCardIdentity {
   name: string
   setDisplayName: string
   cardNumber: string
+  rarity: string | null
+  rarityRaw: string | null
   condition: string
   finish: string
   specialTreatment: string
+  sku: string
 }
 
 /** Stage 5B.2: `reviewStatus` (local application) and `medusaSyncStatus` (Medusa reflection) are always independent — never collapse them. */
@@ -201,6 +200,12 @@ export interface InventoryAuditEntry {
 export interface InventoryProposalDetailResponse {
   proposal: InventoryProposalListItem
   history: InventoryAuditEntry[]
+}
+
+export interface ImageReadiness {
+  ready: boolean
+  totalMatchedCards: number
+  cardsWithPhoto: number
 }
 
 export interface SnapshotProgress {

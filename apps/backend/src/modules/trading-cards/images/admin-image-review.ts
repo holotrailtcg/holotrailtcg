@@ -21,6 +21,7 @@ export const imageListQuerySchema = z.object({
   language: z.enum(Object.values(CARD_LANGUAGE) as [string, ...string[]]).optional(),
   status: z.enum(IMAGE_NEED_STATUSES).optional(),
   tradingCardIds: tradingCardIdsSchema,
+  inventorySnapshotId: z.string().trim().min(1).max(255).optional(),
 }).strict()
 
 export type ImageListQuery = z.infer<typeof imageListQuerySchema>
@@ -114,6 +115,20 @@ function imageListWhereClauses(query: ImageListQuery): { sql: string; params: un
     clauses.push(`c.id in ${inClause(query.tradingCardIds)}`)
     params.push(...query.tradingCardIds)
   }
+  if (query.inventorySnapshotId) {
+    clauses.push(`exists (
+      select 1
+      from trading_card_inventory_snapshot_entry snapshot_entry
+      inner join trading_card_inventory_snapshot_entry_match entry_match
+        on entry_match.snapshot_entry_id = snapshot_entry.id and entry_match.matching_status = 'MATCHED'
+       and entry_match.deleted_at is null
+      inner join trading_card_variant scoped_variant
+        on scoped_variant.id = entry_match.trading_card_variant_id and scoped_variant.deleted_at is null
+      where snapshot_entry.inventory_snapshot_id = ? and snapshot_entry.deleted_at is null
+        and scoped_variant.trading_card_id = c.id
+    )`)
+    params.push(query.inventorySnapshotId)
+  }
   if (query.language) {
     clauses.push("s.language = ?")
     params.push(query.language)
@@ -203,7 +218,37 @@ export async function retrieveCardImageDetail(executor: QueryExecutor, tradingCa
     [tradingCardId]
   )
   const snapshot = snapshotRows[0]?.snapshot as Record<string, unknown> | undefined
-  const referenceArtworkUrl = typeof snapshot?.referenceArtworkUrl === "string" ? snapshot.referenceArtworkUrl : null
+  let referenceArtworkUrl = typeof snapshot?.referenceArtworkUrl === "string" ? snapshot.referenceArtworkUrl : null
+  if (!referenceArtworkUrl) {
+    const candidateRows = await executor.execute<{ enrichment: unknown }>(
+      `select candidate.enrichment
+       from trading_card_variant variant
+       inner join trading_card_inventory_snapshot_entry_match entry_match
+         on entry_match.trading_card_variant_id = variant.id and entry_match.matching_status = 'MATCHED'
+        and entry_match.deleted_at is null
+       inner join trading_card_inventory_snapshot_entry snapshot_entry
+         on snapshot_entry.id = entry_match.snapshot_entry_id and snapshot_entry.deleted_at is null
+       inner join trading_card_inventory_snapshot inventory_snapshot
+         on inventory_snapshot.id = snapshot_entry.inventory_snapshot_id and inventory_snapshot.deleted_at is null
+       inner join trading_card_inventory_source inventory_source
+         on inventory_source.id = inventory_snapshot.inventory_source_id and inventory_source.deleted_at is null
+       inner join trading_card_provider_set_mapping set_mapping
+         on set_mapping.provider = 'PULSE' and set_mapping.game = 'POKEMON'
+        and set_mapping.language = inventory_source.language and set_mapping.deleted_at is null
+        and lower(set_mapping.provider_set_code) = lower(replace(split_part(snapshot_entry.provider_reference, '|', 1), 'card:', ''))
+       inner join trading_card_tcgdex_lookup_candidate candidate
+         on candidate.provider = 'PULSE' and candidate.language = inventory_source.language
+        and candidate.tcgdex_set_id = set_mapping.tcgdex_set_id
+        and candidate.card_number = split_part(split_part(snapshot_entry.provider_reference, '|', 2), '/', 1)
+        and candidate.match_outcome = 'MATCHED' and candidate.review_status = 'ACCEPTED'
+        and candidate.deleted_at is null
+       where variant.trading_card_id = ? and variant.deleted_at is null
+       order by candidate.updated_at desc limit 1`,
+      [tradingCardId],
+    )
+    const candidate = candidateRows[0]?.enrichment as Record<string, unknown> | undefined
+    referenceArtworkUrl = typeof candidate?.referenceArtworkUrl === "string" ? candidate.referenceArtworkUrl : null
+  }
 
   return {
     trading_card: { id: card.trading_card_id, name: card.card_name, card_number: card.card_number },
@@ -219,6 +264,8 @@ export interface VariantThumbnail {
   tradingCardId: string | null
   imageUrl: string | null
   source: "PHOTO" | "TCGDEX" | null
+  photoUrl: string | null
+  tcgdexImageUrl: string | null
 }
 
 /**
@@ -237,7 +284,9 @@ export async function listThumbnailsForVariants(
   derivePublicImageUrl: (objectKey: string) => string | null,
 ): Promise<Record<string, VariantThumbnail>> {
   const result: Record<string, VariantThumbnail> = {}
-  for (const id of variantIds) result[id] = { tradingCardId: null, imageUrl: null, source: null }
+  for (const id of variantIds) {
+    result[id] = { tradingCardId: null, imageUrl: null, source: null, photoUrl: null, tcgdexImageUrl: null }
+  }
   if (variantIds.length === 0) return result
 
   const variantRows = await executor.execute<{ id: string; trading_card_id: string }>(
@@ -253,19 +302,12 @@ export async function listThumbnailsForVariants(
      order by trading_card_variant_id, sort_order asc`,
     variantIds
   )
-  const withoutPhoto: string[] = []
   for (const id of variantIds) {
     const photo = photoRows.find((row) => row.trading_card_variant_id === id)
-    if (!photo) {
-      withoutPhoto.push(id)
-      continue
-    }
+    if (!photo) continue
     const imageUrl = derivePublicImageUrl(photo.final_object_key)
-    if (imageUrl) result[id] = { ...result[id], imageUrl, source: "PHOTO" }
-    else withoutPhoto.push(id)
+    if (imageUrl) result[id] = { ...result[id], imageUrl, source: "PHOTO", photoUrl: imageUrl }
   }
-
-  if (withoutPhoto.length === 0) return result
 
   const tcgdexRows = await executor.execute<{ trading_card_variant_id: string; snapshot: unknown }>(
     `select v.id as trading_card_variant_id, p.snapshot
@@ -275,14 +317,68 @@ export async function listThumbnailsForVariants(
        where trading_card_id = v.trading_card_id and provider = 'TCGDEX' and deleted_at is null
        order by created_at desc limit 1
      ) p on true
-     where v.id in ${inClause(withoutPhoto)}`,
-    withoutPhoto
+     where v.id in ${inClause(variantIds)}`,
+    variantIds
   )
   for (const row of tcgdexRows) {
     const snapshot = row.snapshot as Record<string, unknown> | undefined
     const referenceArtworkUrl = typeof snapshot?.referenceArtworkUrl === "string" ? snapshot.referenceArtworkUrl : null
     if (referenceArtworkUrl) {
-      result[row.trading_card_variant_id] = { ...result[row.trading_card_variant_id], imageUrl: referenceArtworkUrl, source: "TCGDEX" }
+      const current = result[row.trading_card_variant_id]
+      result[row.trading_card_variant_id] = {
+        ...current,
+        tcgdexImageUrl: referenceArtworkUrl,
+        imageUrl: current.photoUrl ?? referenceArtworkUrl,
+        source: current.photoUrl ? "PHOTO" : "TCGDEX",
+      }
+    }
+  }
+
+  // Cards created by approving a pre-creation lookup candidate historically
+  // did not receive an enrichment-proposal row. Their accepted candidate is
+  // still durably tied to the variant through its trusted Pulse reference,
+  // so use that stored snapshot as the final TCGdex fallback. This keeps
+  // artwork visible for already-approved imports as well as new approvals.
+  const withoutPersistedArtwork = variantIds.filter((id) => !result[id].tcgdexImageUrl)
+  if (withoutPersistedArtwork.length > 0) {
+    const acceptedCandidateRows = await executor.execute<{ trading_card_variant_id: string; enrichment: unknown }>(
+      `select distinct on (v.id) v.id as trading_card_variant_id, candidate.enrichment
+       from trading_card_variant v
+       inner join trading_card_inventory_snapshot_entry_match entry_match
+         on entry_match.trading_card_variant_id = v.id and entry_match.matching_status = 'MATCHED'
+        and entry_match.deleted_at is null
+       inner join trading_card_inventory_snapshot_entry snapshot_entry
+         on snapshot_entry.id = entry_match.snapshot_entry_id and snapshot_entry.deleted_at is null
+       inner join trading_card_inventory_snapshot inventory_snapshot
+         on inventory_snapshot.id = snapshot_entry.inventory_snapshot_id and inventory_snapshot.deleted_at is null
+       inner join trading_card_inventory_source inventory_source
+         on inventory_source.id = inventory_snapshot.inventory_source_id and inventory_source.deleted_at is null
+       inner join trading_card_provider_set_mapping set_mapping
+         on set_mapping.provider = 'PULSE' and set_mapping.game = 'POKEMON'
+        and set_mapping.language = inventory_source.language and set_mapping.deleted_at is null
+        and lower(set_mapping.provider_set_code) = lower(replace(split_part(snapshot_entry.provider_reference, '|', 1), 'card:', ''))
+       inner join trading_card_tcgdex_lookup_candidate candidate
+         on candidate.provider = 'PULSE' and candidate.language = inventory_source.language
+        and candidate.tcgdex_set_id = set_mapping.tcgdex_set_id
+        and candidate.card_number = split_part(split_part(snapshot_entry.provider_reference, '|', 2), '/', 1)
+        and candidate.match_outcome = 'MATCHED' and candidate.review_status = 'ACCEPTED'
+        and candidate.deleted_at is null
+       where v.id in ${inClause(withoutPersistedArtwork)} and v.deleted_at is null
+       order by v.id, candidate.updated_at desc`,
+      withoutPersistedArtwork,
+    )
+    for (const row of acceptedCandidateRows) {
+      const enrichment = row.enrichment as Record<string, unknown> | undefined
+      const referenceArtworkUrl = typeof enrichment?.referenceArtworkUrl === "string" ? enrichment.referenceArtworkUrl : null
+      if (referenceArtworkUrl) {
+        const current = result[row.trading_card_variant_id]
+        result[row.trading_card_variant_id] = {
+          ...current,
+          tcgdexImageUrl: referenceArtworkUrl,
+          imageUrl: current.photoUrl ?? referenceArtworkUrl,
+          source: current.photoUrl ? "PHOTO" : "TCGDEX",
+        }
+      }
     }
   }
   return result

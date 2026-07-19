@@ -139,7 +139,7 @@ describe("TCGdex matching and normalization", () => {
     const pokemon = normalizeTcgdexCard(card({ category: "Pokemon", image: "https://img.example/card.png", rarity: "Common", dexId: [133], types: ["Colorless"] }))
     const trainer = normalizeTcgdexCard(card({ category: "Trainer", image: undefined, illustrator: undefined }))
     const energy = normalizeTcgdexCard(card({ category: "Energy", variants: { normal: false, reverse: true, holo: false, firstEdition: false, wPromo: true } }))
-    expect(pokemon.referenceArtworkUrl).toBe("https://img.example/card.png")
+    expect(pokemon.referenceArtworkUrl).toBe("https://img.example/card.png/low.webp")
     expect(pokemon.pokedexNumbers).toEqual([133])
     expect(trainer.referenceArtworkUrl).toBeUndefined()
     expect(energy.variants).toEqual({ normal: false, reverse: true, holo: false, firstEdition: false })

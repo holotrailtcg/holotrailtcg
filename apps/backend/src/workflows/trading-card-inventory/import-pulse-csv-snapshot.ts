@@ -45,6 +45,7 @@ function toImportedSnapshotEntryInput(row: ParsedPulseRow): ImportedSnapshotEntr
     unitMarketPrice: row.unitMarketPrice,
     unitSellingPrice: row.unitSellingPrice,
     conditionSource: row.conditionSource,
+    conditionCandidate: row.conditionCandidate,
     finishCandidate: row.finishCandidate,
     specialTreatmentCandidate: row.specialTreatmentCandidate,
     rarityCandidate: row.rarityCandidate,

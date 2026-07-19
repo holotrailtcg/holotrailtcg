@@ -23,6 +23,17 @@ export function normalizeTcgdexRarity(value?: string): NormalizedRarityCandidate
   return mapped ? { status: "MAPPED", providerValue: value, ...mapped } : { status: "UNMAPPED", providerValue: value }
 }
 
+/**
+ * TCGdex's `image` field is a base URL with no file behind it directly —
+ * `/{quality}.{extension}` must be appended before it resolves to an actual
+ * image (see https://tcgdex.dev/assets). "low" matches TCGdex's own
+ * guidance for small/thumbnail-style displays, which is every place this
+ * reference artwork is shown in this app.
+ */
+function referenceArtworkUrlFrom(baseImageUrl: string): string {
+  return `${baseImageUrl.replace(/\/$/, "")}/low.webp`
+}
+
 export function normalizeTcgdexCard(card: TcgDexCard): CardEnrichmentData {
   return {
     provider: "TCGDEX",
@@ -31,7 +42,7 @@ export function normalizeTcgdexCard(card: TcgDexCard): CardEnrichmentData {
     name: card.name,
     localId: card.localId,
     category: card.category,
-    ...(card.image ? { referenceArtworkUrl: card.image } : {}),
+    ...(card.image ? { referenceArtworkUrl: referenceArtworkUrlFrom(card.image) } : {}),
     ...(card.illustrator ? { illustrator: card.illustrator } : {}),
     ...(card.rarity ? { providerRarity: card.rarity, rarityCandidate: normalizeTcgdexRarity(card.rarity) } : {}),
     ...(card.dexId ? { pokedexNumbers: [...card.dexId] } : {}),

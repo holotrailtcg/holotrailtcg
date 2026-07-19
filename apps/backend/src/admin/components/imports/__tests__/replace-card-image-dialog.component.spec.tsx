@@ -181,4 +181,28 @@ describe("ReplaceCardImageDialog — replacement success only after archive succ
     // The dialog settles back on the "current image" view showing the new photo as primary.
     await screen.findByAltText("new.jpg")
   })
+
+  it("shows uploaded photographs in a larger gallery and accepts multiple additional files", async () => {
+    const detail = detailWithExistingImage()
+    detail.variants[0].ready_images.push(existingImage({
+      id: "tcimg_second",
+      originalFilename: "back.jpg",
+      imageUrl: "https://images.example/back.jpg",
+      sortOrder: 1,
+    }))
+    renderDialog(async (url) => {
+      if (url.includes("/trading-cards/tcard_1/images")) return mockResponse(detail)
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const user = userEvent.setup()
+    expect(await screen.findByText("Uploaded images (2)")).toBeInTheDocument()
+    expect(screen.getByAltText("old.jpg")).toHaveClass("max-h-[22rem]", "w-full")
+    expect(screen.getByAltText("back.jpg")).toHaveClass("max-h-[22rem]", "w-full")
+    expect(screen.queryByText(/Hover/)).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Add more images" }))
+    expect(screen.getByText("Add more images", { selector: "p" })).toBeInTheDocument()
+    expect(document.querySelector('input[type="file"]')).toHaveAttribute("multiple")
+  })
 })

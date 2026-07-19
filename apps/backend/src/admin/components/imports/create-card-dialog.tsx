@@ -71,9 +71,14 @@ const CreateCardDialog = ({ row, onClose, onCreated }: CreateCardDialogProps) =>
 
   // Finish/special treatment are pre-filled from Pulse's parsed candidates, but only once —
   // the reviewer must still actively confirm them (see finishConfirmed/specialTreatmentConfirmed).
+  // Condition has no equivalent confirmation step: it's Near Mint unless the
+  // CSV explicitly stated otherwise, exactly as already applied when
+  // matching against existing cards — pre-filling it here just extends that
+  // same default to card creation instead of leaving it blank.
   useEffect(() => {
     const entry = entryQuery.data?.entries[0]
     if (!entry) return
+    if (entry.conditionCandidate) setCondition(entry.conditionCandidate)
     if (entry.finishCandidate) setFinish(entry.finishCandidate)
     if (entry.specialTreatmentCandidate) setSpecialTreatment(entry.specialTreatmentCandidate)
     if (entry.rarityRaw) setRarityRaw(entry.rarityRaw)

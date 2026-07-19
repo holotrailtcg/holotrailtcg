@@ -183,9 +183,12 @@ export interface SafeCardIdentity {
   name: string
   setDisplayName: string
   cardNumber: string
+  rarity: string | null
+  rarityRaw: string | null
   condition: string
   finish: string
   specialTreatment: string
+  sku: string
 }
 
 export function toSafeInventoryProposalDto(row: Record<string, unknown>) {
@@ -272,9 +275,12 @@ export async function attachCardIdentities<T extends {
         name: tradingCard.name as string,
         setDisplayName: (cardSet?.display_name as string | undefined) ?? "Unknown set",
         cardNumber: tradingCard.card_number as string,
+        rarity: (tradingCard.rarity as string | null | undefined) ?? null,
+        rarityRaw: (tradingCard.rarity_raw as string | null | undefined) ?? null,
         condition: variant.condition as string,
         finish: variant.finish as string,
         specialTreatment: variant.special_treatment as string,
+        sku: variant.sku as string,
       })
     }
   }

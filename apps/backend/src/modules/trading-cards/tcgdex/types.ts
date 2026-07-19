@@ -33,6 +33,15 @@ export type TcgDexCard = {
   energyType?: string
 }
 
+export type TcgDexSetSummary = {
+  id: string
+  name: string
+}
+
+export type TcgDexSetDetail = TcgDexSet & {
+  serie: TcgDexSetSummary
+}
+
 export type TcgDexSet = {
   id: string
   name: string

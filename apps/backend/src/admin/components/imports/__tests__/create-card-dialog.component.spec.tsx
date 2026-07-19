@@ -29,9 +29,10 @@ function entryListResponse(overrides: Partial<SnapshotEntryListResponse["entries
     entries: [{
       id: "tcisentry_1", rowNumber: 1, providerReference: "provider-ref-1", quantity: 1,
       currencyCode: "GBP", unitAcquisitionCost: "1.00", unitMarketPrice: "2.00", unitSellingPrice: "3.00",
-      conditionSource: "EXPLICIT", finishCandidate: "HOLO", specialTreatmentCandidate: "NONE",
+      conditionSource: "EXPLICIT", conditionCandidate: "NEAR_MINT", finishCandidate: "HOLO", specialTreatmentCandidate: "NONE",
       rarityCandidate: null, rarityRaw: null, languageConflict: false, outcome: "VALID",
       tradingCardVariantId: null, matchingStatus: "UNMATCHED", matchedVia: "NONE", retryCount: 0,
+      card: null, cardIdentityHint: null, tcgdexCandidate: null,
       ...overrides,
     }],
     count: 1, limit: 1, offset: 0,
@@ -70,6 +71,26 @@ describe("CreateCardDialog — finish/special treatment confirmation (Codex reme
     expect(specialConfirm.checked).toBe(false)
 
     expect(screen.getByRole("button", { name: "Create card" })).toBeDisabled()
+  })
+
+  it("prefills condition from the import's resolved value, with no separate confirmation needed", async () => {
+    renderDialog(async (url) => {
+      if (url.includes("/entries")) return mockResponse(entryListResponse({ conditionCandidate: "LIGHTLY_PLAYED" }))
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const conditionSelect = await screen.findByLabelText("Condition") as HTMLSelectElement
+    await waitFor(() => expect(conditionSelect.value).toBe("LIGHTLY_PLAYED"))
+  })
+
+  it("leaves condition blank when the import has no resolved value", async () => {
+    renderDialog(async (url) => {
+      if (url.includes("/entries")) return mockResponse(entryListResponse({ conditionCandidate: null }))
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const conditionSelect = await screen.findByLabelText("Condition") as HTMLSelectElement
+    expect(conditionSelect.value).toBe("")
   })
 
   it("lets the reviewer confirm a prefilled value without changing it, via the checkbox", async () => {

@@ -1,8 +1,10 @@
 import { Badge, Button, Container, Heading, Text, Textarea, toast, usePrompt } from "@medusajs/ui"
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useState, type MouseEvent } from "react"
+import { useEffect, useState, type MouseEvent } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import CreateCardDialog from "../../../../../components/imports/create-card-dialog"
+import CardImageThumbnail from "../../../../../components/imports/card-image-thumbnail"
+import EntryDetailDrawer from "../../../../../components/imports/entry-detail-drawer"
 import { fetchJson, postAction } from "../../../../../components/imports/fetch-json"
 import ImportStepper from "../../../../../components/imports/import-stepper"
 import InventoryProposalStatusBadge from "../../../../../components/imports/inventory-proposal-status-badge"
@@ -11,9 +13,10 @@ import ReviewTable, { type ReviewTableColumn } from "../../../../../components/i
 import SelectAllCheckbox from "../../../../../components/imports/select-all-checkbox"
 import { useRangeSelection } from "../../../../../components/imports/use-range-selection"
 import { formatEnumLabel } from "../../../../../components/imports/format-enum-label"
+import type { VariantThumbnailsResponse } from "../../../../../components/imports/image-types"
 import type {
-  ApplyProposalItemResult, InventoryProposalDetailResponse, InventoryProposalListItem, InventoryProposalListResponse,
-  SnapshotProgress,
+  ApplyProposalItemResult, ImageReadiness, InventoryProposalDetailResponse, InventoryProposalListItem, InventoryProposalListResponse,
+  SnapshotEntryListResponse, SnapshotProgress,
 } from "../../../../../components/imports/pulse-import-types"
 import "../../../../../styles/imports.css"
 
@@ -64,14 +67,22 @@ const InventoryProposalsPage = () => {
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [rejectReason, setRejectReason] = useState("")
   const [createCardRow, setCreateCardRow] = useState<InventoryProposalListItem | null>(null)
+  const [selectedProposal, setSelectedProposal] = useState<InventoryProposalListItem | null>(null)
 
   const summaryQuery = useQuery({
     queryKey: summaryQueryKey(snapshotId),
-    queryFn: () => fetchJson<{ summary: { inventorySourceId: string }; progress: SnapshotProgress }>(
-      `/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/summary`
-    ),
+    queryFn: () => fetchJson<{
+      summary: { inventorySourceId: string }; progress: SnapshotProgress; imageReadiness: ImageReadiness
+    }>(`/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/summary`),
     enabled: Boolean(snapshotId),
   })
+
+  const imageReadiness = summaryQuery.data?.imageReadiness
+  useEffect(() => {
+    if (imageReadiness && !imageReadiness.ready) {
+      navigate(`/imports/images?snapshotId=${encodeURIComponent(snapshotId)}`, { replace: true })
+    }
+  }, [imageReadiness, navigate, snapshotId])
 
   const proposalsQuery = useQuery({
     queryKey: proposalsQueryKey(snapshotId, offset, reviewStatusFilter),
@@ -191,6 +202,31 @@ const InventoryProposalsPage = () => {
 
   const progress = summaryQuery.data?.progress
   const visibleRows = proposalsQuery.data?.proposals ?? []
+  const visibleVariantIds = [...new Set(
+    visibleRows.map((row) => row.tradingCardVariantId).filter((id): id is string => Boolean(id)),
+  )]
+  const thumbnailsQuery = useQuery({
+    queryKey: ["proposal-image-pairs", snapshotId, visibleVariantIds],
+    queryFn: () => fetchJson<VariantThumbnailsResponse>(
+      `/admin/trading-cards/variants/images?variantIds=${visibleVariantIds.map(encodeURIComponent).join(",")}`,
+    ),
+    enabled: visibleVariantIds.length > 0,
+    placeholderData: keepPreviousData,
+  })
+  const selectedEntryQuery = useQuery({
+    queryKey: ["proposal-snapshot-entry", snapshotId, selectedProposal?.providerReference],
+    queryFn: () => {
+      const params = new URLSearchParams({
+        limit: "1",
+        offset: "0",
+        providerReference: selectedProposal!.providerReference!,
+      })
+      return fetchJson<SnapshotEntryListResponse>(
+        `/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/entries?${params.toString()}`,
+      )
+    },
+    enabled: Boolean(selectedProposal?.providerReference),
+  })
   const selectedRows = visibleRows.filter((row) => selection.selected.has(row.id))
   const selectedKind = selectedRows.length > 0 ? selectionKind(selectedRows[0]) : null
 
@@ -259,6 +295,20 @@ const InventoryProposalsPage = () => {
           )
         }
         return <Text size="small" className="text-ui-fg-subtle">Not yet matched</Text>
+      },
+    },
+    {
+      header: "Uploaded image",
+      cell: (row) => {
+        const image = row.tradingCardVariantId ? thumbnailsQuery.data?.thumbnails[row.tradingCardVariantId] : undefined
+        return <CardImageThumbnail imageUrl={image?.photoUrl ?? null} alt={`Uploaded image for ${row.card?.name ?? row.cardIdentityHint ?? "unmatched card"}`} />
+      },
+    },
+    {
+      header: "TCGDex image",
+      cell: (row) => {
+        const image = row.tradingCardVariantId ? thumbnailsQuery.data?.thumbnails[row.tradingCardVariantId] : undefined
+        return <CardImageThumbnail imageUrl={image?.tcgdexImageUrl ?? null} alt={`TCGDex image for ${row.card?.name ?? row.cardIdentityHint ?? "unmatched card"}`} />
       },
     },
     { header: "Change", cell: (row) => CHANGE_KIND_LABEL[row.changeKind] ?? formatEnumLabel(row.changeKind) },
@@ -394,6 +444,7 @@ const InventoryProposalsPage = () => {
           columns={columns}
           rows={proposalsQuery.data?.proposals ?? []}
           rowKey={(row) => row.id}
+          onRowClick={(row) => setSelectedProposal(row)}
           isLoading={proposalsQuery.isLoading}
           isError={proposalsQuery.isError}
           emptyMessage="No proposals match this filter."
@@ -446,6 +497,26 @@ const InventoryProposalsPage = () => {
           onCreated={refreshAfterAction}
         />
       )}
+
+      {selectedProposal && selectedEntryQuery.data?.entries[0] && (() => {
+        const entry = selectedEntryQuery.data.entries[0]
+        const selectedIndex = visibleRows.findIndex((row) => row.id === selectedProposal.id)
+        const thumbnail = entry.tradingCardVariantId
+          ? thumbnailsQuery.data?.thumbnails[entry.tradingCardVariantId]
+          : undefined
+        return (
+          <EntryDetailDrawer
+            snapshotId={snapshotId}
+            row={entry}
+            thumbnail={thumbnail}
+            onClose={() => setSelectedProposal(null)}
+            onPrevious={selectedIndex > 0 ? () => setSelectedProposal(visibleRows[selectedIndex - 1]) : undefined}
+            onNext={selectedIndex >= 0 && selectedIndex < visibleRows.length - 1
+              ? () => setSelectedProposal(visibleRows[selectedIndex + 1])
+              : undefined}
+          />
+        )
+      })()}
     </div>
   )
 }

@@ -1,22 +1,24 @@
 import { Badge, Button, Container, Heading, Text, toast } from "@medusajs/ui"
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useState } from "react"
-import { Link, useNavigate, useParams } from "react-router-dom"
+import { useEffect, useState } from "react"
+import { useNavigate, useParams } from "react-router-dom"
 import CardImageThumbnail from "../../../../components/imports/card-image-thumbnail"
+import { rememberActiveImportSnapshot } from "../../../../components/imports/active-import-session"
 import CreateCardDialog from "../../../../components/imports/create-card-dialog"
 import EntryDetailDrawer from "../../../../components/imports/entry-detail-drawer"
 import { fetchJson, postAction } from "../../../../components/imports/fetch-json"
 import { formatMoney } from "../../../../components/imports/format-money"
+import ImagePreviewModal from "../../../../components/imports/image-preview-modal"
 import ImportStepper from "../../../../components/imports/import-stepper"
 import MatchingStatusBadge from "../../../../components/imports/matching-status-badge"
 import PaginationBar from "../../../../components/imports/pagination-bar"
 import ReplaceCardImageDialog from "../../../../components/imports/replace-card-image-dialog"
 import ReviewTable, { type ReviewTableColumn } from "../../../../components/imports/review-table"
-import RowOutcomeBadge from "../../../../components/imports/row-outcome-badge"
+import SetMappingBanner from "../../../../components/imports/set-mapping-banner"
 import { formatEnumLabel } from "../../../../components/imports/format-enum-label"
 import type { VariantThumbnailsResponse } from "../../../../components/imports/image-types"
 import type {
-  ImportSummary, InventoryProposalListItem, InventoryProposalListResponse, RetryMatchingResult,
+  ImageReadiness, ImportSummary, InventoryProposalListItem, InventoryProposalListResponse,
   SnapshotDiagnosticListItem, SnapshotDiagnosticListResponse,
   SnapshotEntryListItem, SnapshotEntryListResponse, SnapshotProgress,
 } from "../../../../components/imports/pulse-import-types"
@@ -25,7 +27,14 @@ import "../../../../styles/imports.css"
 const ENTRY_PAGE_SIZE = 20
 const DIAGNOSTIC_PAGE_SIZE = 20
 
-const OUTSTANDING_MATCHING_STATUSES = ["UNMATCHED", "AMBIGUOUS", "REVIEW_REQUIRED"]
+const OUTCOME_FILTER_OPTIONS = [
+  { value: "VALID", label: "Valid" },
+  { value: "VALID_WITH_WARNINGS", label: "Valid, with warnings" },
+  { value: "UNRESOLVED_VARIANT", label: "Variant not resolved" },
+  { value: "REVIEW_REQUIRED", label: "Needs review" },
+  { value: "INVALID", label: "Invalid" },
+  { value: "SKIPPED", label: "Skipped" },
+] as const
 
 const DIAGNOSTIC_SEVERITY_COLOR: Record<string, "red" | "orange" | "green" | "grey"> = {
   ERROR: "red", WARNING: "orange", INFO: "green",
@@ -35,7 +44,10 @@ const DIAGNOSTIC_ROW_TINT: Record<string, string> = {
   ERROR: "bg-ui-tag-red-bg", WARNING: "bg-ui-tag-orange-bg", INFO: "bg-ui-tag-green-bg",
 }
 
-function fetchSummary(snapshotId: string): Promise<{ summary: ImportSummary; progress: SnapshotProgress }> {
+type EntrySortKey = "cardName" | "set" | "quantity" | "purchasePrice" | "marketPrice" | "salePrice" | "finish" | "variant" | "rarity" | "reviewStatus"
+type SortDirection = "asc" | "desc"
+
+function fetchSummary(snapshotId: string): Promise<{ summary: ImportSummary; progress: SnapshotProgress; imageReadiness: ImageReadiness }> {
   return fetchJson(`/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/summary`)
 }
 
@@ -47,7 +59,7 @@ const ImportsSnapshotDetailPage = () => {
 
   const [entryOffset, setEntryOffset] = useState(0)
   const [outcomeFilter, setOutcomeFilter] = useState("")
-  const [matchingStatusFilter, setMatchingStatusFilter] = useState("")
+  const [reviewStatusFilter, setReviewStatusFilter] = useState("ACTION_REQUIRED")
   const [entryIdFilter, setEntryIdFilter] = useState("")
   const [diagnosticOffset, setDiagnosticOffset] = useState(0)
   const [severityFilter, setSeverityFilter] = useState("")
@@ -55,6 +67,18 @@ const ImportsSnapshotDetailPage = () => {
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
   const [replaceImageTarget, setReplaceImageTarget] = useState<{ tradingCardId: string; tradingCardVariantId: string } | null>(null)
   const [createCardRow, setCreateCardRow] = useState<InventoryProposalListItem | null>(null)
+  const [previewImage, setPreviewImage] = useState<{
+    imageUrl: string; alt: string; target: { tradingCardId: string; tradingCardVariantId: string }
+  } | null>(null)
+  const [selectedCandidateIds, setSelectedCandidateIds] = useState<Set<string>>(new Set())
+  const [entrySort, setEntrySort] = useState<{ key: EntrySortKey; direction: SortDirection }>({
+    key: "cardName",
+    direction: "asc",
+  })
+
+  useEffect(() => {
+    rememberActiveImportSnapshot(snapshotId)
+  }, [snapshotId])
 
   const summaryQuery = useQuery({
     queryKey: ["pulse-import-summary", snapshotId],
@@ -63,11 +87,13 @@ const ImportsSnapshotDetailPage = () => {
   })
 
   const entriesQuery = useQuery({
-    queryKey: ["pulse-import-entries", snapshotId, { entryOffset, outcomeFilter, matchingStatusFilter, entryIdFilter }],
+    queryKey: ["pulse-import-entries", snapshotId, { entryOffset, outcomeFilter, reviewStatusFilter, entryIdFilter, entrySort }],
     queryFn: () => {
       const searchParams = new URLSearchParams({ limit: String(ENTRY_PAGE_SIZE), offset: String(entryOffset) })
+      searchParams.set("sortBy", entrySort.key)
+      searchParams.set("sortDirection", entrySort.direction)
       if (outcomeFilter) searchParams.set("outcome", outcomeFilter)
-      if (matchingStatusFilter) searchParams.set("matchingStatus", matchingStatusFilter)
+      if (reviewStatusFilter) searchParams.set("reviewStatus", reviewStatusFilter)
       if (entryIdFilter) searchParams.set("snapshotEntryId", entryIdFilter)
       return fetchJson<SnapshotEntryListResponse>(
         `/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/entries?${searchParams.toString()}`,
@@ -125,18 +151,6 @@ const ImportsSnapshotDetailPage = () => {
     queryClient.invalidateQueries({ queryKey: ["pulse-import-diagnostics", snapshotId] })
   }
 
-  const retryMutation = useMutation({
-    mutationFn: () =>
-      postAction<{ result: RetryMatchingResult }>(
-        `/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/retry-matching`,
-      ),
-    onSuccess: () => {
-      toast.success("Matching was run again")
-      refreshAfterAction()
-    },
-    onError: () => toast.error("Matching could not be retried. Please try again."),
-  })
-
   const reconcileMutation = useMutation({
     mutationFn: () =>
       postAction(`/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/reconcile`),
@@ -147,31 +161,142 @@ const ImportsSnapshotDetailPage = () => {
     onError: () => toast.error("Reconciliation could not be started. Please try again."),
   })
 
+  const reviewCandidatesMutation = useMutation({
+    mutationFn: ({ candidateIds, action }: { candidateIds: string[]; action: "ACCEPT" | "REJECT" }) =>
+      postAction<{ results: Array<{ candidateId: string; createdVariantCount: number; skippedRowCount: number; errors: string[] }> }>(
+        `/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/tcgdex-lookup/review`,
+        { candidateIds, action },
+      ),
+    onSuccess: (response, variables) => {
+      if (variables.action === "REJECT") {
+        toast.success(`${response.results.length} match${response.results.length === 1 ? "" : "es"} rejected`)
+      } else {
+        const created = response.results.reduce((sum, r) => sum + r.createdVariantCount, 0)
+        const skipped = response.results.reduce((sum, r) => sum + r.skippedRowCount, 0)
+        const failed = response.results.filter((r) => r.errors.length > 0)
+        const parts = [`${created} card variant${created === 1 ? "" : "s"} created`]
+        if (skipped > 0) parts.push(`${skipped} row${skipped === 1 ? "" : "s"} skipped (finish/variant unclear)`)
+        if (failed.length > 0) parts.push(`${failed.length} match${failed.length === 1 ? "" : "es"} had errors`)
+        if (failed.length > 0) toast.error(parts.join(", "))
+        else toast.success(parts.join(", "))
+      }
+      setSelectedCandidateIds(new Set())
+      refreshAfterAction()
+    },
+    onError: () => toast.error("This action could not be completed. Please try again."),
+  })
+
   const summary = summaryQuery.data?.summary
   const progress = summaryQuery.data?.progress
-  const outstandingMatches = summary
-    ? OUTSTANDING_MATCHING_STATUSES.reduce((sum, status) => sum + (summary.byMatchingStatus[status] ?? 0), 0)
-    : 0
-  const canRetryMatching = outstandingMatches > 0 &&
-    ["DRAFT", "VALIDATED", "PENDING_REVIEW"].includes(summary?.status ?? "")
+  const imageReadiness = summaryQuery.data?.imageReadiness
   const canReconcile = summary?.status === "VALIDATED"
+
+  const toggleCandidateSelection = (candidateId: string) => {
+    setSelectedCandidateIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(candidateId)) next.delete(candidateId)
+      else next.add(candidateId)
+      return next
+    })
+  }
+
+  const visibleCandidateIds = [
+    ...new Set((entriesQuery.data?.entries ?? []).flatMap((entry) =>
+      !entry.tradingCardVariantId && entry.tcgdexCandidate?.reviewStatus !== "ACCEPTED" && entry.tcgdexCandidate
+        ? [entry.tcgdexCandidate.id]
+        : [])),
+  ]
+  const allVisibleCandidatesSelected = visibleCandidateIds.length > 0
+    && visibleCandidateIds.every((candidateId) => selectedCandidateIds.has(candidateId))
+  const someVisibleCandidatesSelected = visibleCandidateIds.some((candidateId) => selectedCandidateIds.has(candidateId))
+
+  const toggleAllVisibleCandidates = () => {
+    setSelectedCandidateIds((previous) => {
+      const next = new Set(previous)
+      if (allVisibleCandidatesSelected) visibleCandidateIds.forEach((candidateId) => next.delete(candidateId))
+      else visibleCandidateIds.forEach((candidateId) => next.add(candidateId))
+      return next
+    })
+  }
+
+  const sortableHeader = (label: string, key: EntrySortKey) => {
+    const isActive = entrySort.key === key
+    const arrow = isActive ? (entrySort.direction === "asc" ? "↑" : "↓") : "↕"
+    return (
+      <button
+        type="button"
+        className="flex items-center gap-1 whitespace-nowrap"
+        aria-label={`Sort by ${label}`}
+        onClick={() => {
+          setEntrySort((current) => ({
+            key,
+            direction: current.key === key && current.direction === "asc" ? "desc" : "asc",
+          }))
+          setEntryOffset(0)
+        }}
+      >
+        <span>{label}</span>
+        <span aria-hidden="true" className={isActive ? "text-ui-fg-base" : "text-ui-fg-muted"}>{arrow}</span>
+      </button>
+    )
+  }
+
+  const sortedEntries = entriesQuery.data?.entries ?? []
 
   const entryColumns: ReviewTableColumn<SnapshotEntryListItem>[] = [
     {
       header: "Card",
+      headerCell: (
+        <div className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            aria-label="Select all TCGdex matches on this page"
+            checked={allVisibleCandidatesSelected}
+            disabled={visibleCandidateIds.length === 0}
+            ref={(element) => {
+              if (element) element.indeterminate = someVisibleCandidatesSelected && !allVisibleCandidatesSelected
+            }}
+            onChange={toggleAllVisibleCandidates}
+          />
+          <span>Card</span>
+        </div>
+      ),
       cell: (row) => {
         const thumbnail = row.tradingCardVariantId ? thumbnailsQuery.data?.thumbnails[row.tradingCardVariantId] : undefined
         if (row.tradingCardVariantId) {
+          const imageUrl = thumbnail?.imageUrl ?? row.tcgdexCandidate?.referenceArtworkUrl ?? null
           const target = thumbnail?.tradingCardId
             ? { tradingCardId: thumbnail.tradingCardId, tradingCardVariantId: row.tradingCardVariantId }
             : null
           return (
             <CardImageThumbnail
-              imageUrl={thumbnail?.imageUrl ?? null}
+              imageUrl={imageUrl}
               alt={row.providerReference}
-              title={target ? (thumbnail?.imageUrl ? "Click to replace the image" : "Click to add a photo") : undefined}
-              onClick={target ? () => setReplaceImageTarget(target) : undefined}
+              title={target ? (imageUrl ? "Click to view the image" : "Click to add a photo") : undefined}
+              onClick={target
+                ? () => {
+                    if (imageUrl) {
+                      setPreviewImage({ imageUrl, alt: row.providerReference, target })
+                    } else {
+                      setReplaceImageTarget(target)
+                    }
+                  }
+                : undefined}
             />
+          )
+        }
+        if (row.tcgdexCandidate) {
+          return (
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                aria-label={`Select ${row.tcgdexCandidate.name}`}
+                checked={selectedCandidateIds.has(row.tcgdexCandidate.id)}
+                onClick={(event) => event.stopPropagation()}
+                onChange={() => toggleCandidateSelection(row.tcgdexCandidate!.id)}
+              />
+              <CardImageThumbnail imageUrl={row.tcgdexCandidate.referenceArtworkUrl} alt={row.tcgdexCandidate.name} />
+            </div>
           )
         }
         const proposal = row.providerReference ? unresolvedProposalByReference.get(row.providerReference) : undefined
@@ -185,18 +310,59 @@ const ImportsSnapshotDetailPage = () => {
         )
       },
     },
-    { header: "Row", cell: (row) => row.rowNumber ?? "—" },
-    { header: "Reference", cell: (row) => row.providerReference },
-    { header: "Quantity", cell: (row) => row.quantity },
-    { header: "Purchase price", cell: (row) => formatMoney(row.unitAcquisitionCost, row.currencyCode) },
-    { header: "Market value", cell: (row) => formatMoney(row.unitMarketPrice, row.currencyCode) },
-    { header: "Sale price", cell: (row) => formatMoney(row.unitSellingPrice, row.currencyCode) },
-    { header: "Finish", cell: (row) => formatEnumLabel(row.finishCandidate) },
-    { header: "Treatment", cell: (row) => formatEnumLabel(row.specialTreatmentCandidate) },
-    { header: "Rarity", cell: (row) => row.rarityCandidate ? formatEnumLabel(row.rarityCandidate) : (row.rarityRaw ?? "—") },
-    { header: "Outcome", cell: (row) => <RowOutcomeBadge outcome={row.outcome} /> },
-    { header: "Matched variant", cell: (row) => row.tradingCardVariantId ?? "—" },
-    { header: "Review status", cell: (row) => <MatchingStatusBadge status={row.matchingStatus} /> },
+    {
+      header: "Card name",
+      headerCell: sortableHeader("Card name", "cardName"),
+      cell: (row) => {
+        if (row.card) {
+          return (
+            <div className="flex flex-col">
+              <Text size="small" weight="plus">{row.card.name}</Text>
+              <Text size="xsmall" className="text-ui-fg-subtle">Card {row.card.cardNumber}</Text>
+            </div>
+          )
+        }
+        if (row.tcgdexCandidate) {
+          return (
+            <div className="flex flex-col">
+              <Text size="small" weight="plus">{row.tcgdexCandidate.name}</Text>
+              <Text size="xsmall" className="text-ui-fg-subtle">
+                {[row.tcgdexCandidate.seriesName, row.tcgdexCandidate.setName].filter(Boolean).join(" · ")}
+              </Text>
+            </div>
+          )
+        }
+        if (row.cardIdentityHint) {
+          return (
+            <div className="flex flex-col">
+              <Text size="small" className="text-ui-fg-subtle">Not yet matched</Text>
+              <Text size="xsmall" className="text-ui-fg-subtle">{row.cardIdentityHint}</Text>
+            </div>
+          )
+        }
+        return <Text size="small" className="text-ui-fg-subtle">Not yet matched</Text>
+      },
+    },
+    {
+      header: "Set",
+      headerCell: sortableHeader("Set", "set"),
+      cell: (row) => row.card?.setDisplayName ?? row.tcgdexCandidate?.setName ?? "—",
+    },
+    { header: "Quantity", headerCell: sortableHeader("Quantity", "quantity"), cell: (row) => row.quantity },
+    { header: "Purchase price", headerCell: sortableHeader("Purchase price", "purchasePrice"), cell: (row) => formatMoney(row.unitAcquisitionCost, row.currencyCode) },
+    { header: "Market value", headerCell: sortableHeader("Market value", "marketPrice"), cell: (row) => formatMoney(row.unitMarketPrice, row.currencyCode) },
+    { header: "Sale price", headerCell: sortableHeader("Sale price", "salePrice"), cell: (row) => formatMoney(row.unitSellingPrice, row.currencyCode) },
+    { header: "Finish", headerCell: sortableHeader("Finish", "finish"), cell: (row) => formatEnumLabel(row.finishCandidate) },
+    { header: "Variant", headerCell: sortableHeader("Variant", "variant"), cell: (row) => formatEnumLabel(row.specialTreatmentCandidate) },
+    { header: "Rarity", headerCell: sortableHeader("Rarity", "rarity"), cell: (row) => {
+      const importedRarity = row.rarityRaw && row.rarityRaw !== "—" ? row.rarityRaw : null
+      return row.rarityCandidate
+        ? formatEnumLabel(row.rarityCandidate)
+        : (importedRarity ?? row.card?.rarityRaw ?? row.tcgdexCandidate?.providerRarity ?? "—")
+    } },
+    { header: "Review status", headerCell: sortableHeader("Review status", "reviewStatus"), cell: (row) => (
+      <MatchingStatusBadge status={!row.tradingCardVariantId && row.tcgdexCandidate?.reviewStatus !== "ACCEPTED" ? "AWAITING_REVIEW" : row.matchingStatus} />
+    ) },
   ]
 
   const diagnosticColumns: ReviewTableColumn<SnapshotDiagnosticListItem>[] = [
@@ -217,15 +383,30 @@ const ImportsSnapshotDetailPage = () => {
         <Heading level="h1">Import preview</Heading>
         <ImportStepper compact />
         <Text size="small" className="text-ui-fg-subtle">
-          This shows what is in the uploaded file before anything happens to your stock. If
-          "Retry matching" is shown, some rows still need matching to a card — try it after you
-          have added or fixed cards. Once the file looks right, use "Trigger reconciliation" to
-          work out the stock changes, then go to "Review proposals" to approve them.
+          This shows what is in the uploaded file before anything happens to your stock. Accept
+          any TCGdex matches below, and create cards manually for anything still unmatched. Once
+          the file looks right, use "Trigger reconciliation" to work out the stock changes, then
+          go to "Review proposals" to approve them.
         </Text>
-        <Text size="small">
-          <Link to="/imports/new">Back to upload</Link>
-        </Text>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <Button variant="secondary" onClick={() => navigate("/imports/new")}>Back to upload</Button>
+          {progress && progress.totalProposals > 0 && (
+            !progress.fullyComplete && imageReadiness?.ready
+              ? (
+                  <Button onClick={() => navigate(`/imports/snapshots/${encodeURIComponent(snapshotId)}/proposals`)}>
+                    Next: Review proposals →
+                  </Button>
+                )
+              : (
+                  <Button onClick={() => navigate(`/imports/images?snapshotId=${encodeURIComponent(snapshotId)}`)}>
+                    Next: Assign card images →
+                  </Button>
+                )
+          )}
+        </div>
       </Container>
+
+      <SetMappingBanner snapshotId={snapshotId} />
 
       {summaryQuery.isLoading && (
         <Container className="p-6">
@@ -252,10 +433,10 @@ const ImportsSnapshotDetailPage = () => {
               </div>
               <div>
                 <Text size="xsmall" className="text-ui-fg-subtle">Status</Text>
-                <Text size="small">{summary.status}</Text>
+                <Text size="small">{formatEnumLabel(summary.status)}</Text>
               </div>
               <div>
-                <Text size="xsmall" className="text-ui-fg-subtle">Rows</Text>
+                <Text size="xsmall" className="text-ui-fg-subtle">Cards</Text>
                 <Text size="small">{summary.rowCount}</Text>
               </div>
               <div>
@@ -270,18 +451,17 @@ const ImportsSnapshotDetailPage = () => {
                 <Text size="xsmall" className="text-ui-fg-subtle">Duplicate rows</Text>
                 <Text size="small">{summary.duplicateRowCount}</Text>
               </div>
+              <div>
+                <Text size="xsmall" className="text-ui-fg-subtle">Approved cards</Text>
+                <Text size="small">{summary.approvedCardCount}</Text>
+              </div>
+              <div>
+                <Text size="xsmall" className="text-ui-fg-subtle">Approved quantity</Text>
+                <Text size="small">{summary.approvedQuantity}</Text>
+              </div>
             </div>
 
             <div className="flex flex-wrap gap-3 pt-2">
-              {canRetryMatching && (
-                <Button
-                  variant="secondary"
-                  isLoading={retryMutation.isPending}
-                  onClick={() => retryMutation.mutate()}
-                >
-                  Retry matching ({outstandingMatches} outstanding)
-                </Button>
-              )}
               {canReconcile && (
                 <Button
                   variant="secondary"
@@ -294,86 +474,68 @@ const ImportsSnapshotDetailPage = () => {
             </div>
           </Container>
 
-          {progress && progress.totalProposals > 0 && (
-            <Container className="flex flex-col gap-3 p-6">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <Heading level="h2">Inventory proposals</Heading>
-                <Link to={`/imports/snapshots/${encodeURIComponent(snapshotId)}/proposals`} className="text-ui-fg-subtle text-sm">
-                  View proposals
-                </Link>
-              </div>
-              <div className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
-                <div>
-                  <Text size="xsmall" className="text-ui-fg-subtle">Pending review</Text>
-                  <Text size="small">{progress.pending}</Text>
-                </div>
-                <div>
-                  <Text size="xsmall" className="text-ui-fg-subtle">Approved, unapplied</Text>
-                  <Text size="small">{progress.approved}</Text>
-                </div>
-                <div>
-                  <Text size="xsmall" className="text-ui-fg-subtle">Applied and synced</Text>
-                  <Text size="small">{progress.appliedFullySynced}</Text>
-                </div>
-                <div>
-                  <Text size="xsmall" className="text-ui-fg-subtle">Applied, sync pending or failed</Text>
-                  <Text size="small">{progress.appliedSyncPending + progress.appliedSyncFailed}</Text>
-                </div>
-              </div>
-              <Text size="small" className="text-ui-fg-subtle">
-                {progress.fullyComplete
-                  ? "All applicable proposals have been applied and synchronised to Medusa."
-                  : "This snapshot is not fully applied yet."}
-              </Text>
-              {!progress.fullyComplete && (
-                <Button onClick={() => navigate(`/imports/snapshots/${encodeURIComponent(snapshotId)}/proposals`)}>
-                  Next: Review proposals →
-                </Button>
-              )}
-              {progress.fullyComplete && (
-                <Button onClick={() => navigate(`/imports/images?snapshotId=${encodeURIComponent(snapshotId)}`)}>
-                  Next: Assign card images →
-                </Button>
-              )}
-            </Container>
-          )}
-
           <Container className="flex flex-col gap-3 p-0">
-            <div className="flex flex-wrap items-center gap-3 p-4">
-              <Heading level="h2">Rows</Heading>
-              {entryIdFilter && (
-                <Button size="small" variant="secondary" onClick={() => setEntryIdFilter("")}>Show all rows</Button>
-              )}
-              <select
-                aria-label="Filter by outcome"
-                value={outcomeFilter}
-                onChange={(event) => { setOutcomeFilter(event.target.value); setEntryOffset(0) }}
-                className="rounded-none border p-1 text-sm"
-              >
-                <option value="">All outcomes</option>
-                <option value="VALID">Valid</option>
-                <option value="VALID_WITH_WARNINGS">Valid, with warnings</option>
-                <option value="UNRESOLVED_VARIANT">Variant not resolved</option>
-                <option value="REVIEW_REQUIRED">Needs review</option>
-                <option value="INVALID">Invalid</option>
-                <option value="SKIPPED">Skipped</option>
-              </select>
-              <select
-                aria-label="Filter by review status"
-                value={matchingStatusFilter}
-                onChange={(event) => { setMatchingStatusFilter(event.target.value); setEntryOffset(0) }}
-                className="rounded-none border p-1 text-sm"
-              >
-                <option value="">All review statuses</option>
-                <option value="UNMATCHED">Not matched</option>
-                <option value="MATCHED">Matched</option>
-                <option value="AMBIGUOUS">Ambiguous</option>
-                <option value="REVIEW_REQUIRED">Needs review</option>
-              </select>
+            <div className="flex flex-wrap items-center justify-between gap-3 p-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <Heading level="h2">Rows</Heading>
+                {entryIdFilter && (
+                  <Button size="small" variant="secondary" onClick={() => setEntryIdFilter("")}>Show all rows</Button>
+                )}
+                <select
+                  aria-label="Filter by outcome"
+                  value={outcomeFilter}
+                  onChange={(event) => { setOutcomeFilter(event.target.value); setEntryOffset(0) }}
+                  className="rounded-none border p-1 text-sm"
+                >
+                  <option value="">All outcomes</option>
+                  {OUTCOME_FILTER_OPTIONS
+                    .filter((option) => (summary?.byOutcome[option.value] ?? 0) > 0 || outcomeFilter === option.value)
+                    .map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+                <select
+                  aria-label="Filter by review status"
+                  value={reviewStatusFilter}
+                  onChange={(event) => { setReviewStatusFilter(event.target.value); setEntryOffset(0) }}
+                  className="rounded-none border p-1 text-sm"
+                >
+                  <option value="ACTION_REQUIRED">Needs action</option>
+                  <option value="">All review statuses</option>
+                  <option value="AWAITING_REVIEW">Awaiting review</option>
+                  <option value="NOT_MATCHED">Not matched</option>
+                  <option value="MATCHED">Matched</option>
+                  <option value="AMBIGUOUS">Ambiguous</option>
+                </select>
+              </div>
+              <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+                {selectedCandidateIds.size > 0 && (
+                  <Text size="small" className="text-ui-fg-subtle">
+                    {selectedCandidateIds.size} selected
+                  </Text>
+                )}
+                <Button
+                  size="small"
+                  variant="primary"
+                  disabled={selectedCandidateIds.size === 0}
+                  isLoading={reviewCandidatesMutation.isPending}
+                  onClick={() => reviewCandidatesMutation.mutate({ candidateIds: [...selectedCandidateIds], action: "ACCEPT" })}
+                >
+                  Approve selected
+                </Button>
+                <Button
+                  size="small"
+                  variant="secondary"
+                  disabled={selectedCandidateIds.size === 0}
+                  isLoading={reviewCandidatesMutation.isPending}
+                  onClick={() => reviewCandidatesMutation.mutate({ candidateIds: [...selectedCandidateIds], action: "REJECT" })}
+                >
+                  Reject
+                </Button>
+              </div>
             </div>
             <ReviewTable
+              className="ht-imports-rows-table"
               columns={entryColumns}
-              rows={entriesQuery.data?.entries ?? []}
+              rows={sortedEntries}
               rowKey={(row) => row.id}
               onRowClick={(row) => setSelectedEntryId(row.id)}
               isLoading={entriesQuery.isLoading}
@@ -440,7 +602,9 @@ const ImportsSnapshotDetailPage = () => {
       )}
 
       {selectedEntryId && (() => {
-        const selectedEntry = entriesQuery.data?.entries.find((entry) => entry.id === selectedEntryId)
+        const visibleEntries = sortedEntries
+        const selectedEntryIndex = visibleEntries.findIndex((entry) => entry.id === selectedEntryId)
+        const selectedEntry = visibleEntries[selectedEntryIndex]
         if (!selectedEntry) return null
         const thumbnail = selectedEntry.tradingCardVariantId
           ? thumbnailsQuery.data?.thumbnails[selectedEntry.tradingCardVariantId]
@@ -451,9 +615,27 @@ const ImportsSnapshotDetailPage = () => {
             row={selectedEntry}
             thumbnail={thumbnail}
             onClose={() => setSelectedEntryId(null)}
+            onPrevious={selectedEntryIndex > 0
+              ? () => setSelectedEntryId(visibleEntries[selectedEntryIndex - 1].id)
+              : undefined}
+            onNext={selectedEntryIndex < visibleEntries.length - 1
+              ? () => setSelectedEntryId(visibleEntries[selectedEntryIndex + 1].id)
+              : undefined}
           />
         )
       })()}
+
+      {previewImage && (
+        <ImagePreviewModal
+          imageUrl={previewImage.imageUrl}
+          alt={previewImage.alt}
+          onClose={() => setPreviewImage(null)}
+          onReplace={() => {
+            setReplaceImageTarget(previewImage.target)
+            setPreviewImage(null)
+          }}
+        />
+      )}
 
       {replaceImageTarget && (
         <ReplaceCardImageDialog

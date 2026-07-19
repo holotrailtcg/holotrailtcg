@@ -1,6 +1,7 @@
 import type { AuthenticatedMedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { MedusaError } from "@medusajs/framework/utils"
 import { createCardFromInventoryRowWorkflow, CatalogueIntegrityError } from "../../../../workflows/trading-cards/create-card-from-inventory-row"
+import { retryPulseSnapshotMatching } from "../../../../workflows/trading-card-inventory/pulse-import-shared"
 import { parseProductId } from "../../../../modules/trading-card-inventory/pulse/product-id"
 import type { InventoryRecordSource } from "../../../../modules/trading-card-inventory/types"
 import { tradingCardInventoryService } from "../../trading-card-inventory/shared"
@@ -83,6 +84,12 @@ export async function POST(req: AuthenticatedMedusaRequest, res: MedusaResponse)
     const [variant] = await cards.listTradingCardVariants(
       { id: [result.tradingCardVariantId] }, { relations: ["trading_card", "trading_card.card_set"] },
     )
+    // See the equivalent comment in bulk-review-tcgdex-candidates.ts: this
+    // only resolves duplicate-reference sibling rows, never fatal to the
+    // card creation that already succeeded above.
+    try {
+      await retryPulseSnapshotMatching(req.scope, { actor, source: "MANUAL", snapshotId: proposal.inventory_snapshot_id as string })
+    } catch { /* best-effort */ }
     res.status(201).json({ result: toResultDto(result.tradingCardVariantId, variant as Record<string, unknown> | undefined, result.tcgdexEnrichmentStatus), idempotentReplay: false })
   } catch (error) {
     if (CatalogueIntegrityError.isCatalogueIntegrityError(error)) {

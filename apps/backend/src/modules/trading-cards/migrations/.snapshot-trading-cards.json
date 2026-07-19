@@ -54,7 +54,9 @@
           "enumItems": [
             "TRADING_CARD",
             "TRADING_CARD_VARIANT",
-            "EXTERNAL_CARD_REFERENCE"
+            "EXTERNAL_CARD_REFERENCE",
+            "ENRICHMENT_PROPOSAL",
+            "CARD_IMAGE"
           ],
           "mappedType": "enum"
         },
@@ -96,7 +98,22 @@
             "PRICE_UNLOCKED",
             "EXTERNAL_REFERENCE_ADDED",
             "EXTERNAL_REFERENCE_CHANGED",
-            "EXTERNAL_REFERENCE_REMOVED"
+            "EXTERNAL_REFERENCE_REMOVED",
+            "TCGDEX_ENRICHMENT_RECORDED",
+            "TCGDEX_ENRICHMENT_SUPERSEDED",
+            "TCGDEX_ENRICHMENT_APPROVED",
+            "TCGDEX_ENRICHMENT_REJECTED",
+            "TCGDEX_ENRICHMENT_APPLIED",
+            "TCGDEX_MANUAL_REFERENCE_RECORDED",
+            "IMAGE_UPLOAD_REQUESTED",
+            "IMAGE_UPLOAD_CONFIRMED",
+            "IMAGE_UPLOAD_REJECTED",
+            "IMAGE_UPLOAD_EXPIRED",
+            "IMAGE_DUPLICATE_DETECTED",
+            "IMAGE_REORDERED",
+            "IMAGE_FOCAL_CHANGED",
+            "IMAGE_ARCHIVED",
+            "IMAGE_RESTORED"
           ],
           "mappedType": "enum"
         },
@@ -498,6 +515,254 @@
           ],
           "mappedType": "enum"
         },
+        "game": {
+          "name": "game",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [
+            "POKEMON"
+          ],
+          "mappedType": "enum"
+        },
+        "language": {
+          "name": "language",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [
+            "EN",
+            "JA",
+            "ZH"
+          ],
+          "mappedType": "enum"
+        },
+        "provider_set_code": {
+          "name": "provider_set_code",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "tcgdex_set_id": {
+          "name": "tcgdex_set_id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "tcgdex_set_name": {
+          "name": "tcgdex_set_name",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "tcgdex_series_id": {
+          "name": "tcgdex_series_id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "tcgdex_series_name": {
+          "name": "tcgdex_series_name",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": "now()",
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": "now()",
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
+        "deleted_at": {
+          "name": "deleted_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        }
+      },
+      "name": "trading_card_provider_set_mapping",
+      "schema": "public",
+      "indexes": [
+        {
+          "keyName": "IDX_trading_card_provider_set_mapping_deleted_at",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE INDEX IF NOT EXISTS \"IDX_trading_card_provider_set_mapping_deleted_at\" ON \"trading_card_provider_set_mapping\" (\"deleted_at\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "IDX_trading_card_provider_set_mapping_identity",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE UNIQUE INDEX IF NOT EXISTS \"IDX_trading_card_provider_set_mapping_identity\" ON \"trading_card_provider_set_mapping\" (\"provider\", \"game\", \"language\", \"provider_set_code\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "trading_card_provider_set_mapping_pkey",
+          "columnNames": [
+            "id"
+          ],
+          "composite": false,
+          "constraint": true,
+          "primary": true,
+          "unique": true
+        }
+      ],
+      "checks": [
+        {
+          "name": "CK_provider_set_mapping_series_pair",
+          "expression": "(tcgdex_series_id is null and tcgdex_series_name is null) or (tcgdex_series_id is not null and tcgdex_series_name is not null)",
+          "definition": "check (((tcgdex_series_id is null and tcgdex_series_name is null) or (tcgdex_series_id is not null and tcgdex_series_name is not null)))"
+        }
+      ],
+      "foreignKeys": {},
+      "nativeEnums": {}
+    },
+    {
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": true,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [
+            "TCGDEX",
+            "PULSE",
+            "EBAY",
+            "OTHER"
+          ],
+          "mappedType": "enum"
+        },
         "language": {
           "name": "language",
           "type": "text",
@@ -703,6 +968,245 @@
         }
       ],
       "checks": [],
+      "foreignKeys": {},
+      "nativeEnums": {}
+    },
+    {
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": true,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [
+            "TCGDEX",
+            "PULSE",
+            "EBAY",
+            "OTHER"
+          ],
+          "mappedType": "enum"
+        },
+        "language": {
+          "name": "language",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [
+            "EN",
+            "JA",
+            "ZH"
+          ],
+          "mappedType": "enum"
+        },
+        "tcgdex_set_id": {
+          "name": "tcgdex_set_id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "card_number": {
+          "name": "card_number",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "match_outcome": {
+          "name": "match_outcome",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [
+            "MATCHED",
+            "NO_MATCH",
+            "UNRESOLVED_SET",
+            "IDENTITY_MISMATCH"
+          ],
+          "mappedType": "enum"
+        },
+        "enrichment": {
+          "name": "enrichment",
+          "type": "jsonb",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "json"
+        },
+        "review_status": {
+          "name": "review_status",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [
+            "PENDING",
+            "ACCEPTED",
+            "REJECTED"
+          ],
+          "mappedType": "enum"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": "now()",
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": "now()",
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
+        "deleted_at": {
+          "name": "deleted_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        }
+      },
+      "name": "trading_card_tcgdex_lookup_candidate",
+      "schema": "public",
+      "indexes": [
+        {
+          "keyName": "IDX_trading_card_tcgdex_lookup_candidate_deleted_at",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE INDEX IF NOT EXISTS \"IDX_trading_card_tcgdex_lookup_candidate_deleted_at\" ON \"trading_card_tcgdex_lookup_candidate\" (\"deleted_at\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "IDX_trading_card_tcgdex_lookup_candidate_identity",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE UNIQUE INDEX IF NOT EXISTS \"IDX_trading_card_tcgdex_lookup_candidate_identity\" ON \"trading_card_tcgdex_lookup_candidate\" (\"provider\", \"language\", \"tcgdex_set_id\", \"card_number\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "trading_card_tcgdex_lookup_candidate_pkey",
+          "columnNames": [
+            "id"
+          ],
+          "composite": false,
+          "constraint": true,
+          "primary": true,
+          "unique": true
+        }
+      ],
+      "checks": [
+        {
+          "name": "CK_tcgdex_lookup_candidate_review_status_pair",
+          "expression": "(match_outcome = 'MATCHED' and review_status is not null and enrichment is not null) or (match_outcome <> 'MATCHED' and review_status is null and enrichment is null)",
+          "definition": "check (((match_outcome = 'MATCHED' and review_status is not null and enrichment is not null) or (match_outcome <> 'MATCHED' and review_status is null and enrichment is null)))"
+        }
+      ],
       "foreignKeys": {},
       "nativeEnums": {}
     },
@@ -1048,6 +1552,607 @@
             "id"
           ],
           "referencedTableName": "public.trading_card_set",
+          "updateRule": "cascade"
+        }
+      },
+      "nativeEnums": {}
+    },
+    {
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": true,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "trading_card_id": {
+          "name": "trading_card_id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [
+            "TCGDEX",
+            "PULSE",
+            "EBAY",
+            "OTHER"
+          ],
+          "mappedType": "enum"
+        },
+        "provider_card_id": {
+          "name": "provider_card_id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "provider_set_id": {
+          "name": "provider_set_id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "match_source": {
+          "name": "match_source",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [
+            "AUTOMATIC",
+            "MANUAL"
+          ],
+          "mappedType": "enum"
+        },
+        "snapshot": {
+          "name": "snapshot",
+          "type": "jsonb",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "json"
+        },
+        "snapshot_fingerprint": {
+          "name": "snapshot_fingerprint",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "review_status": {
+          "name": "review_status",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": "'PENDING'",
+          "comment": null,
+          "enumItems": [
+            "PENDING",
+            "APPROVED",
+            "REJECTED",
+            "APPLIED",
+            "SUPERSEDED"
+          ],
+          "mappedType": "enum"
+        },
+        "reviewed_at": {
+          "name": "reviewed_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
+        "reviewer_id": {
+          "name": "reviewer_id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "applied_at": {
+          "name": "applied_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": "now()",
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": "now()",
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
+        "deleted_at": {
+          "name": "deleted_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        }
+      },
+      "name": "trading_card_tcgdex_enrichment_proposal",
+      "schema": "public",
+      "indexes": [
+        {
+          "keyName": "IDX_trading_card_tcgdex_enrichment_proposal_trading_card_id",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE INDEX IF NOT EXISTS \"IDX_trading_card_tcgdex_enrichment_proposal_trading_card_id\" ON \"trading_card_tcgdex_enrichment_proposal\" (\"trading_card_id\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "IDX_trading_card_tcgdex_enrichment_proposal_deleted_at",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE INDEX IF NOT EXISTS \"IDX_trading_card_tcgdex_enrichment_proposal_deleted_at\" ON \"trading_card_tcgdex_enrichment_proposal\" (\"deleted_at\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "IDX_tcgdex_proposal_card_provider",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE INDEX IF NOT EXISTS \"IDX_tcgdex_proposal_card_provider\" ON \"trading_card_tcgdex_enrichment_proposal\" (\"trading_card_id\", \"provider\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "IDX_tcgdex_proposal_snapshot",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE UNIQUE INDEX IF NOT EXISTS \"IDX_tcgdex_proposal_snapshot\" ON \"trading_card_tcgdex_enrichment_proposal\" (\"trading_card_id\", \"provider\", \"snapshot_fingerprint\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "trading_card_tcgdex_enrichment_proposal_pkey",
+          "columnNames": [
+            "id"
+          ],
+          "composite": false,
+          "constraint": true,
+          "primary": true,
+          "unique": true
+        }
+      ],
+      "checks": [],
+      "foreignKeys": {
+        "trading_card_tcgdex_enrichment_proposal_trading_card_id_foreign": {
+          "constraintName": "trading_card_tcgdex_enrichment_proposal_trading_card_id_foreign",
+          "columnNames": [
+            "trading_card_id"
+          ],
+          "localTableName": "public.trading_card_tcgdex_enrichment_proposal",
+          "referencedColumnNames": [
+            "id"
+          ],
+          "referencedTableName": "public.trading_card",
+          "updateRule": "cascade"
+        }
+      },
+      "nativeEnums": {}
+    },
+    {
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": true,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "trading_card_id": {
+          "name": "trading_card_id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [
+            "TCGDEX",
+            "PULSE",
+            "EBAY",
+            "OTHER"
+          ],
+          "mappedType": "enum"
+        },
+        "match_source": {
+          "name": "match_source",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [
+            "AUTOMATIC",
+            "MANUAL"
+          ],
+          "mappedType": "enum"
+        },
+        "match_outcome": {
+          "name": "match_outcome",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [
+            "MATCHED",
+            "NO_MATCH",
+            "UNRESOLVED_SET",
+            "IDENTITY_MISMATCH",
+            "INVALID_LOCAL_IDENTITY",
+            "PROVIDER_ERROR"
+          ],
+          "mappedType": "enum"
+        },
+        "provider_card_id": {
+          "name": "provider_card_id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "provider_set_id": {
+          "name": "provider_set_id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "safe_provider_error_code": {
+          "name": "safe_provider_error_code",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "diagnostic_fingerprint": {
+          "name": "diagnostic_fingerprint",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": "now()",
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": "now()",
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
+        "deleted_at": {
+          "name": "deleted_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        }
+      },
+      "name": "trading_card_tcgdex_enrichment_attempt",
+      "schema": "public",
+      "indexes": [
+        {
+          "keyName": "IDX_trading_card_tcgdex_enrichment_attempt_trading_card_id",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE INDEX IF NOT EXISTS \"IDX_trading_card_tcgdex_enrichment_attempt_trading_card_id\" ON \"trading_card_tcgdex_enrichment_attempt\" (\"trading_card_id\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "IDX_trading_card_tcgdex_enrichment_attempt_deleted_at",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE INDEX IF NOT EXISTS \"IDX_trading_card_tcgdex_enrichment_attempt_deleted_at\" ON \"trading_card_tcgdex_enrichment_attempt\" (\"deleted_at\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "IDX_tcgdex_attempt_card_provider",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE INDEX IF NOT EXISTS \"IDX_tcgdex_attempt_card_provider\" ON \"trading_card_tcgdex_enrichment_attempt\" (\"trading_card_id\", \"provider\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "IDX_tcgdex_attempt_diagnostic",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE UNIQUE INDEX IF NOT EXISTS \"IDX_tcgdex_attempt_diagnostic\" ON \"trading_card_tcgdex_enrichment_attempt\" (\"trading_card_id\", \"provider\", \"diagnostic_fingerprint\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "trading_card_tcgdex_enrichment_attempt_pkey",
+          "columnNames": [
+            "id"
+          ],
+          "composite": false,
+          "constraint": true,
+          "primary": true,
+          "unique": true
+        }
+      ],
+      "checks": [],
+      "foreignKeys": {
+        "trading_card_tcgdex_enrichment_attempt_trading_card_id_foreign": {
+          "constraintName": "trading_card_tcgdex_enrichment_attempt_trading_card_id_foreign",
+          "columnNames": [
+            "trading_card_id"
+          ],
+          "localTableName": "public.trading_card_tcgdex_enrichment_attempt",
+          "referencedColumnNames": [
+            "id"
+          ],
+          "referencedTableName": "public.trading_card",
           "updateRule": "cascade"
         }
       },
@@ -1497,7 +2602,23 @@
           "unsigned": false,
           "autoincrement": false,
           "primary": false,
-          "nullable": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "card_set_id": {
+          "name": "card_set_id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
           "unique": false,
           "length": null,
           "precision": null,
@@ -1559,6 +2680,25 @@
           "comment": null,
           "enumItems": [],
           "mappedType": "text"
+        },
+        "provenance": {
+          "name": "provenance",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": "'AUTOMATIC'",
+          "comment": null,
+          "enumItems": [
+            "AUTOMATIC",
+            "TRUSTED_MANUAL"
+          ],
+          "mappedType": "enum"
         },
         "language": {
           "name": "language",
@@ -1674,6 +2814,15 @@
           "expression": "CREATE INDEX IF NOT EXISTS \"IDX_trading_card_external_reference_trading_card_id\" ON \"trading_card_external_reference\" (\"trading_card_id\") WHERE deleted_at IS NULL"
         },
         {
+          "keyName": "IDX_trading_card_external_reference_card_set_id",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE INDEX IF NOT EXISTS \"IDX_trading_card_external_reference_card_set_id\" ON \"trading_card_external_reference\" (\"card_set_id\") WHERE deleted_at IS NULL"
+        },
+        {
           "keyName": "IDX_trading_card_external_reference_trading_card_variant_id",
           "columnNames": [],
           "composite": false,
@@ -1729,6 +2878,20 @@
             "id"
           ],
           "referencedTableName": "public.trading_card",
+          "deleteRule": "set null",
+          "updateRule": "cascade"
+        },
+        "trading_card_external_reference_card_set_id_foreign": {
+          "constraintName": "trading_card_external_reference_card_set_id_foreign",
+          "columnNames": [
+            "card_set_id"
+          ],
+          "localTableName": "public.trading_card_external_reference",
+          "referencedColumnNames": [
+            "id"
+          ],
+          "referencedTableName": "public.trading_card_set",
+          "deleteRule": "set null",
           "updateRule": "cascade"
         },
         "trading_card_external_reference_trading_card_variant_id_foreign": {
@@ -1742,6 +2905,519 @@
           ],
           "referencedTableName": "public.trading_card_variant",
           "deleteRule": "set null",
+          "updateRule": "cascade"
+        }
+      },
+      "nativeEnums": {}
+    },
+    {
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": true,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "trading_card_variant_id": {
+          "name": "trading_card_variant_id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": "'PENDING'",
+          "comment": null,
+          "enumItems": [
+            "PENDING",
+            "READY",
+            "DUPLICATE",
+            "REJECTED",
+            "EXPIRED",
+            "ARCHIVED"
+          ],
+          "mappedType": "enum"
+        },
+        "staging_object_key": {
+          "name": "staging_object_key",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "final_object_key": {
+          "name": "final_object_key",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "original_filename": {
+          "name": "original_filename",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "declared_mime_type": {
+          "name": "declared_mime_type",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "declared_byte_size": {
+          "name": "declared_byte_size",
+          "type": "integer",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "integer"
+        },
+        "confirmed_mime_type": {
+          "name": "confirmed_mime_type",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "confirmed_byte_size": {
+          "name": "confirmed_byte_size",
+          "type": "integer",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "integer"
+        },
+        "width": {
+          "name": "width",
+          "type": "integer",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "integer"
+        },
+        "height": {
+          "name": "height",
+          "type": "integer",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "integer"
+        },
+        "sha256_hash": {
+          "name": "sha256_hash",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "sort_order": {
+          "name": "sort_order",
+          "type": "integer",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "integer"
+        },
+        "focal_x": {
+          "name": "focal_x",
+          "type": "real",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": "0.5",
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "float"
+        },
+        "focal_y": {
+          "name": "focal_y",
+          "type": "real",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": "0.5",
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "float"
+        },
+        "uploaded_by": {
+          "name": "uploaded_by",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "upload_expires_at": {
+          "name": "upload_expires_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
+        "archived_at": {
+          "name": "archived_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
+        "archived_by": {
+          "name": "archived_by",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": "now()",
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": "now()",
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
+        "deleted_at": {
+          "name": "deleted_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        }
+      },
+      "name": "trading_card_image",
+      "schema": "public",
+      "indexes": [
+        {
+          "keyName": "IDX_trading_card_image_trading_card_variant_id",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE INDEX IF NOT EXISTS \"IDX_trading_card_image_trading_card_variant_id\" ON \"trading_card_image\" (\"trading_card_variant_id\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "IDX_trading_card_image_deleted_at",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE INDEX IF NOT EXISTS \"IDX_trading_card_image_deleted_at\" ON \"trading_card_image\" (\"deleted_at\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "IDX_trading_card_image_variant_id",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE INDEX IF NOT EXISTS \"IDX_trading_card_image_variant_id\" ON \"trading_card_image\" (\"trading_card_variant_id\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "IDX_trading_card_image_staging_key",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE UNIQUE INDEX IF NOT EXISTS \"IDX_trading_card_image_staging_key\" ON \"trading_card_image\" (\"staging_object_key\") WHERE staging_object_key is not null and deleted_at is null"
+        },
+        {
+          "keyName": "IDX_trading_card_image_final_key",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE UNIQUE INDEX IF NOT EXISTS \"IDX_trading_card_image_final_key\" ON \"trading_card_image\" (\"final_object_key\") WHERE final_object_key is not null and deleted_at is null"
+        },
+        {
+          "keyName": "IDX_trading_card_image_sha256",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE INDEX IF NOT EXISTS \"IDX_trading_card_image_sha256\" ON \"trading_card_image\" (\"sha256_hash\") WHERE sha256_hash is not null and deleted_at is null"
+        },
+        {
+          "keyName": "IDX_trading_card_image_ready_sort_order",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE UNIQUE INDEX IF NOT EXISTS \"IDX_trading_card_image_ready_sort_order\" ON \"trading_card_image\" (\"trading_card_variant_id\", \"sort_order\") WHERE status = 'READY' and deleted_at is null"
+        },
+        {
+          "keyName": "trading_card_image_pkey",
+          "columnNames": [
+            "id"
+          ],
+          "composite": false,
+          "constraint": true,
+          "primary": true,
+          "unique": true
+        }
+      ],
+      "checks": [
+        {
+          "name": "CK_trading_card_image_declared_size_positive",
+          "expression": "declared_byte_size > 0",
+          "definition": "check ((declared_byte_size > 0))"
+        },
+        {
+          "name": "CK_trading_card_image_confirmed_size_positive",
+          "expression": "confirmed_byte_size is null or confirmed_byte_size > 0",
+          "definition": "check ((confirmed_byte_size is null or confirmed_byte_size > 0))"
+        },
+        {
+          "name": "CK_trading_card_image_dimensions_positive",
+          "expression": "(width is null or width > 0) and (height is null or height > 0)",
+          "definition": "check (((width is null or width > 0) and (height is null or height > 0)))"
+        },
+        {
+          "name": "CK_trading_card_image_sort_order_non_negative",
+          "expression": "sort_order >= 0",
+          "definition": "check ((sort_order >= 0))"
+        },
+        {
+          "name": "CK_trading_card_image_focal_bounds",
+          "expression": "focal_x between 0 and 1 and focal_y between 0 and 1",
+          "definition": "check ((focal_x between 0 and 1 and focal_y between 0 and 1))"
+        },
+        {
+          "name": "CK_trading_card_image_sha256_format",
+          "expression": "sha256_hash is null or sha256_hash ~ '^[a-f0-9]{64}$'",
+          "definition": "check ((sha256_hash is null or sha256_hash ~ '^[a-f0-9]{64}$'))"
+        },
+        {
+          "name": "CK_trading_card_image_archived_consistency",
+          "expression": "(status = 'ARCHIVED' and archived_at is not null and archived_by is not null) or (status <> 'ARCHIVED' and archived_at is null and archived_by is null)",
+          "definition": "check (((status = 'ARCHIVED' and archived_at is not null and archived_by is not null) or (status <> 'ARCHIVED' and archived_at is null and archived_by is null)))"
+        },
+        {
+          "name": "CK_trading_card_image_lifecycle_keys",
+          "expression": "case status\n           when 'PENDING' then\n             staging_object_key is not null and final_object_key is null and\n             confirmed_mime_type is null and confirmed_byte_size is null and\n             width is null and height is null and sha256_hash is null\n           when 'READY' then\n             staging_object_key is null and final_object_key is not null and\n             confirmed_mime_type is not null and confirmed_byte_size is not null and\n             width is not null and height is not null and sha256_hash is not null\n           when 'ARCHIVED' then\n             staging_object_key is null and final_object_key is not null and\n             confirmed_mime_type is not null and confirmed_byte_size is not null and\n             width is not null and height is not null and sha256_hash is not null\n           else\n             staging_object_key is null and final_object_key is null and\n             confirmed_mime_type is null and confirmed_byte_size is null and\n             width is null and height is null and sha256_hash is null\n         end",
+          "definition": "check ((case status\n           when 'PENDING' then\n             staging_object_key is not null and final_object_key is null and\n             confirmed_mime_type is null and confirmed_byte_size is null and\n             width is null and height is null and sha256_hash is null\n           when 'READY' then\n             staging_object_key is null and final_object_key is not null and\n             confirmed_mime_type is not null and confirmed_byte_size is not null and\n             width is not null and height is not null and sha256_hash is not null\n           when 'ARCHIVED' then\n             staging_object_key is null and final_object_key is not null and\n             confirmed_mime_type is not null and confirmed_byte_size is not null and\n             width is not null and height is not null and sha256_hash is not null\n           else\n             staging_object_key is null and final_object_key is null and\n             confirmed_mime_type is null and confirmed_byte_size is null and\n             width is null and height is null and sha256_hash is null\n         end))"
+        }
+      ],
+      "foreignKeys": {
+        "trading_card_image_trading_card_variant_id_foreign": {
+          "constraintName": "trading_card_image_trading_card_variant_id_foreign",
+          "columnNames": [
+            "trading_card_variant_id"
+          ],
+          "localTableName": "public.trading_card_image",
+          "referencedColumnNames": [
+            "id"
+          ],
+          "referencedTableName": "public.trading_card_variant",
           "updateRule": "cascade"
         }
       },

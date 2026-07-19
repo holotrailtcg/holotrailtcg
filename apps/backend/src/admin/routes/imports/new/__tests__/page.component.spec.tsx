@@ -109,7 +109,7 @@ describe("ImportsNewPage", () => {
     expect(submit).not.toBeDisabled()
     await user.click(submit)
 
-    await waitFor(() => expect(mockedRouter.__mockNavigate).toHaveBeenCalledWith("/imports/snapshots/tcisnap_1"))
+    await waitFor(() => expect(mockedRouter.__mockNavigate).toHaveBeenCalledWith("/imports/snapshots/tcisnap_1/tcgdex-lookup"))
     expect(mockedUpload.uploadCsv).toHaveBeenCalledWith(expect.objectContaining({
       fields: { inventorySourceId: "tcisrc_1" },
     }))

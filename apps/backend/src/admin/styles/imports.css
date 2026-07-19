@@ -23,3 +23,14 @@
 .ht-imports *:focus-visible {
   outline-color: var(--ht-imports-focus-ring);
 }
+
+.ht-imports .ht-imports-rows-table tbody td {
+  padding-bottom: 0.75rem;
+  padding-top: 0.75rem;
+  vertical-align: middle;
+}
+
+.ht-imports-entry-drawer {
+  max-width: calc(100vw - 2rem) !important;
+  width: min(60rem, calc(100vw - 2rem)) !important;
+}

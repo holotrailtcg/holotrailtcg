@@ -4,7 +4,7 @@ import { z } from "@medusajs/framework/zod"
 import { TRADING_CARDS_MODULE } from "../../../modules/trading-cards"
 import type TradingCardsModuleService from "../../../modules/trading-cards/service"
 import {
-  CARD_CONDITION, CARD_FINISH, CARD_GAME, CARD_LANGUAGE, MAX_CARD_IMAGE_BYTE_SIZE, SPECIAL_TREATMENT,
+  CARD_CONDITION, CARD_FINISH, CARD_GAME, CARD_LANGUAGE, EXTERNAL_PROVIDER, MAX_CARD_IMAGE_BYTE_SIZE, SPECIAL_TREATMENT,
   SUPPORTED_IMAGE_MIME_TYPES,
 } from "../../../modules/trading-cards/types"
 import { resolveR2Config } from "../../../modules/trading-cards/images/r2-config"
@@ -124,6 +124,23 @@ export const createCardFromInventoryRowBodySchema = z.object({
 }).strict()
 
 export { CARD_GAME, CARD_LANGUAGE }
+
+export const unmappedSetCodesQuerySchema = z.object({
+  snapshotId: z.string().min(1),
+}).strict()
+
+export const suggestSetMappingQuerySchema = z.object({
+  providerSetCode: z.string().trim().min(1).max(64),
+  language: z.enum(Object.values(CARD_LANGUAGE) as [string, ...string[]]),
+}).strict()
+
+export const createProviderSetMappingBodySchema = z.object({
+  provider: z.enum(Object.values(EXTERNAL_PROVIDER) as [string, ...string[]]),
+  game: z.enum(Object.values(CARD_GAME) as [string, ...string[]]),
+  language: z.enum(Object.values(CARD_LANGUAGE) as [string, ...string[]]),
+  providerSetCode: z.string().trim().min(1).max(64),
+  tcgdexSetId: z.string().trim().min(1).max(64),
+}).strict()
 
 /**
  * The Admin-safe view of a `CardImage` row. Explicitly excludes

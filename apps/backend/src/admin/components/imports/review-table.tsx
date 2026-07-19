@@ -19,6 +19,7 @@ interface ReviewTableProps<T> {
   isError: boolean
   emptyMessage: string
   errorMessage?: string
+  className?: string
 }
 
 function ReviewTable<T>({
@@ -31,6 +32,7 @@ function ReviewTable<T>({
   isError,
   emptyMessage,
   errorMessage = "This could not be loaded. Please try again.",
+  className,
 }: ReviewTableProps<T>) {
   if (isLoading) {
     return (
@@ -57,7 +59,7 @@ function ReviewTable<T>({
   }
 
   return (
-    <Table>
+    <Table className={className}>
       <Table.Header>
         <Table.Row>
           {columns.map((column) => (

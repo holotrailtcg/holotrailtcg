@@ -31,6 +31,10 @@ const boosterSchema = z.object({
   artwork_back: z.string().url().optional(),
 })
 
+export const tcgDexSetSummarySchema = z.object({ id: nonEmptyString, name: nonEmptyString })
+export const tcgDexSetListSchema = z.array(tcgDexSetSummarySchema)
+export const tcgDexSetDetailSchema = setSchema.extend({ serie: tcgDexSetSummarySchema })
+
 export const tcgDexCardSchema = z.object({
   category: nonEmptyString,
   id: nonEmptyString,

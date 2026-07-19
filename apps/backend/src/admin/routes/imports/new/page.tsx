@@ -1,6 +1,7 @@
 import { Button, Container, Heading, Input, Select, Text, toast } from "@medusajs/ui"
 import { useState } from "react"
 import { Link, useNavigate } from "react-router-dom"
+import { FileDropInput } from "../../../components/imports/file-drop-input"
 import ImportStepper from "../../../components/imports/import-stepper"
 import SourceSelect from "../../../components/imports/source-select"
 import { PULSE_UPLOAD_MAX_BYTE_SIZE, uploadCsv } from "../../../components/imports/upload-csv"
@@ -27,7 +28,7 @@ const ImportsNewPage = () => {
   const [newSourceDisplayName, setNewSourceDisplayName] = useState("")
   const [newSourceProvider, setNewSourceProvider] = useState("PULSE")
   const [newSourceLanguage, setNewSourceLanguage] = useState("")
-  const [newSourceDefaultCurrencyCode, setNewSourceDefaultCurrencyCode] = useState("")
+  const [newSourceDefaultCurrencyCode, setNewSourceDefaultCurrencyCode] = useState("GBP")
   const [file, setFile] = useState<File | null>(null)
   const [progress, setProgress] = useState(0)
   const [isUploading, setIsUploading] = useState(false)
@@ -67,7 +68,7 @@ const ImportsNewPage = () => {
       switch (result.kind) {
         case "IMPORTED":
           toast.success("Import complete", { description: `${result.importSummary.rowCount} rows processed.` })
-          navigate(`/imports/snapshots/${result.snapshotId}`)
+          navigate(`/imports/snapshots/${result.snapshotId}/tcgdex-lookup`)
           return
         case "DUPLICATE":
           toast.info("This file has already been imported", { description: "Showing the existing snapshot." })
@@ -176,16 +177,15 @@ const ImportsNewPage = () => {
             </div>
           )}
 
-          <input
-            type="file"
+          <FileDropInput
+            label="Choose a CSV file, or drag and drop"
+            hint={`CSV files only, up to ${Math.round(PULSE_UPLOAD_MAX_BYTE_SIZE / (1024 * 1024))} MB.`}
             accept=".csv"
-            aria-label="Pulse CSV file"
-            onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+            ariaLabel="Pulse CSV file"
+            value={file}
+            onChange={setFile}
             disabled={isUploading}
           />
-          <Text size="xsmall" className="text-ui-fg-subtle">
-            CSV files only, up to {Math.round(PULSE_UPLOAD_MAX_BYTE_SIZE / (1024 * 1024))} MB.
-          </Text>
 
           {isUploading && (
             <div className="h-1 w-full bg-ui-bg-subtle" role="progressbar" aria-valuenow={Math.round(progress * 100)} aria-valuemin={0} aria-valuemax={100}>
@@ -198,15 +198,16 @@ const ImportsNewPage = () => {
               {errorMessage}
             </Text>
           )}
+        </div>
 
+        <div className="flex items-center justify-between">
+          <Button variant="secondary" onClick={() => navigate("/imports")}>
+            Back to imports
+          </Button>
           <Button onClick={handleSubmit} disabled={!canSubmit} isLoading={isUploading}>
             Upload and import
           </Button>
         </div>
-
-        <Text size="small">
-          <Link to="/imports">Back to imports</Link>
-        </Text>
       </Container>
     </div>
   )

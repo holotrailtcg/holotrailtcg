@@ -147,6 +147,7 @@ export interface ImportedSnapshotEntryInput {
   unitMarketPrice?: string | null
   unitSellingPrice?: string | null
   conditionSource?: string | null
+  conditionCandidate?: string | null
   finishCandidate?: string | null
   specialTreatmentCandidate?: string | null
   rarityCandidate?: string | null
@@ -701,7 +702,7 @@ class TradingCardInventoryModuleService extends MedusaService({
         const chunk = input.rows.slice(offset, offset + 500)
         const chunkIds = chunk.map(() => generateEntityId(undefined, "tcisentry"))
         entryIds.push(...chunkIds)
-        const placeholders = chunk.map(() => `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)`).join(", ")
+        const placeholders = chunk.map(() => `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)`).join(", ")
         const params = chunk.flatMap((row, index) => {
           // A blank/malformed row may have no usable provider reference; a
           // synthetic bounded placeholder keeps the NOT-NULL/length
@@ -713,15 +714,16 @@ class TradingCardInventoryModuleService extends MedusaService({
             row.tradingCardVariantId ?? null, row.quantity ?? 0, row.currencyCode ?? null,
             canonicalDecimal(row.unitAcquisitionCost ?? null), canonicalDecimal(row.unitMarketPrice ?? null),
             canonicalDecimal(row.unitSellingPrice ?? null), row.rowNumber, row.outcome, row.conditionSource ?? null,
-            row.finishCandidate ?? null, row.specialTreatmentCandidate ?? null, row.rarityCandidate ?? null,
-            row.rarityRaw ?? null, row.languageConflict, row.rawFields ? JSON.stringify(row.rawFields) : null,
+            row.conditionCandidate ?? null, row.finishCandidate ?? null, row.specialTreatmentCandidate ?? null,
+            row.rarityCandidate ?? null, row.rarityRaw ?? null, row.languageConflict,
+            row.rawFields ? JSON.stringify(row.rawFields) : null,
           ]
         })
         await manager.execute(
           `insert into trading_card_inventory_snapshot_entry
            (id, inventory_snapshot_id, provider_reference, provider_reference_type, trading_card_variant_id, quantity,
             currency_code, unit_acquisition_cost, unit_market_price, unit_selling_price, row_number, outcome,
-            condition_source, finish_candidate, special_treatment_candidate, rarity_candidate, rarity_raw,
+            condition_source, condition_candidate, finish_candidate, special_treatment_candidate, rarity_candidate, rarity_raw,
             language_conflict, raw_fields) values ${placeholders}`,
           params,
         )
@@ -1111,6 +1113,28 @@ class TradingCardInventoryModuleService extends MedusaService({
               (count(*) - count(distinct provider_reference))::text as duplicate_rows
        from trading_card_inventory_snapshot_entry where inventory_snapshot_id = ? and deleted_at is null`, [snapshotId]
     )
+    const [{ approved_cards, approved_quantity }] = await this.manager_.execute<{ approved_cards: string; approved_quantity: string }>(
+      `select count(distinct e.provider_reference)::text as approved_cards,
+              coalesce(sum(e.quantity), 0)::text as approved_quantity
+       from trading_card_inventory_snapshot_entry e
+       inner join trading_card_inventory_snapshot_entry_match m
+         on m.snapshot_entry_id = e.id and m.matching_status = 'MATCHED' and m.deleted_at is null
+       inner join trading_card_inventory_snapshot s
+         on s.id = e.inventory_snapshot_id and s.deleted_at is null
+       inner join trading_card_inventory_source src
+         on src.id = s.inventory_source_id and src.deleted_at is null
+       inner join trading_card_provider_set_mapping set_mapping
+         on set_mapping.provider = 'PULSE' and set_mapping.game = 'POKEMON'
+        and set_mapping.language = src.language and set_mapping.deleted_at is null
+        and lower(set_mapping.provider_set_code) = lower(replace(split_part(e.provider_reference, '|', 1), 'card:', ''))
+       inner join trading_card_tcgdex_lookup_candidate lookup_candidate
+         on lookup_candidate.provider = 'PULSE' and lookup_candidate.language = src.language
+        and lookup_candidate.tcgdex_set_id = set_mapping.tcgdex_set_id
+        and lookup_candidate.card_number = split_part(split_part(e.provider_reference, '|', 2), '/', 1)
+        and lookup_candidate.match_outcome = 'MATCHED' and lookup_candidate.review_status = 'ACCEPTED'
+        and lookup_candidate.deleted_at is null
+       where e.inventory_snapshot_id = ? and e.deleted_at is null`, [snapshotId]
+    )
     return {
       snapshotId: snapshot.id, inventorySourceId: snapshot.inventory_source_id, status: snapshot.status,
       inventorySourceDisplayName: snapshot.inventory_source_display_name,
@@ -1120,15 +1144,72 @@ class TradingCardInventoryModuleService extends MedusaService({
       byMatchingStatus: Object.fromEntries(byMatchingStatus.map((row) => [row.key, Number(row.count)])),
       byDiagnosticSeverity: Object.fromEntries(byDiagnosticSeverity.map((row) => [row.key, Number(row.count)])),
       uniqueProviderReferences: Number(unique_references), duplicateRowCount: Number(duplicate_rows),
+      approvedCardCount: Number(approved_cards), approvedQuantity: Number(approved_quantity),
     }
+  }
+
+  /**
+   * Distinct trading-card variants this snapshot has actually matched to,
+   * used to gate "assign images before approval" — never includes rows still
+   * unmatched, since those have no variant (and so no image) yet.
+   */
+  async listDistinctMatchedVariantIds(snapshotId: string): Promise<string[]> {
+    idSchema.parse(snapshotId)
+    const rows = await this.manager_.execute<{ trading_card_variant_id: string }>(
+      `select distinct trading_card_variant_id from trading_card_inventory_snapshot_entry_match
+       where inventory_snapshot_id = ? and matching_status = 'MATCHED' and trading_card_variant_id is not null and deleted_at is null`,
+      [snapshotId]
+    )
+    return rows.map((row) => row.trading_card_variant_id)
+  }
+
+  /**
+   * Distinct raw provider references for a snapshot's still-unmatched rows —
+   * the caller parses each into a candidate set code (via `parseProductId`)
+   * to find which sets need a TCGdex mapping before matching can resolve
+   * them. Scoped to unmatched rows only: a row already matched doesn't need
+   * its set re-checked.
+   */
+  async listDistinctUnmatchedProviderReferences(snapshotId: string): Promise<string[]> {
+    idSchema.parse(snapshotId)
+    const rows = await this.manager_.execute<{ provider_reference: string }>(
+      `select distinct e.provider_reference from trading_card_inventory_snapshot_entry e
+       inner join trading_card_inventory_snapshot_entry_match m on m.snapshot_entry_id = e.id and m.deleted_at is null
+       where e.inventory_snapshot_id = ? and e.deleted_at is null
+         and m.matching_status in ('UNMATCHED', 'AMBIGUOUS', 'REVIEW_REQUIRED')`,
+      [snapshotId]
+    )
+    return rows.map((row) => row.provider_reference)
+  }
+
+  /**
+   * Full rows (not just references) for a snapshot's still-unmatched
+   * entries — the parsed-candidate columns a bulk TCGdex-match accept needs
+   * to decide, per row, whether it has enough information to create a
+   * variant automatically. One row per entry, not deduplicated by reference
+   * (unlike `listDistinctUnmatchedProviderReferences`): a duplicate CSV row
+   * still needs its own proposal resolved.
+   */
+  async listUnmatchedSnapshotEntriesForAdmin(snapshotId: string): Promise<Record<string, unknown>[]> {
+    idSchema.parse(snapshotId)
+    return this.manager_.execute<Record<string, unknown>>(
+      `select e.*, m.matching_status, m.matched_via, m.retry_count,
+              m.trading_card_variant_id as matched_trading_card_variant_id
+       from trading_card_inventory_snapshot_entry e
+       inner join trading_card_inventory_snapshot_entry_match m on m.snapshot_entry_id = e.id and m.deleted_at is null
+       where e.inventory_snapshot_id = ? and e.deleted_at is null
+         and m.matching_status in ('UNMATCHED', 'AMBIGUOUS', 'REVIEW_REQUIRED')`,
+      [snapshotId]
+    )
   }
 
   /** Stage 5B.1: paginated, filterable entry listing for the Admin preview screen. */
   async listSnapshotEntriesForAdmin(
     snapshotId: string,
     filters: {
-      outcome?: string; matchingStatus?: string; finishCandidate?: string; specialTreatmentCandidate?: string
+      outcome?: string; reviewStatus?: string; finishCandidate?: string; specialTreatmentCandidate?: string
       rarityCandidate?: string; duplicateReferenceOnly?: boolean; snapshotEntryId?: string; providerReference?: string
+      sortBy?: string; sortDirection?: "asc" | "desc"
     },
     pagination: { limit: number; offset: number },
   ) {
@@ -1136,7 +1217,34 @@ class TradingCardInventoryModuleService extends MedusaService({
     const conditions = ["e.inventory_snapshot_id = ?", "e.deleted_at is null"]
     const params: unknown[] = [snapshotId]
     if (filters.outcome) { conditions.push("e.outcome = ?"); params.push(filters.outcome) }
-    if (filters.matchingStatus) { conditions.push("m.matching_status = ?"); params.push(filters.matchingStatus) }
+    const pendingTcgdexCandidate = `exists (
+      select 1
+      from trading_card_inventory_snapshot review_snapshot
+      inner join trading_card_inventory_source review_source
+        on review_source.id = review_snapshot.inventory_source_id and review_source.deleted_at is null
+      inner join trading_card_provider_set_mapping set_mapping
+        on set_mapping.provider = 'PULSE' and set_mapping.game = 'POKEMON'
+       and set_mapping.language = review_source.language and set_mapping.deleted_at is null
+       and lower(set_mapping.provider_set_code) = lower(replace(split_part(e.provider_reference, '|', 1), 'card:', ''))
+      inner join trading_card_tcgdex_lookup_candidate lookup_candidate
+        on lookup_candidate.provider = 'PULSE' and lookup_candidate.language = review_source.language
+       and lookup_candidate.tcgdex_set_id = set_mapping.tcgdex_set_id
+       and lookup_candidate.card_number = split_part(split_part(e.provider_reference, '|', 2), '/', 1)
+       and lookup_candidate.match_outcome = 'MATCHED' and lookup_candidate.review_status = 'PENDING'
+       and lookup_candidate.deleted_at is null
+      where review_snapshot.id = e.inventory_snapshot_id and review_snapshot.deleted_at is null
+    )`
+    if (filters.reviewStatus === "ACTION_REQUIRED") {
+      conditions.push(`(m.matching_status is null or m.matching_status <> 'MATCHED' or ${pendingTcgdexCandidate})`)
+    } else if (filters.reviewStatus === "AWAITING_REVIEW") {
+      conditions.push(`(m.matching_status = 'REVIEW_REQUIRED' or ${pendingTcgdexCandidate})`)
+    } else if (filters.reviewStatus === "NOT_MATCHED") {
+      conditions.push(`(m.matching_status is null or m.matching_status = 'UNMATCHED') and not ${pendingTcgdexCandidate}`)
+    } else if (filters.reviewStatus === "MATCHED") {
+      conditions.push("m.matching_status = 'MATCHED'")
+    } else if (filters.reviewStatus === "AMBIGUOUS") {
+      conditions.push("m.matching_status = 'AMBIGUOUS'")
+    }
     if (filters.finishCandidate) { conditions.push("e.finish_candidate = ?"); params.push(filters.finishCandidate) }
     if (filters.specialTreatmentCandidate) { conditions.push("e.special_treatment_candidate = ?"); params.push(filters.specialTreatmentCandidate) }
     if (filters.rarityCandidate) { conditions.push("e.rarity_candidate = ?"); params.push(filters.rarityCandidate) }
@@ -1152,17 +1260,71 @@ class TradingCardInventoryModuleService extends MedusaService({
       params.push(snapshotId)
     }
     const where = conditions.join(" and ")
+    const sortExpressions: Record<string, string> = {
+      cardName: "sort_card_name",
+      set: "sort_set_name",
+      quantity: "aggregated_quantity",
+      purchasePrice: "unit_acquisition_cost",
+      marketPrice: "unit_market_price",
+      salePrice: "unit_selling_price",
+      finish: "finish_candidate",
+      variant: "special_treatment_candidate",
+      rarity: "coalesce(rarity_candidate, rarity_raw)",
+      reviewStatus: "sort_review_status",
+    }
+    const sortExpression = sortExpressions[filters.sortBy ?? "cardName"] ?? sortExpressions.cardName
+    const sortDirection = filters.sortDirection === "desc" ? "desc" : "asc"
     const [{ count }] = await this.manager_.execute<{ count: string }>(
-      `select count(*)::text as count from trading_card_inventory_snapshot_entry e
+      `select count(distinct coalesce(e.provider_reference, e.id))::text as count from trading_card_inventory_snapshot_entry e
        left join trading_card_inventory_snapshot_entry_match m on m.snapshot_entry_id = e.id and m.deleted_at is null
        where ${where}`, params,
     )
     const rows = await this.manager_.execute<Record<string, unknown>>(
-      `select e.*, m.matching_status, m.matched_via, m.retry_count,
-              m.trading_card_variant_id as matched_trading_card_variant_id
-       from trading_card_inventory_snapshot_entry e
-       left join trading_card_inventory_snapshot_entry_match m on m.snapshot_entry_id = e.id and m.deleted_at is null
-       where ${where} order by e.row_number asc nulls last limit ? offset ?`,
+      `with ranked_entries as (
+         select e.*, m.matching_status, m.matched_via, m.retry_count,
+                m.trading_card_variant_id as matched_trading_card_variant_id,
+                coalesce(matched_card.name, lookup_candidate.enrichment->>'name', e.provider_reference, '') as sort_card_name,
+                coalesce(matched_set.display_name, set_mapping.tcgdex_set_name, '') as sort_set_name,
+                case
+                  when m.matching_status = 'REVIEW_REQUIRED' or lookup_candidate.id is not null then 'AWAITING_REVIEW'
+                  when m.matching_status = 'MATCHED' then 'MATCHED'
+                  when m.matching_status = 'AMBIGUOUS' then 'AMBIGUOUS'
+                  else 'NOT_MATCHED'
+                end as sort_review_status,
+                (sum(e.quantity) over (partition by coalesce(e.provider_reference, e.id)))::int as aggregated_quantity,
+                row_number() over (
+                  partition by coalesce(e.provider_reference, e.id)
+                  order by e.row_number asc nulls last, e.id asc
+                ) as duplicate_rank
+         from trading_card_inventory_snapshot_entry e
+         left join trading_card_inventory_snapshot_entry_match m on m.snapshot_entry_id = e.id and m.deleted_at is null
+         left join trading_card_inventory_snapshot sort_snapshot
+           on sort_snapshot.id = e.inventory_snapshot_id and sort_snapshot.deleted_at is null
+         left join trading_card_inventory_source sort_source
+           on sort_source.id = sort_snapshot.inventory_source_id and sort_source.deleted_at is null
+         left join trading_card_provider_set_mapping set_mapping
+           on set_mapping.provider = 'PULSE' and set_mapping.game = 'POKEMON'
+          and set_mapping.language = sort_source.language and set_mapping.deleted_at is null
+          and lower(set_mapping.provider_set_code) = lower(replace(split_part(e.provider_reference, '|', 1), 'card:', ''))
+         left join trading_card_tcgdex_lookup_candidate lookup_candidate
+           on lookup_candidate.provider = 'PULSE' and lookup_candidate.language = sort_source.language
+          and lookup_candidate.tcgdex_set_id = set_mapping.tcgdex_set_id
+          and lookup_candidate.card_number = split_part(split_part(e.provider_reference, '|', 2), '/', 1)
+          and lookup_candidate.match_outcome = 'MATCHED' and lookup_candidate.review_status = 'PENDING'
+          and lookup_candidate.deleted_at is null
+         left join trading_card_variant matched_variant
+           on matched_variant.id = m.trading_card_variant_id and matched_variant.deleted_at is null
+         left join trading_card matched_card
+           on matched_card.id = matched_variant.trading_card_id and matched_card.deleted_at is null
+         left join trading_card_set matched_set
+           on matched_set.id = matched_card.card_set_id and matched_set.deleted_at is null
+         where ${where}
+       )
+       select ranked_entries.*, aggregated_quantity as quantity
+       from ranked_entries
+       where duplicate_rank = 1
+       order by ${sortExpression} ${sortDirection} nulls last, row_number asc nulls last
+       limit ? offset ?`,
       [...params, pagination.limit, pagination.offset],
     )
     return { rows, count: Number(count) }
