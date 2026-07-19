@@ -100,7 +100,7 @@ export interface ApplyInventoryProposalInput extends AuditContext {
 
 export interface ApplyInventoryProposalItemResult {
   proposalId: string
-  localApplicationStatus: "APPLIED" | "ALREADY_APPLIED" | "STALE_BASELINE" | "INVALID_STATE" | "OUT_OF_SCOPE"
+  localApplicationStatus: "APPLIED" | "ALREADY_APPLIED" | "STALE_BASELINE" | "INVALID_STATE" | "OUT_OF_SCOPE" | "SNAPSHOT_DISCARDED"
   transactionId: string | null
   priorQuantity: number | null
   resultingQuantity: number | null
@@ -269,6 +269,32 @@ class TradingCardInventoryModuleService extends MedusaService({
         input.reason ?? null, input.source,
       ]
     )
+  }
+
+  /**
+   * Locks a proposal's parent snapshot row (`for update`) and throws if it
+   * has been discarded. `transitionInventorySnapshotStatus` takes the same
+   * row lock when moving a snapshot to DISCARDED, so calling this from
+   * every path that turns a proposal into a real inventory or card-creation
+   * change (review, apply, begin/resolve card-creation claim) serialises
+   * against a concurrent discard: whichever transaction commits its lock
+   * first decides the outcome, and the loser always sees the fresh status —
+   * never a stale "not yet discarded" read that lets stock move after the
+   * snapshot was removed from the working list. A proposal with no snapshot
+   * (`inventory_snapshot_id` is nullable) has nothing to discard, so it's a
+   * no-op.
+   */
+  private async lockAndAssertSnapshotNotDiscarded(manager: TxManager, snapshotId: string | null): Promise<void> {
+    if (!snapshotId) return
+    const [snapshot] = await manager.execute<Record<string, unknown>>(
+      `select status from trading_card_inventory_snapshot where id = ? for update`, [snapshotId]
+    )
+    if (snapshot && snapshot.status === INVENTORY_SNAPSHOT_STATUS.DISCARDED) {
+      throw new MedusaError(
+        MedusaError.Types.NOT_ALLOWED,
+        "This proposal's inventory snapshot has been discarded and can no longer be acted on"
+      )
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -551,6 +577,20 @@ class TradingCardInventoryModuleService extends MedusaService({
         `update trading_card_inventory_snapshot set ${assignments.join(", ")}, updated_at = now() where id = ?`,
         [...values, input.id]
       )
+      if (input.targetStatus === INVENTORY_SNAPSHOT_STATUS.DISCARDED) {
+        // Belt-and-braces alongside the `for update` lock above and the
+        // snapshot-status check every actionable proposal path now takes
+        // (`lockAndAssertSnapshotNotDiscarded`): a live card-creation claim
+        // for one of this snapshot's proposals is no longer honourable once
+        // the snapshot is gone, so clear it here rather than leaving it to
+        // expire on its own lease.
+        await manager.execute(
+          `update trading_card_inventory_proposal
+           set card_creation_claim_token = null, card_creation_claimed_at = null, updated_at = now()
+           where inventory_snapshot_id = ? and card_creation_claim_token is not null and deleted_at is null`,
+          [input.id]
+        )
+      }
       await this.writeAudit(manager, {
         ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_SNAPSHOT, entityId: input.id,
         action: INVENTORY_AUDIT_ACTION.SNAPSHOT_STATUS_CHANGED,
@@ -1596,6 +1636,7 @@ class TradingCardInventoryModuleService extends MedusaService({
             `Proposal ${row.id} is ${currentStatus}, not PENDING — bulk review aborted with no changes`
           )
         }
+        await this.lockAndAssertSnapshotNotDiscarded(manager, (row.inventory_snapshot_id as string | null) ?? null)
       }
       const saved: Record<string, unknown>[] = []
       for (const row of rows) {
@@ -1668,6 +1709,7 @@ class TradingCardInventoryModuleService extends MedusaService({
       | { outcome: "INVALID_STATE"; row: Record<string, unknown> }
       | { outcome: "OUT_OF_SCOPE"; row: Record<string, unknown> }
       | { outcome: "STALE_BASELINE"; row: Record<string, unknown>; liveQuantity: number }
+      | { outcome: "SNAPSHOT_DISCARDED"; row: Record<string, unknown> }
 
     const phaseAResult = await this.manager_.transactional(async (manager): Promise<PhaseAOutcome> => {
       const [proposal] = await manager.execute<Record<string, unknown>>(
@@ -1678,6 +1720,16 @@ class TradingCardInventoryModuleService extends MedusaService({
       const reviewStatus = proposal.review_status as InventoryProposalReviewStatus
       if (reviewStatus === INVENTORY_PROPOSAL_REVIEW_STATUS.APPLIED) {
         return { outcome: "ALREADY_APPLIED", row: proposal }
+      }
+      // Locks the snapshot row (blocking a concurrent discard, and vice
+      // versa — see `lockAndAssertSnapshotNotDiscarded`) before any further
+      // check, so a snapshot discarded moments ago can never let this
+      // request slip through and still move stock.
+      const [snapshot] = await manager.execute<Record<string, unknown>>(
+        `select status from trading_card_inventory_snapshot where id = ? for update`, [proposal.inventory_snapshot_id]
+      )
+      if (snapshot && snapshot.status === INVENTORY_SNAPSHOT_STATUS.DISCARDED) {
+        return { outcome: "SNAPSHOT_DISCARDED", row: proposal }
       }
       if (reviewStatus !== INVENTORY_PROPOSAL_REVIEW_STATUS.APPROVED) {
         return { outcome: "INVALID_STATE", row: proposal }
@@ -1783,6 +1835,21 @@ class TradingCardInventoryModuleService extends MedusaService({
         priorQuantity: phaseAResult.liveQuantity, resultingQuantity: null,
         medusaSyncStatus: phaseAResult.row.medusa_sync_status as MedusaSyncStatus,
         errorCode: "STALE_BASELINE", errorMessage: "The proposal's expected baseline quantity no longer matches the current holding.",
+      }
+    }
+
+    if (phaseAResult.outcome === "SNAPSHOT_DISCARDED") {
+      await this.manager_.transactional(async (manager) => {
+        await this.writeAudit(manager, {
+          ...input, entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_PROPOSAL, entityId: parsed.id,
+          action: INVENTORY_AUDIT_ACTION.PROPOSAL_APPLICATION_REJECTED_SNAPSHOT_DISCARDED,
+        })
+      })
+      return {
+        proposalId: parsed.id, localApplicationStatus: "SNAPSHOT_DISCARDED", transactionId: null,
+        priorQuantity: null, resultingQuantity: null, medusaSyncStatus: MEDUSA_SYNC_STATUS.NOT_APPLICABLE,
+        errorCode: "SNAPSHOT_DISCARDED",
+        errorMessage: "This proposal's inventory snapshot has been discarded and can no longer be applied.",
       }
     }
 
@@ -1983,6 +2050,9 @@ class TradingCardInventoryModuleService extends MedusaService({
       if (proposal.change_kind === INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING && proposal.trading_card_variant_id) {
         return { claimToken: null, alreadyResolved: true, tradingCardVariantId: proposal.trading_card_variant_id as string }
       }
+      // Locks the snapshot row (blocking a concurrent discard, and vice
+      // versa) before minting a new claim — see `lockAndAssertSnapshotNotDiscarded`.
+      await this.lockAndAssertSnapshotNotDiscarded(manager, (proposal.inventory_snapshot_id as string | null) ?? null)
       if (proposal.review_status !== INVENTORY_PROPOSAL_REVIEW_STATUS.PENDING) {
         throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Only a pending proposal can start card creation")
       }
@@ -2033,6 +2103,9 @@ class TradingCardInventoryModuleService extends MedusaService({
         }
         return proposal
       }
+      // Locks the snapshot row (blocking a concurrent discard, and vice
+      // versa) before completing resolution — see `lockAndAssertSnapshotNotDiscarded`.
+      await this.lockAndAssertSnapshotNotDiscarded(manager, (proposal.inventory_snapshot_id as string | null) ?? null)
       if (proposal.change_kind !== INVENTORY_PROPOSAL_CHANGE_KIND.UNRESOLVED_VARIANT || proposal.review_status !== INVENTORY_PROPOSAL_REVIEW_STATUS.PENDING) {
         throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Only a pending, unresolved-variant proposal can be resolved this way")
       }

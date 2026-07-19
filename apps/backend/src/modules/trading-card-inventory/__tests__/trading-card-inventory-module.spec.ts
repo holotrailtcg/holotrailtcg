@@ -858,3 +858,146 @@ describe("Stage 5B.2 proposal review and application", () => {
     })
   })
 })
+
+/**
+ * Codex remediation: a DISCARDED snapshot must never let one of its
+ * proposals go on to review/apply/create-card, and discard racing a
+ * concurrent apply must always land on one consistent outcome — never a
+ * stock movement that happens after the snapshot was removed from the
+ * working list. Every actionable path (`reviewInventoryProposals`,
+ * `applyInventoryProposal`, `beginCardCreationClaim`,
+ * `resolveInventoryProposalVariant`) now locks the proposal's snapshot row
+ * (`for update`) and checks it hasn't been discarded — the same row lock
+ * `transitionInventorySnapshotStatus` takes when moving a snapshot to
+ * DISCARDED, so the two can never race past each other.
+ */
+describe("discard vs proposal actionability (Stage 5B.3 remediation)", () => {
+  async function draftSnapshotWithProposal(sourceId: string) {
+    const snapshot = await service.createInventorySnapshot({ inventorySourceId: sourceId, actor: "test-actor", source: "MANUAL" })
+    const proposal = await service.createInventoryProposal({
+      inventorySourceId: sourceId, inventorySnapshotId: snapshot.id, tradingCardVariantId: `tcvar_${suffix()}`,
+      changeKind: "NEW_HOLDING", previousQuantity: 0, proposedQuantity: 5, actor: "test-actor", source: "MANUAL",
+    })
+    return { snapshot, proposal }
+  }
+
+  /** Mirrors `unresolvedVariantProposal` above, scoped to this describe block. */
+  async function unresolvedVariantProposalOnSnapshot(sourceId: string, providerReference: string) {
+    const snapshot = await service.createInventorySnapshot({ inventorySourceId: sourceId, actor: "test-actor", source: "MANUAL" })
+    await service.addInventorySnapshotEntries({
+      snapshotId: snapshot.id, actor: "test-actor", source: "MANUAL",
+      entries: [{
+        providerReference, providerReferenceType: "PULSE_PRODUCT_ID", tradingCardVariantId: null,
+        quantity: 1, currencyCode: "GBP", unitAcquisitionCost: "1.00", unitMarketPrice: "2.00", unitSellingPrice: "3.00",
+      }],
+    })
+    await service.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "VALIDATED", actor: "test-actor", source: "MANUAL" })
+    const [entry] = await service.listInventorySnapshotEntries({ inventory_snapshot_id: snapshot.id, provider_reference: providerReference })
+    await service.recordSnapshotEntryMatch({
+      snapshotEntryId: entry.id, inventorySnapshotId: snapshot.id, matchingStatus: "UNMATCHED", matchedVia: "NONE",
+      diagnostics: [], actor: "test-actor", source: "SYSTEM",
+    })
+    await service.reconcileInventorySnapshot({ inventorySourceId: sourceId, snapshotId: snapshot.id, actor: "reconciler", source: "SYSTEM" })
+    const [proposal] = await service.listInventoryProposals({ inventory_snapshot_id: snapshot.id, provider_reference: providerReference })
+    return { snapshot, proposal }
+  }
+
+  it("a discarded snapshot's PENDING proposal cannot be approved", async () => {
+    const source = await createSource()
+    const { snapshot, proposal } = await draftSnapshotWithProposal(source.id)
+    await service.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "DISCARDED", actor: "admin", source: "MANUAL" })
+
+    await expect(service.reviewInventoryProposals({
+      ids: [proposal.id], targetStatus: "APPROVED", actor: "reviewer", source: "MANUAL",
+    })).rejects.toThrow(/discarded/)
+
+    const refreshed = await service.retrieveInventoryProposal(proposal.id)
+    expect(refreshed.review_status).toBe("PENDING")
+  }, 30000)
+
+  it("a discarded snapshot's APPROVED proposal cannot be applied, and moves no stock", async () => {
+    const source = await createSource()
+    const { snapshot, proposal } = await draftSnapshotWithProposal(source.id)
+    const [approved] = await service.reviewInventoryProposals({
+      ids: [proposal.id], targetStatus: "APPROVED", actor: "reviewer", source: "MANUAL",
+    })
+    await service.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "DISCARDED", actor: "admin", source: "MANUAL" })
+
+    const result = await service.applyInventoryProposal({ id: approved.id, actor: "applier", source: "MANUAL" })
+    expect(result.localApplicationStatus).toBe("SNAPSHOT_DISCARDED")
+    expect(result.errorCode).toBe("SNAPSHOT_DISCARDED")
+
+    const [, holdingCount] = await service.listAndCountInventoryHoldings({
+      inventory_source_id: source.id, trading_card_variant_id: proposal.trading_card_variant_id,
+    })
+    expect(holdingCount).toBe(0)
+    const [, transactionCount] = await service.listAndCountInventoryTransactions({ trading_card_variant_id: proposal.trading_card_variant_id })
+    expect(transactionCount).toBe(0)
+
+    const stillApproved = await service.retrieveInventoryProposal(approved.id)
+    expect(stillApproved.review_status).toBe("APPROVED")
+  }, 30000)
+
+  it("a discarded snapshot's UNRESOLVED_VARIANT proposal refuses a new card-creation claim", async () => {
+    const source = await createSource()
+    const { snapshot, proposal } = await unresolvedVariantProposalOnSnapshot(source.id, `discard-claim-${suffix()}`)
+    await service.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "DISCARDED", actor: "admin", source: "MANUAL" })
+
+    await expect(service.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer", source: "MANUAL" }))
+      .rejects.toThrow(/discarded/)
+
+    const refreshed = await service.retrieveInventoryProposal(proposal.id)
+    expect(refreshed.card_creation_claim_token).toBeNull()
+  }, 30000)
+
+  it("a claim started before discard is cleared by the discard and cannot complete resolution afterwards", async () => {
+    const source = await createSource()
+    const { snapshot, proposal } = await unresolvedVariantProposalOnSnapshot(source.id, `discard-resolve-${suffix()}`)
+    const claim = await service.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer", source: "MANUAL" })
+    expect(claim.claimToken).not.toBeNull()
+
+    await service.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "DISCARDED", actor: "admin", source: "MANUAL" })
+
+    const refreshed = await service.retrieveInventoryProposal(proposal.id)
+    expect(refreshed.card_creation_claim_token).toBeNull()
+    expect(refreshed.card_creation_claimed_at).toBeNull()
+
+    await expect(service.resolveInventoryProposalVariant({
+      proposalId: proposal.id, claimToken: claim.claimToken, tradingCardVariantId: `tcvar_${suffix()}`, actor: "reviewer", source: "MANUAL",
+    })).rejects.toThrow(/discarded/)
+  }, 30000)
+
+  it("discard versus apply concurrency produces one safe terminal outcome with no post-discard stock movement", async () => {
+    const source = await createSource()
+    const { snapshot, proposal } = await draftSnapshotWithProposal(source.id)
+    const [approved] = await service.reviewInventoryProposals({
+      ids: [proposal.id], targetStatus: "APPROVED", actor: "reviewer", source: "MANUAL",
+    })
+
+    const [applyResult, discarded] = await Promise.all([
+      service.applyInventoryProposal({ id: approved.id, actor: "applier", source: "MANUAL" }),
+      service.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "DISCARDED", actor: "admin", source: "MANUAL" }),
+    ])
+
+    // Discard's own transition never depends on proposal state, so it always
+    // succeeds regardless of how the race against apply resolved.
+    expect(discarded.status).toBe("DISCARDED")
+    expect(["APPLIED", "SNAPSHOT_DISCARDED"]).toContain(applyResult.localApplicationStatus)
+
+    const [, holdingCount] = await service.listAndCountInventoryHoldings({
+      inventory_source_id: source.id, trading_card_variant_id: proposal.trading_card_variant_id,
+    })
+    const [, transactionCount] = await service.listAndCountInventoryTransactions({ trading_card_variant_id: proposal.trading_card_variant_id })
+
+    if (applyResult.localApplicationStatus === "APPLIED") {
+      // Apply won the race and committed before discard took effect — a
+      // legitimate pre-discard movement, exactly one of each row.
+      expect(holdingCount).toBe(1)
+      expect(transactionCount).toBe(1)
+    } else {
+      // Discard won the race — no stock movement ever happened.
+      expect(holdingCount).toBe(0)
+      expect(transactionCount).toBe(0)
+    }
+  }, 30000)
+})
