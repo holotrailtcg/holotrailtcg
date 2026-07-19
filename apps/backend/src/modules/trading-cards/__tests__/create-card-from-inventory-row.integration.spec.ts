@@ -313,14 +313,18 @@ describe("createCardFromInventoryRowWorkflow — orphan-safety and cross-proposa
   )
 
   it(
-    "leaves no orphan CardSet, TradingCard, Product, TradingCardVariant, ProductVariant or InventoryItem when the final proposal-resolution step fails",
+    "when the final proposal-resolution step fails, the proposal's own claim is released but its already-created chain is deliberately left in place (ADR 0013)",
     async () => {
       // A stale claim token is a genuine, deterministic failure at the very
       // last step (`resolve-proposal`) — everything before it (CardSet,
       // TradingCard+Product, TradingCardVariant+ProductVariant+InventoryItem)
-      // has already been created by the time it runs. This exercises full
-      // end-to-end orchestrator rollback across every earlier step's own
-      // compensation, not just one step's inline catch-cleanup in isolation.
+      // has already been created by the time it runs. Per ADR 0013, steps
+      // 1–3 register no compensation at all, so that chain is expected to
+      // survive this failure (see the "compensation never deletes a
+      // discoverable row" describe block above for the full assertions on
+      // what remains) — this test's own focus is the proposal itself: its
+      // claim must not be left dangling, and it must never have been
+      // resolved to any variant.
       const location = await createStockLocation(`Loc ${suffix()}`)
       process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
       try {
@@ -343,14 +347,11 @@ describe("createCardFromInventoryRowWorkflow — orphan-safety and cross-proposa
           input: { ...input, proposalId: proposal.id, claimToken: "not-the-real-claim-token" },
         })).rejects.toMatchObject({ message: expect.stringMatching(/stale/i) })
 
+        // The chain steps 1–3 created is left in place, not orphan-free.
         const matchingCardSets = await cards.listCardSets({ provider_set_code: setCode })
-        expect(matchingCardSets).toHaveLength(0)
+        expect(matchingCardSets).toHaveLength(1)
         const matchingCards = await cards.listTradingCards({ card_number: cardNumber })
-        expect(matchingCards).toHaveLength(0)
-
-        const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
-        const orphanProducts = await products.listProducts({ title: input.name })
-        expect(orphanProducts).toHaveLength(0)
+        expect(matchingCards).toHaveLength(1)
 
         // The claim itself must not be left dangling on a proposal that never resolved.
         const refreshedProposal = await inventory.retrieveInventoryProposal(proposal.id)
@@ -481,16 +482,342 @@ describe("createCardFromInventoryRowWorkflow — orphan-safety and cross-proposa
         expect(matchingCards).toHaveLength(1)
         expect(matchingCards[0].id).toBe(resultB.tradingCardId)
 
-        // Card A's own creation was fully rolled back — it never persisted.
+        // Card A's own creation is deliberately left in place (ADR 0013) —
+        // not deleted, and not confused with card B's.
         const orphanCardA = await cards.listTradingCards({
           card_set_id: matchingCardSets[0].id, card_number_normalised: inputA.cardNumber,
         })
-        expect(orphanCardA).toHaveLength(0)
+        expect(orphanCardA).toHaveLength(1)
+        expect(orphanCardA[0].id).not.toBe(resultB.tradingCardId)
       } finally {
         delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
       }
     },
     60000,
+  )
+})
+
+describe("createCardFromInventoryRowWorkflow — compensation never deletes a discoverable row (Codex remediation, second pass)", () => {
+  /**
+   * Deterministically forces the exact interleaving the Codex re-review
+   * flagged as unsafe under the previous (check-then-delete + bounded delay)
+   * remediation, using real await barriers rather than timing:
+   *
+   *   1. Request A runs steps 1–3 for real (creates the CardSet/TradingCard/
+   *      TradingCardVariant/Product/ProductVariant/InventoryItem chain), then
+   *      is paused immediately before its own step 4 (`resolve-proposal`).
+   *   2. Request B is only started once (1) is confirmed — its own steps 1–3
+   *      run for real and *discover* A's already-committed variant via the
+   *      same identity lookup `resolveOrCreateVariantStep` always performs
+   *      (this is "B discovers the variant but has not resolved its
+   *      proposal" — B has not yet reached step 4 either). B is paused there.
+   *   3. A is released first, with a deliberately wrong claim token — its
+   *      step 4 throws, and the orchestrator runs A's full compensation
+   *      chain (steps 3, 2, 1) to completion before this promise settles.
+   *   4. Only after A has fully failed and compensated is B released, with
+   *      its genuine claim token, to complete its own step 4.
+   *
+   * Under the old check-then-delete guard this would have been unsafe even
+   * with the 300ms grace delay: at the moment A's compensation ran, B's own
+   * proposal had *not yet resolved* to the variant (it had only discovered
+   * it), so the guard's "does any proposal already reference this variant?"
+   * lookup would find none and delete it out from under B, no matter how
+   * long A waited first. The fix removes the check-then-delete entirely, so
+   * this ordering is exercised and asserted safe regardless of timing.
+   */
+  it(
+    "B discovers the variant, A fails and fully compensates, then B completes — B's whole chain survives untouched",
+    async () => {
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const original = (inventory.resolveInventoryProposalVariant as any).bind(inventory)
+      const spy = jest.spyOn(inventory, "resolveInventoryProposalVariant")
+      try {
+        const source = await createSource()
+        const setCode = `set_deterministic_${suffix()}`
+        const cardNumber = numericSuffix()
+        const shared = baseCardInput({ cardSetProviderSetCode: setCode, cardNumber, name: "Deterministic Barrier Card" })
+
+        const proposalA = await unresolvedVariantProposal(source.id, `deterministic-a-${suffix()}`)
+        const proposalB = await unresolvedVariantProposal(source.id, `deterministic-b-${suffix()}`)
+        const claimB = await inventory.beginCardCreationClaim({ proposalId: proposalB.id, actor: "reviewer-b", source: "MANUAL" })
+
+        let releaseA: () => void
+        const gateA = new Promise<void>((resolve) => { releaseA = resolve })
+        let aReachedStep4Resolve: () => void
+        const aReachedStep4 = new Promise<void>((resolve) => { aReachedStep4Resolve = resolve })
+        let releaseB: () => void
+        const gateB = new Promise<void>((resolve) => { releaseB = resolve })
+        let bReachedStep4Resolve: () => void
+        const bReachedStep4 = new Promise<void>((resolve) => { bReachedStep4Resolve = resolve })
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        spy.mockImplementation(async (input: any) => {
+          if (input.proposalId === proposalA.id) {
+            aReachedStep4Resolve()
+            await gateA
+          } else if (input.proposalId === proposalB.id) {
+            bReachedStep4Resolve()
+            await gateB
+          }
+          return original(input)
+        })
+
+        const runA = createCardFromInventoryRowWorkflow(container).run({
+          input: { ...shared, proposalId: proposalA.id, claimToken: "not-the-real-claim-token" },
+        })
+        await aReachedStep4
+
+        const runB = createCardFromInventoryRowWorkflow(container).run({
+          input: { ...shared, proposalId: proposalB.id, claimToken: claimB.claimToken as string },
+        })
+        await bReachedStep4
+
+        // A fails and fully compensates (including its full reverse-order
+        // step 3/2/1 compensation chain) before B is allowed to proceed.
+        releaseA!()
+        await expect(runA).rejects.toMatchObject({ message: expect.stringMatching(/stale/i) })
+
+        // Only now does B resolve its own proposal.
+        releaseB!()
+        const { result: resultB } = await runB
+
+        const matchingCardSets = await cards.listCardSets({ provider_set_code: setCode })
+        expect(matchingCardSets).toHaveLength(1)
+        const matchingCards = await cards.listTradingCards({
+          card_set_id: matchingCardSets[0].id, card_number_normalised: shared.cardNumber,
+        })
+        expect(matchingCards).toHaveLength(1)
+        expect(matchingCards[0].id).toBe(resultB.tradingCardId)
+        const matchingVariants = await cards.listTradingCardVariants({
+          trading_card_id: matchingCards[0].id, condition: shared.condition, finish: shared.finish, special_treatment: shared.specialTreatment,
+        })
+        expect(matchingVariants).toHaveLength(1)
+        expect(matchingVariants[0].id).toBe(resultB.tradingCardVariantId)
+
+        const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+        const product = await products.retrieveProduct(resultB.productId, { relations: ["variants"] })
+        expect(product.variants).toHaveLength(1)
+        expect(product.variants?.[0]?.id).toBe(resultB.productVariantId)
+
+        const inventoryService = container.resolve<IInventoryService>(Modules.INVENTORY)
+        const query = container.resolve(ContainerRegistrationKeys.QUERY)
+        const { data: variantChain } = await query.graph({
+          entity: "trading_card_variant",
+          fields: ["id", "product_variant.id", "product_variant.inventory_items.inventory_item_id"],
+          filters: { id: resultB.tradingCardVariantId },
+        })
+        const productVariant = variantChain[0]?.product_variant as { id?: string; inventory_items?: Array<{ inventory_item_id?: string }> } | null
+        expect(productVariant?.id).toBe(resultB.productVariantId)
+        const inventoryItemId = productVariant?.inventory_items?.[0]?.inventory_item_id as string
+        expect(inventoryItemId).toBeTruthy()
+        // Still retrievable — never deleted by A's compensation.
+        await expect(inventoryService.retrieveInventoryItem(inventoryItemId)).resolves.toMatchObject({ id: inventoryItemId })
+
+        const refreshedB = await inventory.retrieveInventoryProposal(proposalB.id)
+        expect(refreshedB).toMatchObject({ change_kind: "NEW_HOLDING", trading_card_variant_id: resultB.tradingCardVariantId, card_creation_claim_token: null })
+      } finally {
+        spy.mockRestore()
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    },
+    60000,
+  )
+
+  it(
+    "two different cards sharing a newly created CardSet: card A fails and compensates before card B completes — the shared CardSet and card B's whole chain survive",
+    async () => {
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const original = (inventory.resolveInventoryProposalVariant as any).bind(inventory)
+      const spy = jest.spyOn(inventory, "resolveInventoryProposalVariant")
+      try {
+        const source = await createSource()
+        const setCode = `set_shared_deterministic_${suffix()}`
+        const inputA = baseCardInput({ cardSetProviderSetCode: setCode, cardNumber: numericSuffix(), name: "Shared Deterministic Card A" })
+        const inputB = baseCardInput({ cardSetProviderSetCode: setCode, cardNumber: numericSuffix(), name: "Shared Deterministic Card B" })
+
+        const proposalA = await unresolvedVariantProposal(source.id, `shared-deterministic-a-${suffix()}`)
+        const proposalB = await unresolvedVariantProposal(source.id, `shared-deterministic-b-${suffix()}`)
+        const claimB = await inventory.beginCardCreationClaim({ proposalId: proposalB.id, actor: "reviewer-b", source: "MANUAL" })
+
+        let releaseA: () => void
+        const gateA = new Promise<void>((resolve) => { releaseA = resolve })
+        let aReachedStep4Resolve: () => void
+        const aReachedStep4 = new Promise<void>((resolve) => { aReachedStep4Resolve = resolve })
+        let releaseB: () => void
+        const gateB = new Promise<void>((resolve) => { releaseB = resolve })
+        let bReachedStep4Resolve: () => void
+        const bReachedStep4 = new Promise<void>((resolve) => { bReachedStep4Resolve = resolve })
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        spy.mockImplementation(async (input: any) => {
+          if (input.proposalId === proposalA.id) {
+            aReachedStep4Resolve()
+            await gateA
+          } else if (input.proposalId === proposalB.id) {
+            bReachedStep4Resolve()
+            await gateB
+          }
+          return original(input)
+        })
+
+        // A creates the CardSet (it starts first and there is nothing to
+        // discover yet), then its own new TradingCard/TradingCardVariant.
+        const runA = createCardFromInventoryRowWorkflow(container).run({
+          input: { ...inputA, proposalId: proposalA.id, claimToken: "not-the-real-claim-token" },
+        })
+        await aReachedStep4
+
+        // B discovers A's already-committed CardSet by identity lookup and
+        // creates its own, different TradingCard under it.
+        const runB = createCardFromInventoryRowWorkflow(container).run({
+          input: { ...inputB, proposalId: proposalB.id, claimToken: claimB.claimToken as string },
+        })
+        await bReachedStep4
+
+        releaseA!()
+        await expect(runA).rejects.toMatchObject({ message: expect.stringMatching(/stale/i) })
+
+        releaseB!()
+        const { result: resultB } = await runB
+
+        // Exactly one CardSet — A's failed request's now-compensation-free
+        // step never removes it, and B never created a duplicate.
+        const matchingCardSets = await cards.listCardSets({ provider_set_code: setCode })
+        expect(matchingCardSets).toHaveLength(1)
+
+        const matchingCardB = await cards.listTradingCards({
+          card_set_id: matchingCardSets[0].id, card_number_normalised: inputB.cardNumber,
+        })
+        expect(matchingCardB).toHaveLength(1)
+        expect(matchingCardB[0].id).toBe(resultB.tradingCardId)
+
+        // Card A's own chain — created by the failed request — is left in
+        // place too (deliberately, per ADR 0013), not deleted and not
+        // confused with card B's.
+        const matchingCardA = await cards.listTradingCards({
+          card_set_id: matchingCardSets[0].id, card_number_normalised: inputA.cardNumber,
+        })
+        expect(matchingCardA).toHaveLength(1)
+        expect(matchingCardA[0].id).not.toBe(resultB.tradingCardId)
+      } finally {
+        spy.mockRestore()
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    },
+    60000,
+  )
+
+  it(
+    "a failed request leaves its whole chain in place — CardSet, TradingCard, TradingCardVariant, Product, ProductVariant and InventoryItem all remain retrievable",
+    async () => {
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      try {
+        const source = await createSource()
+        const setCode = `set_leaves_chain_${suffix()}`
+        const cardNumber = numericSuffix()
+        const input = baseCardInput({ cardSetProviderSetCode: setCode, cardNumber, name: "Leaves Chain Card" })
+        const proposal = await unresolvedVariantProposal(source.id, `leaves-chain-${suffix()}`)
+        await inventory.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer", source: "MANUAL" })
+
+        await expect(createCardFromInventoryRowWorkflow(container).run({
+          input: { ...input, proposalId: proposal.id, claimToken: "not-the-real-claim-token" },
+        })).rejects.toMatchObject({ message: expect.stringMatching(/stale/i) })
+
+        const [cardSet] = await cards.listCardSets({ provider_set_code: setCode })
+        expect(cardSet).toBeTruthy()
+        const [tradingCard] = await cards.listTradingCards({ card_set_id: cardSet.id, card_number_normalised: cardNumber })
+        expect(tradingCard).toBeTruthy()
+        const [variant] = await cards.listTradingCardVariants({
+          trading_card_id: tradingCard.id, condition: input.condition, finish: input.finish, special_treatment: input.specialTreatment,
+        })
+        expect(variant).toBeTruthy()
+
+        const query = container.resolve(ContainerRegistrationKeys.QUERY)
+        const { data: variantChain } = await query.graph({
+          entity: "trading_card_variant",
+          fields: ["id", "product_variant.id", "product_variant.inventory_items.inventory_item_id"],
+          filters: { id: variant.id },
+        })
+        const productVariant = variantChain[0]?.product_variant as { id?: string; inventory_items?: Array<{ inventory_item_id?: string }> } | null
+        expect(productVariant?.id).toBeTruthy()
+        const inventoryItemId = productVariant?.inventory_items?.[0]?.inventory_item_id as string
+        expect(inventoryItemId).toBeTruthy()
+
+        const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+        const productId = await (async () => {
+          const { data } = await query.graph({ entity: "trading_card", fields: ["id", "product.id"], filters: { id: tradingCard.id } })
+          return (data[0]?.product as { id?: string } | null)?.id as string
+        })()
+        expect(productId).toBeTruthy()
+        await expect(products.retrieveProduct(productId)).resolves.toMatchObject({ id: productId })
+        await expect(products.retrieveProductVariant(productVariant!.id as string)).resolves.toMatchObject({ id: productVariant!.id })
+
+        const inventoryService = container.resolve<IInventoryService>(Modules.INVENTORY)
+        await expect(inventoryService.retrieveInventoryItem(inventoryItemId)).resolves.toMatchObject({ id: inventoryItemId })
+      } finally {
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    },
+    30000,
+  )
+
+  it(
+    "retrying the failed proposal with its genuine claim reuses the preserved chain — no duplicate CardSet, TradingCard or TradingCardVariant",
+    async () => {
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      try {
+        const source = await createSource()
+        const setCode = `set_retry_reuse_${suffix()}`
+        const cardNumber = numericSuffix()
+        const input = baseCardInput({ cardSetProviderSetCode: setCode, cardNumber, name: "Retry Reuse Card" })
+        const proposal = await unresolvedVariantProposal(source.id, `retry-reuse-${suffix()}`)
+        const claim = await inventory.beginCardCreationClaim({ proposalId: proposal.id, actor: "reviewer", source: "MANUAL" })
+
+        // First attempt: deliberately the wrong claim token, so step 4 fails
+        // and the chain created by steps 1–3 is left behind, exactly as
+        // ADR 0013 describes.
+        await expect(createCardFromInventoryRowWorkflow(container).run({
+          input: { ...input, proposalId: proposal.id, claimToken: "not-the-real-claim-token" },
+        })).rejects.toMatchObject({ message: expect.stringMatching(/stale/i) })
+
+        const [orphanCardSet] = await cards.listCardSets({ provider_set_code: setCode })
+        const [orphanCard] = await cards.listTradingCards({ card_set_id: orphanCardSet.id, card_number_normalised: cardNumber })
+        const [orphanVariant] = await cards.listTradingCardVariants({
+          trading_card_id: orphanCard.id, condition: input.condition, finish: input.finish, special_treatment: input.specialTreatment,
+        })
+        expect(orphanCardSet && orphanCard && orphanVariant).toBeTruthy()
+
+        // Retry the very same proposal, this time with its real (still-held,
+        // never expired) claim token.
+        const { result } = await createCardFromInventoryRowWorkflow(container).run({
+          input: { ...input, proposalId: proposal.id, claimToken: claim.claimToken as string },
+        })
+
+        expect(result.tradingCardId).toBe(orphanCard.id)
+        expect(result.tradingCardVariantId).toBe(orphanVariant.id)
+
+        const matchingCardSets = await cards.listCardSets({ provider_set_code: setCode })
+        expect(matchingCardSets).toHaveLength(1)
+        const matchingCards = await cards.listTradingCards({ card_set_id: orphanCardSet.id, card_number_normalised: cardNumber })
+        expect(matchingCards).toHaveLength(1)
+        const matchingVariants = await cards.listTradingCardVariants({
+          trading_card_id: orphanCard.id, condition: input.condition, finish: input.finish, special_treatment: input.specialTreatment,
+        })
+        expect(matchingVariants).toHaveLength(1)
+
+        const refreshedProposal = await inventory.retrieveInventoryProposal(proposal.id)
+        expect(refreshedProposal).toMatchObject({ change_kind: "NEW_HOLDING", trading_card_variant_id: result.tradingCardVariantId, card_creation_claim_token: null })
+      } finally {
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    },
+    30000,
   )
 })
 
@@ -511,9 +838,16 @@ describe("Stage 5B.2 stock-location policy, reused by card creation (Phase 7)", 
         input: { ...input, proposalId: proposal.id, claimToken: claim.claimToken as string },
       })).rejects.toMatchObject({ message: expect.stringMatching(/AMBIGUOUS_STOCK_LOCATION/) })
 
-      // No orphan chain left behind by the failed attempt.
+      // The CardSet step 1 already created is deliberately left in place
+      // (ADR 0013) — step 1 has already returned by the time step 2 fails,
+      // so there is nothing for the orchestrator to compensate even in
+      // principle. The TradingCard/Product never persisted here, though:
+      // step 2's own failure happens *inside* its single invocation, before
+      // it ever returns a `StepResponse` for the orchestrator to see, so
+      // its own inline catch-cleanup (a separate, narrower case than
+      // cross-step compensation — see the workflow file) still applies.
       const matchingCardSets = await cards.listCardSets({ provider_set_code: setCode })
-      expect(matchingCardSets).toHaveLength(0)
+      expect(matchingCardSets).toHaveLength(1)
       const matchingCards = await cards.listTradingCards({ card_number: cardNumber })
       expect(matchingCards).toHaveLength(0)
       const products = container.resolve<IProductModuleService>(Modules.PRODUCT)

@@ -99,20 +99,37 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
- * Codex remediation: a brief, bounded pause before each compensation's
- * atomic "still unreferenced?" check — not a substitute for that check
- * (which is what actually makes the delete safe), but a narrowing of the
- * window in which it runs. Without it, a request whose own failure comes
- * fast (e.g. an already-stale claim caught on the very first check, no real
- * work in between) can reach its own compensation before a genuinely
- * concurrent, slightly-slower request has finished the several real
- * round-trips (product/variant creation, proposal resolution) needed to
- * become the dependent the atomic check is looking for. This cannot make
- * the guard itself unsafe — the guard is a single atomic statement either
- * way — it only ever gives a real concurrent winner more time to finish
- * before an unrelated failure's cleanup runs.
+ * Codex remediation (second pass): steps 1–3 below no longer register a
+ * compensation callback at all. A CardSet/TradingCard/TradingCardVariant
+ * (and the Product/ProductVariant/InventoryItem created alongside them)
+ * become discoverable — by identity lookup, exactly like each step's own
+ * "does this already exist?" query above — the moment they commit, not the
+ * moment the whole workflow finishes. A "still unreferenced?" check
+ * immediately before a delete is always a check-then-delete: safe against
+ * nothing that starts existing *after* the check, including a concurrent
+ * request's discovery. A bounded delay before that check (the previous
+ * remediation) only ever changed the odds, never closed the window — see
+ * the Codex re-review this addresses. There is no cross-step/cross-module
+ * transaction available to make check-and-delete atomic here (each workflow
+ * step commits independently; see `resolveOrCreateVariantStep`'s
+ * compensation history below for why a same-module CHECK-based guard, which
+ * *is* atomic, was never available for this one).
+ *
+ * So compensation for these three steps does nothing: a failed request
+ * leaves its created chain in place, exactly as if it had succeeded, and
+ * relies on the same identity lookups every step already performs to make
+ * that chain retrievable and reusable by a retry of the same request or by
+ * an unrelated concurrent request for the same card. This trades a
+ * possible unreferenced row after a failed, never-retried request for the
+ * guarantee that a live, reused chain is never deleted out from under
+ * whoever is depending on it.
+ *
+ * Sweeping up rows that truly are orphaned (created, then never claimed by
+ * any successful request) is deliberately deferred, not implemented here —
+ * see ADR 0013. It needs a durable ownership/lease/reference mechanism (an
+ * async reconciliation job reasoning about a retention window), not another
+ * ad-hoc check-then-delete on the synchronous compensation path.
  */
-const COMPENSATION_REUSE_GRACE_MS = 300
 
 /**
  * A single row insert (e.g. a TradingCard or TradingCardVariant) and the
@@ -183,35 +200,25 @@ async function retrieveProductVariantOwner(container: MedusaContainer, productVa
 // Step 1: resolve-or-create CardSet
 // ---------------------------------------------------------------------
 
-interface CardSetCompensation { id: string; createdByThisRun: boolean }
-
 const resolveOrCreateCardSetStep = createStep(
   "resolve-or-create-card-set",
   async (input: CreateCardFromInventoryRowInput, { container }) => {
     const cards = container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
     const filters = { game: input.cardGame, language: input.cardLanguage, provider_set_code: input.cardSetProviderSetCode }
     const [existing] = await cards.listCardSets(filters, { take: 1 })
-    if (existing) return new StepResponse({ cardSetId: existing.id }, { id: existing.id, createdByThisRun: false })
+    if (existing) return new StepResponse({ cardSetId: existing.id })
     try {
       const created = await cards.createCardSets({ ...filters, display_name: input.cardSetDisplayName })
-      return new StepResponse({ cardSetId: created.id }, { id: created.id, createdByThisRun: true })
+      return new StepResponse({ cardSetId: created.id })
     } catch (error) {
       // Concurrent creation race: another request created the same set between our lookup and insert.
       const [afterRace] = await cards.listCardSets(filters, { take: 1 })
-      if (afterRace) return new StepResponse({ cardSetId: afterRace.id }, { id: afterRace.id, createdByThisRun: false })
+      if (afterRace) return new StepResponse({ cardSetId: afterRace.id })
       throw error
     }
   },
-  async (compensation: CardSetCompensation | undefined, { container }) => {
-    if (!compensation?.createdByThisRun) return
-    const cards = container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
-    await delay(COMPENSATION_REUSE_GRACE_MS)
-    // Atomically skips the delete if a concurrent request has since created a
-    // TradingCard under this CardSet (e.g. a different card in the same set,
-    // or the same card reused by a request that went on to succeed) — see
-    // `deleteCardSetIfUnreferenced`.
-    await cards.deleteCardSetIfUnreferenced(compensation.id)
-  },
+  // No compensation — see the remediation note above `delay()`. A CardSet
+  // this step creates is left in place on a later step's failure.
 )
 
 // ---------------------------------------------------------------------
@@ -219,13 +226,6 @@ const resolveOrCreateCardSetStep = createStep(
 // ---------------------------------------------------------------------
 
 interface FreshProductVariant { productVariantId: string; inventoryItemId: string; dimensions: VariantDimensions }
-interface CardCompensation {
-  tradingCardId: string | null
-  productId: string | null
-  createdTradingCard: boolean
-  createdProduct: boolean
-  createdInventoryItemId: string | null
-}
 
 async function resolveProductIdForTradingCard(
   container: MedusaContainer, tradingCardId: string,
@@ -248,19 +248,13 @@ const resolveOrCreateCardStep = createStep(
   async (input: CreateCardFromInventoryRowInput & { cardSetId: string }, { container }) => {
     const cards = container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
     const numberForms = cardNumberForms(input.cardNumber)
-    const noOpCompensation: CardCompensation = {
-      tradingCardId: null, productId: null, createdTradingCard: false, createdProduct: false, createdInventoryItemId: null,
-    }
 
     const [existingCard] = await cards.listTradingCards(
       { card_set_id: input.cardSetId, card_number_normalised: numberForms.normalised }, { take: 1 },
     )
     if (existingCard) {
       const productId = await resolveProductIdForTradingCard(container, existingCard.id)
-      return new StepResponse(
-        { tradingCardId: existingCard.id, productId, freshProductVariant: null as FreshProductVariant | null },
-        noOpCompensation,
-      )
+      return new StepResponse({ tradingCardId: existingCard.id, productId, freshProductVariant: null as FreshProductVariant | null })
     }
 
     // Brand-new card: create the Medusa Product with its first variant, then
@@ -303,10 +297,7 @@ const resolveOrCreateCardStep = createStep(
         productVariantId, inventoryItemId,
         dimensions: { condition: input.condition, finish: input.finish, specialTreatment: input.specialTreatment },
       }
-      return new StepResponse(
-        { tradingCardId: tradingCard.id, productId: product.id, freshProductVariant },
-        { tradingCardId: tradingCard.id, productId: product.id, createdTradingCard: true, createdProduct: true, createdInventoryItemId: inventoryItemId } satisfies CardCompensation,
-      )
+      return new StepResponse({ tradingCardId: tradingCard.id, productId: product.id, freshProductVariant })
     } catch (error) {
       // This step is about to throw without returning a StepResponse, so the
       // orchestrator will never learn what was created above and will never
@@ -334,46 +325,20 @@ const resolveOrCreateCardStep = createStep(
         )
         if (afterRace) {
           const winnerProductId = await resolveProductIdForTradingCard(container, afterRace.id)
-          return new StepResponse(
-            { tradingCardId: afterRace.id, productId: winnerProductId, freshProductVariant: null as FreshProductVariant | null },
-            noOpCompensation,
-          )
+          return new StepResponse({ tradingCardId: afterRace.id, productId: winnerProductId, freshProductVariant: null as FreshProductVariant | null })
         }
       }
       throw error
     }
   },
-  async (compensation: CardCompensation | undefined, { container }) => {
-    if (!compensation) return
-    // The Product and its first InventoryItem are only ever discoverable by
-    // another workflow run through a TradingCardVariant that references this
-    // TradingCard (see `resolveOrCreateVariantStep`'s lookup) — so as soon as
-    // `deleteTradingCardIfUnreferenced` confirms no TradingCardVariant
-    // references it, the fresh Product/InventoryItem this step created are
-    // provably still exclusively ours too. If it's still referenced (a
-    // concurrent request added a variant — its own, or reused ours — before
-    // this run's later failure), none of the three are touched.
-    let tradingCardDeleted = false
-    if (compensation.createdTradingCard && compensation.tradingCardId) {
-      const cards = container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
-      await delay(COMPENSATION_REUSE_GRACE_MS)
-      tradingCardDeleted = await cards.deleteTradingCardIfUnreferenced(compensation.tradingCardId)
-    } else {
-      // Nothing of ours to protect — this step reused an existing card and
-      // never created one, so the Product/InventoryItem checks below (which
-      // only ever fire alongside `createdTradingCard`) are moot anyway.
-      tradingCardDeleted = true
-    }
-    if (!tradingCardDeleted) return
-    if (compensation.createdProduct && compensation.productId) {
-      const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
-      await products.deleteProducts([compensation.productId])
-    }
-    if (compensation.createdInventoryItemId) {
-      const inventory = container.resolve<IInventoryService>(Modules.INVENTORY)
-      await inventory.deleteInventoryItems([compensation.createdInventoryItemId])
-    }
-  },
+  // No compensation — see the remediation note above `delay()`. A
+  // TradingCard/Product/InventoryItem this step creates is left in place on
+  // a later step's failure. The `catch` block above is a separate, narrower
+  // case out of scope for this fix: it only cleans up when *this step's own*
+  // invocation fails before ever returning a `StepResponse` (e.g. the link
+  // call throws right after creating the TradingCard row) — the orchestrator
+  // never learns anything was created and so never calls a compensation
+  // callback for it either way.
 )
 
 // ---------------------------------------------------------------------
@@ -381,14 +346,6 @@ const resolveOrCreateCardStep = createStep(
 // ---------------------------------------------------------------------
 
 interface CardStepResult { tradingCardId: string; productId: string; freshProductVariant: FreshProductVariant | null }
-interface VariantCompensation {
-  tradingCardVariantId: string | null
-  productVariantId: string | null
-  createdOptionValueId: string | null
-  createdOptionValueOptionId: string | null
-  createdTradingCardVariant: boolean
-  createdProductVariant: boolean
-}
 
 /**
  * Resolves the full linked chain (ProductVariant + InventoryItem) for an
@@ -427,8 +384,7 @@ async function resolveExistingVariantChain(container: MedusaContainer, tradingCa
  * pivot rows (Medusa 2.16+ shared-option-entity schema), and are idempotent
  * — `updateProductOptionValuesOnProduct` skips creating a value whose name
  * already exists on the option, and skips re-linking a pivot that already
- * exists. Returns the created value's id (for compensation) or `null` if
- * the value already existed (nothing to compensate).
+ * exists. Returns the created value's id, or `null` if it already existed.
  */
 async function addCardVariantOptionValue(
   products: IProductModuleService, productId: string, optionValue: string,
@@ -472,21 +428,13 @@ const resolveOrCreateVariantStep = createStep(
     const [existingVariant] = await cards.listTradingCardVariants(variantFilters, { take: 1 })
     if (existingVariant) {
       const chain = await resolveExistingVariantChain(container, existingVariant.id)
-      return new StepResponse(
-        chain,
-        {
-          tradingCardVariantId: null, productVariantId: null, createdOptionValueId: null, createdOptionValueOptionId: null,
-          createdTradingCardVariant: false, createdProductVariant: false,
-        } satisfies VariantCompensation,
-      )
+      return new StepResponse(chain)
     }
 
     const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
     let productVariantId: string
     let inventoryItemId: string
     let createdProductVariant = false
-    let createdOptionValueId: string | null = null
-    let createdOptionValueOptionId: string | null = null
     let createdTradingCardVariantId: string | undefined
 
     // Everything below is one compensatable unit: whichever of these
@@ -504,9 +452,7 @@ const resolveOrCreateVariantStep = createStep(
       } else {
         const variantSku = `HT-PULSE-${shortId()}`
         const optionValue = variantOptionValue(dimensions)
-        const { optionId, createdValueId } = await addCardVariantOptionValue(products, input.cardResult.productId, optionValue)
-        createdOptionValueId = createdValueId
-        createdOptionValueOptionId = createdValueId ? optionId : null
+        await addCardVariantOptionValue(products, input.cardResult.productId, optionValue)
 
         // `createProductVariants` re-resolves the product's own option
         // values from scratch rather than trusting the row `addCardVariant
@@ -533,9 +479,7 @@ const resolveOrCreateVariantStep = createStep(
             const message = variantError instanceof Error ? variantError.message : String(variantError)
             if (attempt >= 5 || !/does not exist/i.test(message)) throw variantError
             await delay(60)
-            const retried = await addCardVariantOptionValue(products, input.cardResult.productId, optionValue)
-            createdOptionValueId = retried.createdValueId
-            createdOptionValueOptionId = retried.createdValueId ? retried.optionId : null
+            await addCardVariantOptionValue(products, input.cardResult.productId, optionValue)
           }
         }
         productVariantId = productVariant.id
@@ -561,30 +505,19 @@ const resolveOrCreateVariantStep = createStep(
       const link = container.resolve(ContainerRegistrationKeys.LINK)
       await link.create({ [Modules.PRODUCT]: { product_variant_id: productVariantId }, [TRADING_CARDS_MODULE]: { trading_card_variant_id: tradingCardVariant.id } })
 
-      return new StepResponse(
-        { tradingCardVariantId: tradingCardVariant.id, productVariantId, inventoryItemId },
-        {
-          tradingCardVariantId: tradingCardVariant.id, productVariantId: createdProductVariant ? productVariantId : null,
-          createdOptionValueId, createdOptionValueOptionId,
-          createdTradingCardVariant: true, createdProductVariant,
-        } satisfies VariantCompensation,
-      )
+      return new StepResponse({ tradingCardVariantId: tradingCardVariant.id, productVariantId, inventoryItemId })
     } catch (error) {
       if (createdTradingCardVariantId) {
         try { await cards.deleteTradingCardVariants([createdTradingCardVariantId]) } catch { /* best-effort */ }
       }
-      // Deliberately not cleaning up createdOptionValueId/createdOptionValueOptionId
-      // here. `addCardVariantOptionValue`'s "already present?" check has an
-      // inherent TOCTOU race under two concurrent callers adding the exact
-      // same *new* option value: both can observe "not present" and both
-      // track the resulting id as their own creation, even though only one
-      // value actually gets persisted. Removing it here — before we know
-      // whether we won or lost the identity race below — risks deleting a
-      // value the *other* caller is still actively using for its own
-      // in-flight (or already-committed) ProductVariant. A stray unused
-      // option value left on the product is harmless (see the top-level
-      // compensation function below, which only ever removes a value it
-      // confirmed was exclusively its own successful creation).
+      // A stray, unused option value this attempt may have added to the
+      // product's "Card Variant" option is deliberately never cleaned up —
+      // see the remediation note above `delay()`. Removing it here also has
+      // its own inherent TOCTOU race under two concurrent callers adding the
+      // exact same *new* option value (both can observe "not present" before
+      // either commits), so it is left in place rather than risking deletion
+      // of a value the other caller is actively relying on. An unused option
+      // value on the product is harmless.
       if (createdProductVariant) {
         // Only ours to clean up when this step itself created a *new*
         // ProductVariant/InventoryItem — never the `fresh` pair handed down
@@ -608,55 +541,22 @@ const resolveOrCreateVariantStep = createStep(
         })
         if (afterRace) {
           const chain = await resolveExistingVariantChain(container, afterRace.id)
-          return new StepResponse(
-            chain,
-            {
-              tradingCardVariantId: null, productVariantId: null, createdOptionValueId: null, createdOptionValueOptionId: null,
-              createdTradingCardVariant: false, createdProductVariant: false,
-            } satisfies VariantCompensation,
-          )
+          return new StepResponse(chain)
         }
       }
       throw error
     }
   },
-  async (compensation: VariantCompensation | undefined, { container }) => {
-    if (!compensation) return
-    if (compensation.createdTradingCardVariant && compensation.tradingCardVariantId) {
-      // A TradingCardVariant has no same-module FK dependent to check —
-      // the one thing that can make it "reused" is a different, concurrent
-      // request's proposal already having resolved to it (a plain text id
-      // column in the trading-card-inventory module, not a real foreign
-      // key, so a delete here would never fail loudly; it would silently
-      // orphan that request's already-committed inventory match). Checked
-      // immediately before deleting rather than earlier in this callback so
-      // the window between the check and the delete is as small as this
-      // cross-module boundary allows — Medusa's workflow steps each commit
-      // their own transaction, so a single atomic statement spanning both
-      // modules isn't available here the way it is for the same-module
-      // CardSet/TradingCard guards above.
-      const inventory = container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
-      await delay(COMPENSATION_REUSE_GRACE_MS)
-      const referencingProposals = await inventory.listInventoryProposals({
-        trading_card_variant_id: compensation.tradingCardVariantId,
-      })
-      if (referencingProposals.length > 0) return
-      const cards = container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
-      await cards.deleteTradingCardVariants([compensation.tradingCardVariantId])
-    }
-    if (compensation.createdProductVariant && compensation.productVariantId) {
-      const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
-      await products.deleteProductVariants([compensation.productVariantId])
-    }
-    if (compensation.createdOptionValueId && compensation.createdOptionValueOptionId) {
-      const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
-      try {
-        await products.deleteProductOptionValues([compensation.createdOptionValueId])
-      } catch {
-        // best-effort — an unused option value left behind is not a broken link
-      }
-    }
-  },
+  // No compensation — see the remediation note above `delay()`. This is the
+  // step the Codex re-review's remaining finding was about: a
+  // TradingCardVariant this step creates has no same-module FK dependent
+  // (the one thing that can make it "reused" is a different, concurrent
+  // request's proposal resolving to it — a plain text id column in the
+  // trading-card-inventory module, not a real foreign key), so a
+  // check-then-delete here was never more than probabilistically safe, no
+  // matter how the check was narrowed. Leaving the row in place removes the
+  // check entirely rather than tightening it further. The same applies to
+  // the ProductVariant/InventoryItem/option value created alongside it.
 )
 
 // ---------------------------------------------------------------------
