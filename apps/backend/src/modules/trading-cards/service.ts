@@ -8,7 +8,7 @@ import RarityMapping from "./models/rarity-mapping"
 import TcgDexEnrichmentProposal from "./models/tcgdex-enrichment-proposal"
 import TcgDexEnrichmentAttempt from "./models/tcgdex-enrichment-attempt"
 import CardImage from "./models/card-image"
-import { cardNumberForms, normaliseComparisonText } from "./identity/card-number"
+import { cardNumberForms, normaliseCardNumberComparisonForm, normaliseComparisonText } from "./identity/card-number"
 import { rarityComparisonForm } from "./rarity/normalise-rarity"
 import {
   AUDIT_ACTION, AUDIT_ENTITY_TYPE, type CardCondition, type CardFinish,
@@ -36,6 +36,7 @@ import {
 } from "./tcgdex/admin-review"
 import {
   listCardsNeedingImages,
+  listThumbnailsForVariants,
   retrieveCardImageDetail,
   type ImageListQuery,
 } from "./images/admin-image-review"
@@ -414,22 +415,45 @@ class TradingCardsModuleService extends MedusaService({
   /**
    * Stage 5B.1: the other half of `TradingCardMatchLookup` — candidate
    * variants for a card identified by (set code, card number, language)
-   * matching the row's exact commercial attributes. Card number comparison
-   * uses the same NFC/trim normalisation as Stage 3 identity matching
-   * (`identity/card-number.ts`); set code and language are compared exactly,
-   * per ADR 0007 (never parsed/fuzzy-matched).
+   * matching the row's exact commercial attributes. Set code and language
+   * are compared exactly, per ADR 0007 (never parsed/fuzzy-matched).
+   *
+   * Card number comparison matches against BOTH the current
+   * `normaliseCardNumberComparisonForm` shape (denominator-stripped,
+   * uppercase-folded — what every writer produces once
+   * `Migration20260718160000` has run) AND the pre-Phase-8 legacy shape
+   * (trim+NFC only, denominator and case preserved — what every row written
+   * before that migration still has until it runs). This is a deliberate,
+   * temporary compatibility fallback, not deployment-ordering trust: a
+   * literal `card_number_normalised = ?` SQL comparison against only the new
+   * form returns zero rows for a row that has not yet been migrated
+   * (verified directly — see "findVariantCandidatesForPulseMatch finds
+   * NOTHING for a genuinely unmigrated legacy row" in
+   * trading-cards-module.spec.ts), so relying on migration-before-boot
+   * ordering alone would leave a real window where existing catalogue cards
+   * become invisible to Pulse matching. Remove the legacy branch once
+   * Migration20260718160000 is confirmed applied in every environment that
+   * matters (dev, test, and — once it exists — production) and no
+   * `card_number_normalised` value in any of them differs from
+   * `normaliseCardNumberComparisonForm(card_number_normalised)`.
    */
   async findVariantCandidatesForPulseMatch(input: {
     setCodeCandidate: string; cardNumberCandidate: string; language: string; condition: string; finish: string; specialTreatment: string
   }) {
-    const cardNumber = normaliseComparisonText(input.cardNumberCandidate)
+    const currentForm = normaliseCardNumberComparisonForm(input.cardNumberCandidate)
+    const legacyForm = normaliseComparisonText(input.cardNumberCandidate)
+    // Pulse candidates are already denominator-inclusive text (e.g.
+    // "044/072"), so `currentForm` and `legacyForm` normally differ; only
+    // dedupe the parameter list for the rare case they coincide (a card
+    // number with no denominator and no letters to case-fold).
+    const cardNumberCandidates = [...new Set([currentForm, legacyForm])]
     const rows = await this.manager_.execute<{ id: string; trading_card_id: string }>(
       `select tcv.id, tcv.trading_card_id from trading_card_variant tcv
        inner join trading_card tc on tc.id = tcv.trading_card_id and tc.deleted_at is null
        inner join trading_card_set cs on cs.id = tc.card_set_id and cs.deleted_at is null
-       where cs.provider_set_code = ? and cs.language = ? and tc.card_number_normalised = ?
+       where cs.provider_set_code = ? and cs.language = ? and tc.card_number_normalised in (${cardNumberCandidates.map(() => "?").join(", ")})
          and tcv.condition = ? and tcv.finish = ? and tcv.special_treatment = ? and tcv.deleted_at is null`,
-      [input.setCodeCandidate, input.language, cardNumber, input.condition, input.finish, input.specialTreatment],
+      [input.setCodeCandidate, input.language, ...cardNumberCandidates, input.condition, input.finish, input.specialTreatment],
     )
     return rows.map((row) => ({ id: row.id, tradingCardId: row.trading_card_id }))
   }
@@ -1005,6 +1029,15 @@ class TradingCardsModuleService extends MedusaService({
 
   async retrieveCardImageDetail(tradingCardId: string) {
     return retrieveCardImageDetail(this.manager_, tradingCardId)
+  }
+
+  /** See `listThumbnailsForVariants` in `images/admin-image-review.ts`. */
+  async listThumbnailsForVariants(input: { variantIds: string[]; publicBaseUrl: string | null }) {
+    return listThumbnailsForVariants(
+      this.manager_,
+      input.variantIds,
+      (objectKey) => input.publicBaseUrl ? derivePublicImageUrl(input.publicBaseUrl, objectKey) : null,
+    )
   }
 
   /**

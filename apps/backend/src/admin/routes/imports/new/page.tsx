@@ -126,7 +126,12 @@ const ImportsNewPage = () => {
           </div>
 
           {sourceMode === "existing" ? (
-            <SourceSelect value={inventorySourceId} onChange={setInventorySourceId} />
+            <div className="flex flex-col gap-1">
+              <SourceSelect value={inventorySourceId} onChange={setInventorySourceId} />
+              <Text size="xsmall">
+                <Link to="/imports/sources">Rename or remove a source</Link>
+              </Text>
+            </div>
           ) : (
             <div className="flex flex-col gap-3">
               <Input

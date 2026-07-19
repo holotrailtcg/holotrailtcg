@@ -27,13 +27,13 @@ function baseListResponse(overrides: Partial<ImageListResponse> = {}): ImageList
   }
 }
 
-function renderPage(fetchImpl: (url: string) => Promise<unknown>) {
+function renderPage(fetchImpl: (url: string) => Promise<unknown>, initialEntry = "/imports/images") {
   const fetchMock = jest.fn(async (input: RequestInfo | URL) => fetchImpl(String(input)))
   global.fetch = fetchMock as unknown as typeof fetch
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <ImportsImagesPage />
       </MemoryRouter>
     </QueryClientProvider>
@@ -70,5 +70,39 @@ describe("ImportsImagesPage", () => {
         expect.anything()
       )
     })
+  })
+
+  it("scopes to the snapshot's cards when reached with ?snapshotId=, and can switch to the full catalogue", async () => {
+    const { fetchMock } = renderPage(async (url) => {
+      if (url.includes("/admin/trading-card-inventory/proposals")) {
+        return mockResponse({
+          proposals: [{ card: { tradingCardId: "tcard_1" } }, { card: { tradingCardId: "tcard_2" } }, { card: null }],
+          count: 2, limit: 100, offset: 0,
+        })
+      }
+      return mockResponse(baseListResponse())
+    }, "/imports/images?snapshotId=tcisnap_1")
+    await screen.findByText("Showing only cards from this import.")
+    await screen.findByText("Pikachu")
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("tradingCardIds=tcard_1%2Ctcard_2"),
+      expect.anything(),
+    )
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole("button", { name: "View the full catalogue instead" }))
+    expect(screen.queryByText("Showing only cards from this import.")).not.toBeInTheDocument()
+  })
+
+  it("shows a friendly empty state when scoped to a snapshot with no cards needing images", async () => {
+    renderPage(async (url) => {
+      if (url.includes("/admin/trading-card-inventory/proposals")) {
+        return mockResponse({ proposals: [], count: 0, limit: 100, offset: 0 })
+      }
+      return mockResponse(baseListResponse())
+    }, "/imports/images?snapshotId=tcisnap_1")
+
+    await screen.findByText("No cards from this import still need images.")
   })
 })

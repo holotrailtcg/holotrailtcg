@@ -1,15 +1,23 @@
-import { Button, Container, Heading, Text, toast } from "@medusajs/ui"
+import { Badge, Button, Container, Heading, Text, toast } from "@medusajs/ui"
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useState } from "react"
-import { Link, useParams } from "react-router-dom"
+import { Link, useNavigate, useParams } from "react-router-dom"
+import CardImageThumbnail from "../../../../components/imports/card-image-thumbnail"
+import CreateCardDialog from "../../../../components/imports/create-card-dialog"
+import EntryDetailDrawer from "../../../../components/imports/entry-detail-drawer"
 import { fetchJson, postAction } from "../../../../components/imports/fetch-json"
+import { formatMoney } from "../../../../components/imports/format-money"
 import ImportStepper from "../../../../components/imports/import-stepper"
 import MatchingStatusBadge from "../../../../components/imports/matching-status-badge"
 import PaginationBar from "../../../../components/imports/pagination-bar"
+import ReplaceCardImageDialog from "../../../../components/imports/replace-card-image-dialog"
 import ReviewTable, { type ReviewTableColumn } from "../../../../components/imports/review-table"
 import RowOutcomeBadge from "../../../../components/imports/row-outcome-badge"
+import { formatEnumLabel } from "../../../../components/imports/format-enum-label"
+import type { VariantThumbnailsResponse } from "../../../../components/imports/image-types"
 import type {
-  ImportSummary, RetryMatchingResult, SnapshotDiagnosticListItem, SnapshotDiagnosticListResponse,
+  ImportSummary, InventoryProposalListItem, InventoryProposalListResponse, RetryMatchingResult,
+  SnapshotDiagnosticListItem, SnapshotDiagnosticListResponse,
   SnapshotEntryListItem, SnapshotEntryListResponse, SnapshotProgress,
 } from "../../../../components/imports/pulse-import-types"
 import "../../../../styles/imports.css"
@@ -19,6 +27,14 @@ const DIAGNOSTIC_PAGE_SIZE = 20
 
 const OUTSTANDING_MATCHING_STATUSES = ["UNMATCHED", "AMBIGUOUS", "REVIEW_REQUIRED"]
 
+const DIAGNOSTIC_SEVERITY_COLOR: Record<string, "red" | "orange" | "green" | "grey"> = {
+  ERROR: "red", WARNING: "orange", INFO: "green",
+}
+
+const DIAGNOSTIC_ROW_TINT: Record<string, string> = {
+  ERROR: "bg-ui-tag-red-bg", WARNING: "bg-ui-tag-orange-bg", INFO: "bg-ui-tag-green-bg",
+}
+
 function fetchSummary(snapshotId: string): Promise<{ summary: ImportSummary; progress: SnapshotProgress }> {
   return fetchJson(`/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/summary`)
 }
@@ -27,6 +43,7 @@ const ImportsSnapshotDetailPage = () => {
   const params = useParams<{ id: string }>()
   const snapshotId = params.id ?? ""
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
 
   const [entryOffset, setEntryOffset] = useState(0)
   const [outcomeFilter, setOutcomeFilter] = useState("")
@@ -34,6 +51,10 @@ const ImportsSnapshotDetailPage = () => {
   const [entryIdFilter, setEntryIdFilter] = useState("")
   const [diagnosticOffset, setDiagnosticOffset] = useState(0)
   const [severityFilter, setSeverityFilter] = useState("")
+  const [diagnosticsExpanded, setDiagnosticsExpanded] = useState(false)
+  const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
+  const [replaceImageTarget, setReplaceImageTarget] = useState<{ tradingCardId: string; tradingCardVariantId: string } | null>(null)
+  const [createCardRow, setCreateCardRow] = useState<InventoryProposalListItem | null>(null)
 
   const summaryQuery = useQuery({
     queryKey: ["pulse-import-summary", snapshotId],
@@ -65,9 +86,38 @@ const ImportsSnapshotDetailPage = () => {
         `/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/diagnostics?${searchParams.toString()}`,
       )
     },
-    enabled: Boolean(snapshotId),
+    enabled: Boolean(snapshotId) && diagnosticsExpanded,
     placeholderData: keepPreviousData,
   })
+
+  const visibleVariantIds = [
+    ...new Set((entriesQuery.data?.entries ?? []).map((entry) => entry.tradingCardVariantId).filter((id): id is string => Boolean(id))),
+  ]
+  const thumbnailsQuery = useQuery({
+    queryKey: ["pulse-import-thumbnails", snapshotId, visibleVariantIds],
+    queryFn: () => fetchJson<VariantThumbnailsResponse>(
+      `/admin/trading-cards/variants/images?variantIds=${visibleVariantIds.map(encodeURIComponent).join(",")}`,
+    ),
+    enabled: visibleVariantIds.length > 0,
+    placeholderData: keepPreviousData,
+  })
+
+  // Rows without a matched card need "Create card" before they can have an
+  // image at all — this fetches the corresponding proposals (by shared
+  // `providerReference`) so clicking a placeholder can open the same dialog
+  // used on the proposals page, without navigating away first.
+  const unresolvedProposalsQuery = useQuery({
+    queryKey: ["pulse-import-unresolved-proposals", snapshotId],
+    queryFn: () => fetchJson<InventoryProposalListResponse>(
+      `/admin/trading-card-inventory/proposals?limit=100&offset=0&inventorySnapshotId=${encodeURIComponent(snapshotId)}&changeKind=UNRESOLVED_VARIANT`,
+    ),
+    enabled: Boolean(snapshotId),
+  })
+  const unresolvedProposalByReference = new Map(
+    (unresolvedProposalsQuery.data?.proposals ?? [])
+      .filter((proposal) => proposal.providerReference)
+      .map((proposal) => [proposal.providerReference as string, proposal]),
+  )
 
   const refreshAfterAction = () => {
     queryClient.invalidateQueries({ queryKey: ["pulse-import-summary", snapshotId] })
@@ -107,12 +157,43 @@ const ImportsSnapshotDetailPage = () => {
   const canReconcile = summary?.status === "VALIDATED"
 
   const entryColumns: ReviewTableColumn<SnapshotEntryListItem>[] = [
+    {
+      header: "Card",
+      cell: (row) => {
+        const thumbnail = row.tradingCardVariantId ? thumbnailsQuery.data?.thumbnails[row.tradingCardVariantId] : undefined
+        if (row.tradingCardVariantId) {
+          const target = thumbnail?.tradingCardId
+            ? { tradingCardId: thumbnail.tradingCardId, tradingCardVariantId: row.tradingCardVariantId }
+            : null
+          return (
+            <CardImageThumbnail
+              imageUrl={thumbnail?.imageUrl ?? null}
+              alt={row.providerReference}
+              title={target ? (thumbnail?.imageUrl ? "Click to replace the image" : "Click to add a photo") : undefined}
+              onClick={target ? () => setReplaceImageTarget(target) : undefined}
+            />
+          )
+        }
+        const proposal = row.providerReference ? unresolvedProposalByReference.get(row.providerReference) : undefined
+        return (
+          <CardImageThumbnail
+            imageUrl={null}
+            alt={row.providerReference}
+            title={proposal ? "Click to create this card" : undefined}
+            onClick={proposal ? () => setCreateCardRow(proposal) : undefined}
+          />
+        )
+      },
+    },
     { header: "Row", cell: (row) => row.rowNumber ?? "—" },
     { header: "Reference", cell: (row) => row.providerReference },
     { header: "Quantity", cell: (row) => row.quantity },
-    { header: "Finish", cell: (row) => row.finishCandidate ?? "—" },
-    { header: "Treatment", cell: (row) => row.specialTreatmentCandidate ?? "—" },
-    { header: "Rarity", cell: (row) => row.rarityCandidate ?? row.rarityRaw ?? "—" },
+    { header: "Purchase price", cell: (row) => formatMoney(row.unitAcquisitionCost, row.currencyCode) },
+    { header: "Market value", cell: (row) => formatMoney(row.unitMarketPrice, row.currencyCode) },
+    { header: "Sale price", cell: (row) => formatMoney(row.unitSellingPrice, row.currencyCode) },
+    { header: "Finish", cell: (row) => formatEnumLabel(row.finishCandidate) },
+    { header: "Treatment", cell: (row) => formatEnumLabel(row.specialTreatmentCandidate) },
+    { header: "Rarity", cell: (row) => row.rarityCandidate ? formatEnumLabel(row.rarityCandidate) : (row.rarityRaw ?? "—") },
     { header: "Outcome", cell: (row) => <RowOutcomeBadge outcome={row.outcome} /> },
     { header: "Matched variant", cell: (row) => row.tradingCardVariantId ?? "—" },
     { header: "Review status", cell: (row) => <MatchingStatusBadge status={row.matchingStatus} /> },
@@ -125,7 +206,7 @@ const ImportsSnapshotDetailPage = () => {
         setEntryOffset(0)
       }}>{row.rowNumber}</button>
     ) },
-    { header: "Severity", cell: (row) => row.severity },
+    { header: "Severity", cell: (row) => <Badge className="ht-imports-badge" size="2xsmall" color={DIAGNOSTIC_SEVERITY_COLOR[row.severity] ?? "grey"}>{row.severity}</Badge> },
     { header: "Field", cell: (row) => row.fieldRef ?? "—" },
     { header: "Message", cell: (row) => row.message },
   ]
@@ -217,7 +298,9 @@ const ImportsSnapshotDetailPage = () => {
             <Container className="flex flex-col gap-3 p-6">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <Heading level="h2">Inventory proposals</Heading>
-                <Link to={`/imports/snapshots/${encodeURIComponent(snapshotId)}/proposals`}>Review proposals</Link>
+                <Link to={`/imports/snapshots/${encodeURIComponent(snapshotId)}/proposals`} className="text-ui-fg-subtle text-sm">
+                  View proposals
+                </Link>
               </div>
               <div className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
                 <div>
@@ -237,11 +320,21 @@ const ImportsSnapshotDetailPage = () => {
                   <Text size="small">{progress.appliedSyncPending + progress.appliedSyncFailed}</Text>
                 </div>
               </div>
-              <Text size="small" className={progress.fullyComplete ? "text-ui-fg-subtle" : "text-ui-fg-subtle"}>
+              <Text size="small" className="text-ui-fg-subtle">
                 {progress.fullyComplete
                   ? "All applicable proposals have been applied and synchronised to Medusa."
                   : "This snapshot is not fully applied yet."}
               </Text>
+              {!progress.fullyComplete && (
+                <Button onClick={() => navigate(`/imports/snapshots/${encodeURIComponent(snapshotId)}/proposals`)}>
+                  Next: Review proposals →
+                </Button>
+              )}
+              {progress.fullyComplete && (
+                <Button onClick={() => navigate(`/imports/images?snapshotId=${encodeURIComponent(snapshotId)}`)}>
+                  Next: Assign card images →
+                </Button>
+              )}
             </Container>
           )}
 
@@ -282,6 +375,7 @@ const ImportsSnapshotDetailPage = () => {
               columns={entryColumns}
               rows={entriesQuery.data?.entries ?? []}
               rowKey={(row) => row.id}
+              onRowClick={(row) => setSelectedEntryId(row.id)}
               isLoading={entriesQuery.isLoading}
               isError={entriesQuery.isError}
               emptyMessage="No rows match this filter."
@@ -297,38 +391,89 @@ const ImportsSnapshotDetailPage = () => {
           </Container>
 
           <Container className="flex flex-col gap-3 p-0">
-            <div className="flex flex-wrap items-center gap-3 p-4">
+            <button
+              type="button"
+              className="flex w-full flex-wrap items-center gap-3 p-4 text-left"
+              onClick={() => setDiagnosticsExpanded((expanded) => !expanded)}
+              aria-expanded={diagnosticsExpanded}
+            >
+              <Text size="small" className="text-ui-fg-subtle">{diagnosticsExpanded ? "⌄" : "›"}</Text>
               <Heading level="h2">Diagnostics</Heading>
-              <select
-                aria-label="Filter by severity"
-                value={severityFilter}
-                onChange={(event) => { setSeverityFilter(event.target.value); setDiagnosticOffset(0) }}
-                className="rounded-none border p-1 text-sm"
-              >
-                <option value="">All severities</option>
-                <option value="ERROR">Error</option>
-                <option value="WARNING">Warning</option>
-                <option value="INFO">Info</option>
-              </select>
-            </div>
-            <ReviewTable
-              columns={diagnosticColumns}
-              rows={diagnosticsQuery.data?.diagnostics ?? []}
-              rowKey={(row) => row.id}
-              isLoading={diagnosticsQuery.isLoading}
-              isError={diagnosticsQuery.isError}
-              emptyMessage="No diagnostics for this filter."
-            />
-            {diagnosticsQuery.data && (
-              <PaginationBar
-                offset={diagnosticOffset}
-                limit={diagnosticsQuery.data.limit}
-                count={diagnosticsQuery.data.count}
-                onOffsetChange={setDiagnosticOffset}
-              />
+              {!diagnosticsExpanded && <Text size="small" className="text-ui-fg-subtle">Click to expand</Text>}
+            </button>
+            {diagnosticsExpanded && (
+              <>
+                <div className="flex flex-wrap items-center gap-3 px-4 pb-2">
+                  <select
+                    aria-label="Filter by severity"
+                    value={severityFilter}
+                    onChange={(event) => { setSeverityFilter(event.target.value); setDiagnosticOffset(0) }}
+                    className="rounded-none border p-1 text-sm"
+                  >
+                    <option value="">All severities</option>
+                    <option value="ERROR">Error — blockers</option>
+                    <option value="WARNING">Warning — concerns</option>
+                    <option value="INFO">Info — non-blocking, ok</option>
+                  </select>
+                </div>
+                <ReviewTable
+                  columns={diagnosticColumns}
+                  rows={diagnosticsQuery.data?.diagnostics ?? []}
+                  rowKey={(row) => row.id}
+                  rowClassName={(row) => DIAGNOSTIC_ROW_TINT[row.severity]}
+                  isLoading={diagnosticsQuery.isLoading}
+                  isError={diagnosticsQuery.isError}
+                  emptyMessage="No diagnostics for this filter."
+                />
+                {diagnosticsQuery.data && (
+                  <PaginationBar
+                    offset={diagnosticOffset}
+                    limit={diagnosticsQuery.data.limit}
+                    count={diagnosticsQuery.data.count}
+                    onOffsetChange={setDiagnosticOffset}
+                  />
+                )}
+              </>
             )}
           </Container>
         </>
+      )}
+
+      {selectedEntryId && (() => {
+        const selectedEntry = entriesQuery.data?.entries.find((entry) => entry.id === selectedEntryId)
+        if (!selectedEntry) return null
+        const thumbnail = selectedEntry.tradingCardVariantId
+          ? thumbnailsQuery.data?.thumbnails[selectedEntry.tradingCardVariantId]
+          : undefined
+        return (
+          <EntryDetailDrawer
+            snapshotId={snapshotId}
+            row={selectedEntry}
+            thumbnail={thumbnail}
+            onClose={() => setSelectedEntryId(null)}
+          />
+        )
+      })()}
+
+      {replaceImageTarget && (
+        <ReplaceCardImageDialog
+          tradingCardId={replaceImageTarget.tradingCardId}
+          tradingCardVariantId={replaceImageTarget.tradingCardVariantId}
+          onClose={() => setReplaceImageTarget(null)}
+          onUploaded={() => queryClient.invalidateQueries({ queryKey: ["pulse-import-thumbnails", snapshotId] })}
+        />
+      )}
+
+      {createCardRow && (
+        <CreateCardDialog
+          row={createCardRow}
+          onClose={() => setCreateCardRow(null)}
+          onCreated={() => {
+            refreshAfterAction()
+            queryClient.invalidateQueries({ queryKey: ["pulse-import-unresolved-proposals", snapshotId] })
+            queryClient.invalidateQueries({ queryKey: ["pulse-import-thumbnails", snapshotId] })
+          }}
+        />
       )}
     </div>
   )

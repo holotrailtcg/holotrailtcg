@@ -40,12 +40,12 @@ const ImportsSnapshotListPage = () => {
   return (
     <div className="ht-imports flex flex-col gap-6">
       <Container className="flex flex-col gap-4 p-6">
-        <Heading level="h1">Check and approve</Heading>
+        <Heading level="h1">Your imports</Heading>
         <ImportStepper compact />
         <Text size="small" className="text-ui-fg-subtle">
-          Each row below is one uploaded file, called a "snapshot". Click one to see what it
-          contains and check it before anything happens to your stock. Click through in this order:
-          check the snapshot, then review the changes it suggests, then apply the ones you approve.
+          Each row below is one uploaded file, called a "snapshot". Click one to check the rows
+          matched against your catalogue and TCGdex, then continue: review the changes it
+          suggests, then apply the ones you approve.
         </Text>
         <Text size="small">
           <Link to="/imports">Back to imports</Link>

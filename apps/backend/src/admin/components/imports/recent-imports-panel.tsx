@@ -2,6 +2,7 @@ import { Badge, Button, Container, Heading, Text, toast, usePrompt } from "@medu
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { useNavigate } from "react-router-dom"
 import { fetchJson, postAction } from "./fetch-json"
+import { formatEnumLabel } from "./format-enum-label"
 import ReviewTable, { type ReviewTableColumn } from "./review-table"
 import type { InventorySnapshotListItem, InventorySnapshotListResponse } from "./pulse-import-types"
 
@@ -10,6 +11,12 @@ const RECENT_IMPORTS_LIMIT = 50
 const STATUS_COLOR: Record<string, "grey" | "orange" | "red" | "green" | "blue"> = {
   DRAFT: "grey", VALIDATED: "grey", PENDING_REVIEW: "orange", APPROVED: "blue",
   APPLYING: "orange", APPLIED: "green", REJECTED: "red", FAILED: "red", SUPERSEDED: "grey",
+}
+
+const STATUS_LABEL: Record<string, string> = {
+  DRAFT: "Draft", VALIDATED: "Validated", PENDING_REVIEW: "Pending review", APPROVED: "Approved",
+  APPLYING: "Applying", APPLIED: "Applied", REJECTED: "Rejected", FAILED: "Failed", SUPERSEDED: "Superseded",
+  DISCARDED: "Discarded",
 }
 
 /** Statuses that have not reached a terminal outcome yet — shown under "Pending". */
@@ -69,7 +76,7 @@ const RecentImportsPanel = ({ maxRowsPerGroup = 10 }: RecentImportsPanelProps) =
   const columns = (group: "PENDING" | "COMPLETE"): ReviewTableColumn<InventorySnapshotListItem>[] => [
     { header: "File", cell: (row) => row.originalFilename ?? "—" },
     { header: "Rows", cell: (row) => row.rowCount ?? "—" },
-    { header: "Status", cell: (row) => <Badge size="2xsmall" color={STATUS_COLOR[row.status] ?? "grey"}>{row.status}</Badge> },
+    { header: "Status", cell: (row) => <Badge size="2xsmall" color={STATUS_COLOR[row.status] ?? "grey"}>{STATUS_LABEL[row.status] ?? formatEnumLabel(row.status)}</Badge> },
     { header: "Created", cell: (row) => new Date(row.createdAt).toLocaleString() },
     {
       header: "",

@@ -4,7 +4,6 @@ import { useState } from "react"
 import { Link, useNavigate } from "react-router-dom"
 import AttemptOutcomeBadge from "../../../components/imports/attempt-outcome-badge"
 import { fetchJson } from "../../../components/imports/fetch-json"
-import ImportStepper from "../../../components/imports/import-stepper"
 import PaginationBar from "../../../components/imports/pagination-bar"
 import ReviewSearchFilterBar from "../../../components/imports/review-search-filter-bar"
 import ReviewStatusBadge from "../../../components/imports/review-status-badge"
@@ -173,14 +172,14 @@ const ImportsReviewPage = () => {
   return (
     <div className="ht-imports flex flex-col gap-6">
       <Container className="flex flex-col gap-4 p-6">
-        <Heading level="h1">Sync with TCGdex</Heading>
-        <ImportStepper compact />
+        <Heading level="h1">TCGdex matching backlog</Heading>
         <Text size="small" className="text-ui-fg-subtle">
-          This page is about card details, not stock levels. TCGdex is an outside source of card
-          artwork and details, and it tries to match your cards automatically. Cards you add using
-          "Create card" on the proposals page are matched for you straight away, so you should not
-          normally need to come here for those — this page is mainly for older cards, or ones that
-          TCGdex could not match on its own.
+          This page is a standalone tool, not one of the numbered import steps — it is about card
+          details, not stock levels. TCGdex is an outside source of card artwork and details, and
+          it tries to match your cards automatically. Cards you add using "Create card" on the
+          proposals page are matched for you straight away, so you should not normally need to come
+          here for those — this page is mainly for older cards, or ones that TCGdex could not match
+          on its own.
         </Text>
         <Text size="small">
           <Link to="/imports">Back to imports</Link>

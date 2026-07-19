@@ -1,7 +1,7 @@
 import { Badge, Button, Container, Heading, Text, Textarea, toast, usePrompt } from "@medusajs/ui"
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useState, type MouseEvent } from "react"
-import { Link, useParams } from "react-router-dom"
+import { Link, useNavigate, useParams } from "react-router-dom"
 import CreateCardDialog from "../../../../../components/imports/create-card-dialog"
 import { fetchJson, postAction } from "../../../../../components/imports/fetch-json"
 import ImportStepper from "../../../../../components/imports/import-stepper"
@@ -10,6 +10,7 @@ import PaginationBar from "../../../../../components/imports/pagination-bar"
 import ReviewTable, { type ReviewTableColumn } from "../../../../../components/imports/review-table"
 import SelectAllCheckbox from "../../../../../components/imports/select-all-checkbox"
 import { useRangeSelection } from "../../../../../components/imports/use-range-selection"
+import { formatEnumLabel } from "../../../../../components/imports/format-enum-label"
 import type {
   ApplyProposalItemResult, InventoryProposalDetailResponse, InventoryProposalListItem, InventoryProposalListResponse,
   SnapshotProgress,
@@ -19,8 +20,21 @@ import "../../../../../styles/imports.css"
 const PAGE_SIZE = 20
 const APPLICABLE_CHANGE_KINDS = new Set(["NEW_HOLDING", "QUANTITY_CHANGE"])
 
+const CHANGE_KIND_LABEL: Record<string, string> = {
+  NEW_HOLDING: "New stock",
+  QUANTITY_CHANGE: "Quantity change",
+  COST_CHANGE: "Cost change",
+  PRICE_CHANGE: "Price change",
+  NO_CHANGE: "No change",
+  UNRESOLVED_VARIANT: "Needs a card",
+}
+
 function selectionKind(row: InventoryProposalListItem): "REVIEW" | "APPLY" | null {
-  if (row.reviewStatus === "PENDING") return "REVIEW"
+  // A row still without a matched card isn't eligible for review/bulk-approve
+  // yet — it needs "Create card" first, which is what resolves it to a real
+  // variant. Selecting it here would otherwise let bulk-approve silently no-op
+  // it into an APPROVED-but-never-appliable dead end.
+  if (row.reviewStatus === "PENDING" && row.card !== null) return "REVIEW"
   if (row.reviewStatus === "APPROVED" && row.tradingCardVariantId && row.proposedQuantity !== null &&
     APPLICABLE_CHANGE_KINDS.has(row.changeKind)) return "APPLY"
   return null
@@ -38,6 +52,7 @@ const InventoryProposalsPage = () => {
   const params = useParams<{ id: string }>()
   const snapshotId = params.id ?? ""
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const prompt = usePrompt()
 
   const [offset, setOffset] = useState(0)
@@ -230,7 +245,7 @@ const InventoryProposalsPage = () => {
             <div className="flex flex-col">
               <Text size="small" weight="plus">{row.card.name}</Text>
               <Text size="xsmall" className="text-ui-fg-subtle">
-                {row.card.setDisplayName} · {row.card.cardNumber} · {row.card.condition} · {row.card.finish}
+                {row.card.setDisplayName} · {row.card.cardNumber} · {formatEnumLabel(row.card.condition)} · {formatEnumLabel(row.card.finish)}
               </Text>
             </div>
           )
@@ -246,7 +261,7 @@ const InventoryProposalsPage = () => {
         return <Text size="small" className="text-ui-fg-subtle">Not yet matched</Text>
       },
     },
-    { header: "Change", cell: (row) => row.changeKind },
+    { header: "Change", cell: (row) => CHANGE_KIND_LABEL[row.changeKind] ?? formatEnumLabel(row.changeKind) },
     { header: "Quantity", cell: (row) => `${row.previousQuantity ?? 0} → ${row.proposedQuantity ?? 0}` },
     { header: "Status", cell: (row) => <InventoryProposalStatusBadge reviewStatus={row.reviewStatus} medusaSyncStatus={row.medusaSyncStatus} /> },
     {
@@ -254,11 +269,14 @@ const InventoryProposalsPage = () => {
       cell: (row) => (
         <div className="flex flex-wrap items-center gap-2" onClick={(event) => event.stopPropagation()}>
           {row.reviewStatus === "PENDING" && row.card === null && (
-            <Button size="small" variant="secondary" onClick={() => setCreateCardRow(row)}>
-              Create card
-            </Button>
+            <>
+              <Button size="small" variant="secondary" onClick={() => setCreateCardRow(row)}>
+                Create card
+              </Button>
+              <Text size="xsmall" className="text-ui-fg-subtle">Create the card first, then approve</Text>
+            </>
           )}
-          {row.reviewStatus === "PENDING" && (
+          {row.reviewStatus === "PENDING" && row.card !== null && (
             <>
               <Button size="small" variant="primary" isLoading={reviewOneMutation.isPending}
                 onClick={() => reviewOneMutation.mutate({ id: row.id, targetStatus: "APPROVED" })}>
@@ -293,11 +311,16 @@ const InventoryProposalsPage = () => {
         <Heading level="h1">Review inventory proposals</Heading>
         <ImportStepper compact />
         <Text size="small" className="text-ui-fg-subtle">
-          Each row is a suggested stock change from the file you uploaded. "Not yet matched" is
-          normal for this type of file — it just means the row could not be matched to a card
-          automatically. Use "Create card" to add it, filling in the details from the row.
-          Otherwise, approve or reject each row, then apply the ones you have approved. To select
-          several rows at once, tick their boxes, or hold Shift and click to select a range.
+          Each row is a suggested stock change from the file you uploaded. What to do, per row:
+        </Text>
+        <ol className="flex list-decimal flex-col gap-1 pl-5 text-ui-fg-subtle text-sm">
+          <li><Text size="small" weight="plus" className="inline">Not yet matched?</Text> Click "Create card", confirming condition/finish/treatment yourself — this is normal, not an error.</li>
+          <li>Once a row shows a matched card, <Text size="small" weight="plus" className="inline">Approve</Text> or <Text size="small" weight="plus" className="inline">Reject</Text> it.</li>
+          <li>Once approved, <Text size="small" weight="plus" className="inline">Apply</Text> it to actually update Medusa stock.</li>
+        </ol>
+        <Text size="small" className="text-ui-fg-subtle">
+          To act on several rows at once: tick their boxes (or hold Shift and click to select a
+          range), then use the bulk action that appears above the table.
         </Text>
         <Text size="small">
           <Link to={`/imports/snapshots/${encodeURIComponent(snapshotId)}`}>Back to snapshot</Link>
@@ -314,6 +337,17 @@ const InventoryProposalsPage = () => {
           <Badge size="2xsmall" color="red">Applied, sync failed {progress.appliedSyncFailed}</Badge>
           {progress.blocked > 0 && <Badge size="2xsmall" color="red">Blocked — needs re-approval {progress.blocked}</Badge>}
           {progress.fullyComplete && <Badge size="2xsmall" color="green">Snapshot fully applied</Badge>}
+        </Container>
+      )}
+
+      {progress?.fullyComplete && (
+        <Container className="flex flex-col gap-3 p-6">
+          <Text size="small" className="text-ui-fg-subtle">
+            All applicable proposals have been applied and synchronised to Medusa.
+          </Text>
+          <Button onClick={() => navigate(`/imports/images?snapshotId=${encodeURIComponent(snapshotId)}`)}>
+            Next: Assign card images →
+          </Button>
         </Container>
       )}
 

@@ -143,6 +143,7 @@ export interface InventorySnapshotListResponse {
 }
 
 export interface InventoryProposalCardIdentity {
+  tradingCardId: string
   name: string
   setDisplayName: string
   cardNumber: string

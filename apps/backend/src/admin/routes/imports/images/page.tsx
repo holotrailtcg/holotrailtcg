@@ -1,11 +1,12 @@
-import { Container, Heading, Text } from "@medusajs/ui"
+import { Button, Container, Heading, Text } from "@medusajs/ui"
 import { keepPreviousData, useQuery } from "@tanstack/react-query"
 import { useState } from "react"
-import { Link, useNavigate } from "react-router-dom"
+import { Link, useNavigate, useSearchParams } from "react-router-dom"
 import { fetchJson } from "../../../components/imports/fetch-json"
 import ImportStepper from "../../../components/imports/import-stepper"
 import ImageNeedStatusBadge from "../../../components/imports/image-need-status-badge"
 import type { ImageListItem, ImageListResponse } from "../../../components/imports/image-types"
+import type { InventoryProposalListResponse } from "../../../components/imports/pulse-import-types"
 import PaginationBar from "../../../components/imports/pagination-bar"
 import ReviewSearchFilterBar from "../../../components/imports/review-search-filter-bar"
 import ReviewTable, { type ReviewTableColumn } from "../../../components/imports/review-table"
@@ -27,20 +28,45 @@ const LANGUAGE_OPTIONS = [
 
 const ImportsImagesPage = () => {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const snapshotId = searchParams.get("snapshotId") ?? ""
+  const [scopedToSnapshot, setScopedToSnapshot] = useState(Boolean(snapshotId))
   const [search, setSearch] = useState("")
   const [language, setLanguage] = useState("")
   const [status, setStatus] = useState("")
   const [offset, setOffset] = useState(0)
 
+  const isScoped = scopedToSnapshot && Boolean(snapshotId)
+
+  // Reached via "Next" from step 2/4 with `?snapshotId=`, this narrows the
+  // otherwise catalogue-wide list down to just the cards from that import,
+  // so finishing an import feels like one continuous job.
+  const snapshotCardsQuery = useQuery({
+    queryKey: ["images-snapshot-cards", snapshotId],
+    queryFn: () => fetchJson<InventoryProposalListResponse>(
+      `/admin/trading-card-inventory/proposals?limit=100&offset=0&inventorySnapshotId=${encodeURIComponent(snapshotId)}`,
+    ),
+    enabled: isScoped,
+  })
+  const scopedTradingCardIds = [...new Set(
+    (snapshotCardsQuery.data?.proposals ?? [])
+      .map((proposal) => proposal.card?.tradingCardId)
+      .filter((id): id is string => Boolean(id)),
+  )]
+  const scopeReady = !isScoped || snapshotCardsQuery.isSuccess
+  const scopedWithNoCards = isScoped && scopeReady && scopedTradingCardIds.length === 0
+
   const query = useQuery({
-    queryKey: ["images-needing", { search, language, status, offset }],
+    queryKey: ["images-needing", { search, language, status, offset, isScoped, scopedTradingCardIds }],
     queryFn: () => {
       const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) })
       if (search.trim()) params.set("q", search.trim())
       if (language) params.set("language", language)
       if (status) params.set("status", status)
+      if (isScoped) params.set("tradingCardIds", scopedTradingCardIds.join(","))
       return fetchJson<ImageListResponse>(`/admin/trading-cards/needing-images?${params.toString()}`)
     },
+    enabled: scopeReady && !scopedWithNoCards,
     placeholderData: keepPreviousData,
   })
 
@@ -73,6 +99,17 @@ const ImportsImagesPage = () => {
         </Text>
       </Container>
 
+      {isScoped && (
+        <Container className="flex flex-wrap items-center justify-between gap-3 p-4">
+          <Text size="small" className="text-ui-fg-subtle">
+            Showing only cards from this import.
+          </Text>
+          <Button size="small" variant="secondary" onClick={() => setScopedToSnapshot(false)}>
+            View the full catalogue instead
+          </Button>
+        </Container>
+      )}
+
       <div className="flex flex-col gap-4">
         <ReviewSearchFilterBar
           searchValue={search}
@@ -95,26 +132,34 @@ const ImportsImagesPage = () => {
           languageOptions={LANGUAGE_OPTIONS}
         />
         <Container className="divide-y p-0">
-          <ReviewTable
-            columns={columns}
-            rows={query.data?.cards ?? []}
-            rowKey={(row) => row.trading_card_id}
-            onRowClick={(row) => navigate(`/imports/images/${row.trading_card_id}`)}
-            isLoading={query.isLoading}
-            isError={query.isError}
-            emptyMessage={
-              search || language || status
-                ? "No cards match your search."
-                : "No cards need images."
-            }
-          />
-          {query.data && (
-            <PaginationBar
-              offset={offset}
-              limit={query.data.limit}
-              count={query.data.count}
-              onOffsetChange={setOffset}
-            />
+          {scopedWithNoCards ? (
+            <Text size="small" className="p-4 text-ui-fg-subtle">
+              No cards from this import still need images.
+            </Text>
+          ) : (
+            <>
+              <ReviewTable
+                columns={columns}
+                rows={query.data?.cards ?? []}
+                rowKey={(row) => row.trading_card_id}
+                onRowClick={(row) => navigate(`/imports/images/${row.trading_card_id}`)}
+                isLoading={query.isLoading || !scopeReady}
+                isError={query.isError}
+                emptyMessage={
+                  search || language || status
+                    ? "No cards match your search."
+                    : "No cards need images."
+                }
+              />
+              {query.data && (
+                <PaginationBar
+                  offset={offset}
+                  limit={query.data.limit}
+                  count={query.data.count}
+                  onOffsetChange={setOffset}
+                />
+              )}
+            </>
           )}
         </Container>
       </div>

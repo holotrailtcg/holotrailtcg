@@ -13,6 +13,8 @@ interface ReviewTableProps<T> {
   rows: T[]
   rowKey: (row: T) => string
   onRowClick?: (row: T) => void
+  /** Optional per-row background tint, e.g. by severity. Returned classes are appended alongside the default row classes. */
+  rowClassName?: (row: T) => string | undefined
   isLoading: boolean
   isError: boolean
   emptyMessage: string
@@ -24,6 +26,7 @@ function ReviewTable<T>({
   rows,
   rowKey,
   onRowClick,
+  rowClassName,
   isLoading,
   isError,
   emptyMessage,
@@ -66,7 +69,7 @@ function ReviewTable<T>({
         {rows.map((row) => (
           <Table.Row
             key={rowKey(row)}
-            className={onRowClick ? "cursor-pointer" : undefined}
+            className={[onRowClick ? "cursor-pointer" : "", rowClassName?.(row) ?? ""].filter(Boolean).join(" ") || undefined}
             onClick={() => onRowClick?.(row)}
           >
             {columns.map((column) => (

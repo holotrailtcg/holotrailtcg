@@ -9,12 +9,18 @@ const optionalSearchSchema = z.preprocess(
   z.string().trim().min(1).max(100).optional()
 )
 
+const tradingCardIdsSchema = z.preprocess(
+  (value) => typeof value === "string" && value.trim() === "" ? undefined : value,
+  z.string().transform((value) => value.split(",").map((id) => id.trim()).filter(Boolean)).pipe(z.array(z.string()).min(1).max(200)).optional()
+)
+
 export const imageListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
   q: optionalSearchSchema,
   language: z.enum(Object.values(CARD_LANGUAGE) as [string, ...string[]]).optional(),
   status: z.enum(IMAGE_NEED_STATUSES).optional(),
+  tradingCardIds: tradingCardIdsSchema,
 }).strict()
 
 export type ImageListQuery = z.infer<typeof imageListQuerySchema>
@@ -49,6 +55,16 @@ function parseStored<T>(schema: z.ZodType<T>, value: unknown): T {
 
 function escapedLike(search: string): string {
   return `%${search.replace(/[\\%_]/gu, "\\$&")}%`
+}
+
+/**
+ * `manager.execute`'s `?` placeholder substitution does not bind JS arrays
+ * as Postgres array literals (unlike `knex.raw`, which does) — passing an
+ * array straight to `= any(?)` here produces a malformed literal. Expanding
+ * to one placeholder per value and using `in (...)` sidesteps that.
+ */
+function inClause(values: string[]): string {
+  return `(${values.map(() => "?").join(", ")})`
 }
 
 function needStatus(row: z.infer<typeof imageListRowSchema>): (typeof IMAGE_NEED_STATUSES)[number] {
@@ -94,6 +110,10 @@ const IMAGE_LIST_GROUP_BY = `group by c.id, c.name, c.card_number, s.id, s.displ
 function imageListWhereClauses(query: ImageListQuery): { sql: string; params: unknown[] } {
   const clauses: string[] = []
   const params: unknown[] = []
+  if (query.tradingCardIds) {
+    clauses.push(`c.id in ${inClause(query.tradingCardIds)}`)
+    params.push(...query.tradingCardIds)
+  }
   if (query.language) {
     clauses.push("s.language = ?")
     params.push(query.language)
@@ -193,4 +213,77 @@ export async function retrieveCardImageDetail(executor: QueryExecutor, tradingCa
       id: row.id, sku: row.sku, condition: row.condition, finish: row.finish, special_treatment: row.special_treatment,
     })),
   }
+}
+
+export interface VariantThumbnail {
+  tradingCardId: string | null
+  imageUrl: string | null
+  source: "PHOTO" | "TCGDEX" | null
+}
+
+/**
+ * Batched thumbnail lookup for a set of variants (used by the import
+ * review table, which needs one small image per row without an N+1 query
+ * per entry). A real, ready photograph always wins over the TCGdex
+ * reference artwork — mirrors the primary/secondary image rule everywhere
+ * else in the catalogue. Variants with neither get `imageUrl: null`, which
+ * the caller renders as a placeholder. `tradingCardId` is included so the
+ * frontend can open the full per-card image manager without a second
+ * lookup; it is `null` only if the variant id itself does not resolve.
+ */
+export async function listThumbnailsForVariants(
+  executor: QueryExecutor,
+  variantIds: string[],
+  derivePublicImageUrl: (objectKey: string) => string | null,
+): Promise<Record<string, VariantThumbnail>> {
+  const result: Record<string, VariantThumbnail> = {}
+  for (const id of variantIds) result[id] = { tradingCardId: null, imageUrl: null, source: null }
+  if (variantIds.length === 0) return result
+
+  const variantRows = await executor.execute<{ id: string; trading_card_id: string }>(
+    `select id, trading_card_id from trading_card_variant where id in ${inClause(variantIds)} and deleted_at is null`,
+    variantIds
+  )
+  for (const row of variantRows) result[row.id].tradingCardId = row.trading_card_id
+
+  const photoRows = await executor.execute<{ trading_card_variant_id: string; final_object_key: string }>(
+    `select distinct on (trading_card_variant_id) trading_card_variant_id, final_object_key
+     from trading_card_image
+     where trading_card_variant_id in ${inClause(variantIds)} and status = 'READY' and deleted_at is null
+     order by trading_card_variant_id, sort_order asc`,
+    variantIds
+  )
+  const withoutPhoto: string[] = []
+  for (const id of variantIds) {
+    const photo = photoRows.find((row) => row.trading_card_variant_id === id)
+    if (!photo) {
+      withoutPhoto.push(id)
+      continue
+    }
+    const imageUrl = derivePublicImageUrl(photo.final_object_key)
+    if (imageUrl) result[id] = { ...result[id], imageUrl, source: "PHOTO" }
+    else withoutPhoto.push(id)
+  }
+
+  if (withoutPhoto.length === 0) return result
+
+  const tcgdexRows = await executor.execute<{ trading_card_variant_id: string; snapshot: unknown }>(
+    `select v.id as trading_card_variant_id, p.snapshot
+     from trading_card_variant v
+     inner join lateral (
+       select snapshot from trading_card_tcgdex_enrichment_proposal
+       where trading_card_id = v.trading_card_id and provider = 'TCGDEX' and deleted_at is null
+       order by created_at desc limit 1
+     ) p on true
+     where v.id in ${inClause(withoutPhoto)}`,
+    withoutPhoto
+  )
+  for (const row of tcgdexRows) {
+    const snapshot = row.snapshot as Record<string, unknown> | undefined
+    const referenceArtworkUrl = typeof snapshot?.referenceArtworkUrl === "string" ? snapshot.referenceArtworkUrl : null
+    if (referenceArtworkUrl) {
+      result[row.trading_card_variant_id] = { ...result[row.trading_card_variant_id], imageUrl: referenceArtworkUrl, source: "TCGDEX" }
+    }
+  }
+  return result
 }

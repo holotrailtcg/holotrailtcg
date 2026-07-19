@@ -6,6 +6,7 @@ import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
+import { TooltipProvider } from "@medusajs/ui"
 import ImportsSnapshotDetailPage from "../page"
 
 jest.mock("@medusajs/ui", () => {
@@ -50,8 +51,14 @@ const BASE_DIAGNOSTICS = {
   count: 1, limit: 20, offset: 0,
 }
 
-function renderPage(summaryOverrides: Partial<typeof BASE_SUMMARY> = {}) {
+function renderPage(
+  summaryOverrides: Partial<typeof BASE_SUMMARY> = {},
+  extra: { entries?: { entries: Record<string, unknown>[]; count: number; limit: number; offset: number }; proposals?: unknown[]; thumbnails?: Record<string, unknown> } = {},
+) {
   const summary = { ...BASE_SUMMARY, ...summaryOverrides }
+  const entries = extra.entries ?? BASE_ENTRIES
+  const proposals = extra.proposals ?? []
+  const thumbnails = extra.thumbnails ?? {}
   const fetchMock = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     const method = init?.method ?? "GET"
@@ -62,8 +69,11 @@ function renderPage(summaryOverrides: Partial<typeof BASE_SUMMARY> = {}) {
       return mockResponse({ summary: { proposalCount: 1 } })
     }
     if (url.includes("/summary")) return mockResponse({ summary })
-    if (url.includes("/entries")) return mockResponse(BASE_ENTRIES)
+    if (url.includes("/entries")) return mockResponse(entries)
     if (url.includes("/diagnostics")) return mockResponse(BASE_DIAGNOSTICS)
+    if (url.includes("/admin/trading-card-inventory/proposals")) return mockResponse({ proposals, count: proposals.length, limit: 100, offset: 0 })
+    if (url.includes("/admin/trading-cards/variants/images")) return mockResponse({ thumbnails })
+    if (url.includes("/admin/trading-cards/") && url.includes("/images")) return mockResponse({ trading_card: { id: "tcard_1", name: "Test", card_number: "1" }, card_set: { id: "s1", display_name: "Set", language: "EN" }, tcgdex_reference_artwork_url: null, variants: [] })
     throw new Error(`Unexpected fetch: ${url}`)
   })
   global.fetch = fetchMock as unknown as typeof fetch
@@ -71,11 +81,13 @@ function renderPage(summaryOverrides: Partial<typeof BASE_SUMMARY> = {}) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={["/imports/snapshots/tcisnap_1"]}>
-        <Routes>
-          <Route path="/imports/snapshots/:id" element={<ImportsSnapshotDetailPage />} />
-        </Routes>
-      </MemoryRouter>
+      <TooltipProvider>
+        <MemoryRouter initialEntries={["/imports/snapshots/tcisnap_1"]}>
+          <Routes>
+            <Route path="/imports/snapshots/:id" element={<ImportsSnapshotDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      </TooltipProvider>
     </QueryClientProvider>
   )
   return { fetchMock }
@@ -88,11 +100,65 @@ describe("ImportsSnapshotDetailPage", () => {
   })
 
   it("renders the summary panel and the entries and diagnostics tables", async () => {
+    const user = userEvent.setup()
     renderPage()
     await screen.findByText("import.csv")
     expect(screen.getByText("VALIDATED")).toBeInTheDocument()
     expect(await screen.findByText("card:sv1|066/196|holo|nm")).toBeInTheDocument()
+    expect(screen.getByText("GBP 1.50")).toBeInTheDocument()
+    expect(screen.getByText("GBP 3.00")).toBeInTheDocument()
+    expect(screen.getByText("GBP 4.00")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: /Diagnostics/ }))
     expect(await screen.findByText("No candidate variant found")).toBeInTheDocument()
+  })
+
+  it("shows a placeholder image with no click target for an unmatched row without a create-card proposal", async () => {
+    renderPage()
+    await screen.findByText("import.csv")
+    expect(screen.queryByRole("button", { name: "card:sv1|066/196|holo|nm" })).not.toBeInTheDocument()
+  })
+
+  it("opens Create card when an unmatched row's placeholder image has a matching proposal", async () => {
+    const user = userEvent.setup()
+    const proposal = {
+      id: "tciprop_1", inventorySourceId: "tcisrc_1", inventorySnapshotId: "tcisnap_1", tradingCardVariantId: null,
+      card: null, cardIdentityHint: "SV1 066/196", providerReference: "card:sv1|066/196|holo|nm",
+      previousQuantity: null, proposedQuantity: null, quantityDelta: null, changeKind: "UNRESOLVED_VARIANT",
+      reviewStatus: "PENDING", resolvedBy: null, resolvedAt: null, reviewNote: null, appliedAt: null,
+      appliedTransactionId: null, medusaSyncStatus: "NOT_APPLICABLE", medusaInventoryItemId: null,
+      medusaStockLocationId: null, medusaSyncRetryCount: 0, medusaSyncLastError: null, createdAt: "2024-01-01T00:00:00.000Z",
+    }
+    renderPage({}, { proposals: [proposal] })
+    await screen.findByText("import.csv")
+
+    await user.click(await screen.findByRole("button", { name: "card:sv1|066/196|holo|nm" }))
+    expect(await screen.findByRole("heading", { name: "Create card" })).toBeInTheDocument()
+  })
+
+  it("opens the replace-image dialog when a matched row's thumbnail is clicked", async () => {
+    const user = userEvent.setup()
+    const matchedEntries = {
+      entries: [{ ...BASE_ENTRIES.entries[0], tradingCardVariantId: "tcvar_1" }],
+      count: 1, limit: 20, offset: 0,
+    }
+    renderPage({}, {
+      entries: matchedEntries,
+      thumbnails: { tcvar_1: { tradingCardId: "tcard_1", imageUrl: "https://img.example/photo.jpg", source: "PHOTO" } },
+    })
+    await screen.findByText("import.csv")
+
+    await user.click(await screen.findByRole("button", { name: "card:sv1|066/196|holo|nm" }))
+    expect(await screen.findByText("Card photograph")).toBeInTheDocument()
+  })
+
+  it("opens the row detail drawer when a row is clicked", async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await screen.findByText("import.csv")
+
+    await user.click(screen.getByText("card:sv1|066/196|holo|nm"))
+    expect(await screen.findByText("Row 1")).toBeInTheDocument()
   })
 
   it("shows retry matching when rows are outstanding, and reconciliation only while VALIDATED", async () => {
@@ -160,6 +226,8 @@ describe("ImportsSnapshotDetailPage", () => {
   it("links a diagnostic row back to its snapshot entry", async () => {
     const user = userEvent.setup()
     const { fetchMock } = renderPage()
+    await screen.findByText("import.csv")
+    await user.click(screen.getByRole("button", { name: /Diagnostics/ }))
     await screen.findByText("No candidate variant found")
     fetchMock.mockClear()
 
