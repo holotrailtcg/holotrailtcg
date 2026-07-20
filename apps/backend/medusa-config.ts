@@ -61,6 +61,9 @@ module.exports = defineConfig({
     {
       resolve: "./src/modules/trading-card-inventory",
     },
+    {
+      resolve: "./src/modules/ebay-integration",
+    },
     // Only overrides Medusa's default local file provider when Stage 4B.1
     // R2 configuration is enabled and fully valid; otherwise local file
     // behaviour is untouched (no module override registered at all).

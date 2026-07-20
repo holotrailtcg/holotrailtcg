@@ -22,6 +22,11 @@ Never put `DATABASE_URL`, `JWT_SECRET`, `COOKIE_SECRET`, `RESEND_API_KEY`,
 `RECAPTCHA_SECRET_KEY`, or `NEWSLETTER_RATE_LIMIT_HASH_SECRET` in a storefront
 file or any `NEXT_PUBLIC_` variable.
 
+The Stage E1 eBay values are backend-only too. `EBAY_SANDBOX_CLIENT_SECRET`,
+`EBAY_PRODUCTION_CLIENT_SECRET`, `EBAY_TOKEN_ENCRYPTION_KEY`, and every value
+inside `EBAY_TOKEN_ENCRYPTION_KEYS_JSON` are secrets and must never use a
+`NEXT_PUBLIC_` prefix.
+
 ## Stage 2C deployment matrix
 
 `Build` means a production storefront build. Backend newsletter values are not
@@ -101,6 +106,24 @@ Admin is disabled only when the value is the exact case-sensitive string
 `"true"`; every other value leaves Admin enabled.
 
 ## Baseline application variables
+
+### Stage E1 eBay connection OAuth
+
+| Variable | Requirement and validation |
+| --- | --- |
+| `EBAY_CONNECTIONS_ENABLED` | Only exact `true` enables Admin connection actions; default is disabled |
+| `EBAY_SANDBOX_CLIENT_ID`, `EBAY_PRODUCTION_CLIENT_ID` | Non-empty environment-specific application IDs |
+| `EBAY_SANDBOX_CLIENT_SECRET`, `EBAY_PRODUCTION_CLIENT_SECRET` | Backend secrets; never logged or returned |
+| `EBAY_SANDBOX_REDIRECT_URI`, `EBAY_PRODUCTION_REDIRECT_URI` | Environment-specific eBay RuNames |
+| `EBAY_TOKEN_ENCRYPTION_KEY_VERSION` | Required active key label (1–32 letters, digits, `_`, or `-`); no runtime default |
+| `EBAY_TOKEN_ENCRYPTION_KEY` | Base64 encoding of exactly 32 random bytes |
+| `EBAY_TOKEN_ENCRYPTION_KEYS_JSON` | Optional JSON object mapping retained old versions to base64 32-byte keys; a retained version must not duplicate the active version |
+
+The two environments resolve independently and use fixed official eBay hosts;
+a missing value fails only that environment closed. Automated HTTP tests inject
+fake values and an in-memory OAuth adapter and never contact eBay. Setup,
+callback URLs, verification, and rotation are documented in
+[Stage E1 eBay connection operations](stage-e1-ebay-connection-oauth.md).
 
 ### Stage 4A.1 TCGdex client
 

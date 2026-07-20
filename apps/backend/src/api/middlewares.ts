@@ -1,6 +1,8 @@
 import { defineMiddlewares, validateAndTransformBody } from "@medusajs/framework/http"
 import { subscribeBodySchema } from "./store/newsletter/shared/validation"
 import { redactNewsletterTokenQueryFromRequestLog } from "./store/newsletter/shared/request-logging"
+import { redactEbayCallbackQueryFromRequestLog } from "./admin/ebay/connections/callback/request-logging"
+import { observeEbayCallbackUrlAtCompletion } from "./admin/ebay/connections/callback/test-completion-observer"
 import { pulseCsvUploadMiddleware } from "./admin/trading-card-inventory/imports/upload-middleware"
 
 /**
@@ -119,6 +121,40 @@ export default defineMiddlewares({
       matcher: "/admin/trading-card-inventory/imports/snapshots/*/reconcile",
       methods: ["POST"],
       bodyParser: { sizeLimit: "2kb" },
+    },
+    // Stage E1 eBay connection lifecycle: bounded control payloads only.
+    // OAuth codes arrive on the GET callback and are never body-parsed.
+    {
+      matcher: "/admin/ebay/connections",
+      methods: ["POST"],
+      bodyParser: { sizeLimit: "1kb" },
+    },
+    {
+      matcher: "/admin/ebay/connections/disconnect",
+      methods: ["POST"],
+      bodyParser: { sizeLimit: "1kb" },
+    },
+    // The unauthenticated OAuth callback must retain its query for validation,
+    // but Medusa's access logger must never see its code, state, or error.
+    {
+      // Test-only completion observer for an unrelated Admin route. The real
+      // HTTP test proves the callback matcher below is the only route whose
+      // access-log-visible originalUrl is changed.
+      matcher: "/admin/ebay/connections",
+      methods: ["GET"],
+      middlewares: process.env.NODE_ENV === "test" && process.env.EBAY_TEST_CAPTURE_CALLBACK_LOG === "true"
+        ? [observeEbayCallbackUrlAtCompletion]
+        : [],
+    },
+    {
+      // Cover the whole dynamic callback namespace, including an invalid
+      // environment segment that the route rejects. Its query can still hold
+      // OAuth-shaped values and must never reach completion-time access logs.
+      matcher: "/admin/ebay/connections/callback/*",
+      methods: ["GET"],
+      middlewares: process.env.NODE_ENV === "test" && process.env.EBAY_TEST_CAPTURE_CALLBACK_LOG === "true"
+        ? [observeEbayCallbackUrlAtCompletion, redactEbayCallbackQueryFromRequestLog]
+        : [redactEbayCallbackQueryFromRequestLog],
     },
   ],
 })

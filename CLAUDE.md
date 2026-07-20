@@ -267,7 +267,9 @@ Every sellable card must have a real Holo Trail photograph.
 
 ## eBay rules
 
-The first eBay release is export-only.
+The original eBay plan was export-only. Approved staged API work may now add
+connection and later publishing capabilities, but every stage must remain
+explicitly scoped, environment-isolated, and disabled by default.
 
 It must support:
 
@@ -285,7 +287,13 @@ It must support:
 - Export history
 - Variant-to-eBay mapping
 
-Do not publish to eBay unless a later approved task explicitly enables Sandbox or Production API publishing.
+Stage E1 authorises and stores an eBay User OAuth connection only. It must not
+create categories, policies, inventory items, offers, listings, revisions, or
+stock synchronisation. Do not publish to eBay unless a later approved task
+explicitly enables that operation, first in Sandbox and separately in Production.
+API publication and synchronisation are approved only as future staged work;
+CSV remains a planned operational fallback. Pulse approval never publishes or
+updates an eBay listing automatically.
 
 Medusa remains the stock source of truth.
 

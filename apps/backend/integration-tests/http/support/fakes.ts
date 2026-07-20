@@ -15,6 +15,8 @@ import type {
   FetchedObject, ListObjectsPage, PresignedUpload, R2ImageStorageClient,
 } from "../../../src/modules/trading-cards/images/r2-client"
 import { assertManagedKey, assertManagedPrefix } from "../../../src/modules/trading-cards/images/managed-prefixes"
+import type { EbayOAuthClient } from "../../../src/modules/ebay-integration/dependencies"
+import { EbayRemoteError } from "../../../src/modules/ebay-integration/oauth/client"
 
 /**
  * Test-only fake reCAPTCHA verifier. Registered into the container before
@@ -169,5 +171,113 @@ export class FakeR2ImageStorageClient implements R2ImageStorageClient {
       .filter(([key]) => key.startsWith(input.prefix))
       .map(([key, entry]) => ({ key, lastModified: entry.lastModified, size: entry.bytes.length }))
     return { objects }
+  }
+}
+
+/** In-memory eBay adapter: full-app HTTP tests can exercise OAuth without network access. */
+export class FakeEbayOAuthClient implements EbayOAuthClient {
+  public readonly exchangeCalls: string[] = []
+  public readonly identityCalls: string[] = []
+  public readonly refreshCalls: string[] = []
+  public readonly revokeCalls: string[] = []
+  public accessToken = "http-test-access-token-sentinel"
+  public refreshToken = "http-test-refresh-token-sentinel"
+  public accountId = "http-test-ebay-account"
+  public failNextExchange = false
+  public failNextIdentity = false
+  public failNextRefresh = false
+  public failNextRevoke = false
+  private identityPause: { started: () => void; wait: Promise<void> } | null = null
+  private refreshPause: { started: () => void; wait: Promise<void> } | null = null
+  private revokePause: { started: () => void; wait: Promise<void> } | null = null
+
+  pauseNextIdentity(): { started: Promise<void>; release: () => void } {
+    let markStarted!: () => void
+    let release!: () => void
+    const started = new Promise<void>((resolve) => { markStarted = resolve })
+    const wait = new Promise<void>((resolve) => { release = resolve })
+    this.identityPause = { started: markStarted, wait }
+    return { started, release }
+  }
+
+  pauseNextRefresh(): { started: Promise<void>; release: () => void } {
+    let markStarted!: () => void
+    let release!: () => void
+    const started = new Promise<void>((resolve) => { markStarted = resolve })
+    const wait = new Promise<void>((resolve) => { release = resolve })
+    this.refreshPause = { started: markStarted, wait }
+    return { started, release }
+  }
+
+  pauseNextRevoke(): { started: Promise<void>; release: () => void } {
+    let markStarted!: () => void
+    let release!: () => void
+    const started = new Promise<void>((resolve) => { markStarted = resolve })
+    const wait = new Promise<void>((resolve) => { release = resolve })
+    this.revokePause = { started: markStarted, wait }
+    return { started, release }
+  }
+
+  exchangeAuthorisationCode: EbayOAuthClient["exchangeAuthorisationCode"] = async (_config, code, correlationId) => {
+    this.exchangeCalls.push(code)
+    if (this.failNextExchange) {
+      this.failNextExchange = false
+      throw new EbayRemoteError("OAUTH_REJECTED", correlationId ?? "http-test-exchange-correlation")
+    }
+    return {
+      token: { access_token: this.accessToken, refresh_token: this.refreshToken, expires_in: 7200, token_type: "User Access Token" },
+      correlationId: correlationId ?? "http-test-exchange-correlation",
+    }
+  }
+
+  getIdentity: EbayOAuthClient["getIdentity"] = async (_config, accessToken, correlationId) => {
+    this.identityCalls.push(accessToken)
+    if (this.identityPause) {
+      const pause = this.identityPause
+      this.identityPause = null
+      pause.started()
+      await pause.wait
+    }
+    if (this.failNextIdentity) {
+      this.failNextIdentity = false
+      throw new EbayRemoteError("IDENTITY_REJECTED", correlationId ?? "http-test-identity-correlation")
+    }
+    return {
+      identity: { userId: this.accountId, username: "HTTP test seller" },
+      correlationId: correlationId ?? "http-test-identity-correlation",
+    }
+  }
+
+  refreshUserAccessToken: EbayOAuthClient["refreshUserAccessToken"] = async (_config, refreshToken, correlationId) => {
+    this.refreshCalls.push(refreshToken)
+    if (this.refreshPause) {
+      const pause = this.refreshPause
+      this.refreshPause = null
+      pause.started()
+      await pause.wait
+    }
+    if (this.failNextRefresh) {
+      this.failNextRefresh = false
+      throw new EbayRemoteError("REMOTE_UNAVAILABLE", correlationId ?? "http-test-refresh-correlation")
+    }
+    return {
+      token: { access_token: this.accessToken, expires_in: 7200, token_type: "User Access Token" },
+      correlationId: correlationId ?? "http-test-refresh-correlation",
+    }
+  }
+
+  revokeRefreshToken: EbayOAuthClient["revokeRefreshToken"] = async (_config, refreshToken, correlationId) => {
+    this.revokeCalls.push(refreshToken)
+    if (this.revokePause) {
+      const pause = this.revokePause
+      this.revokePause = null
+      pause.started()
+      await pause.wait
+    }
+    if (this.failNextRevoke) {
+      this.failNextRevoke = false
+      throw new EbayRemoteError("REMOTE_UNAVAILABLE", correlationId ?? "http-test-revoke-correlation")
+    }
+    return { correlationId: correlationId ?? "http-test-revoke-correlation" }
   }
 }
