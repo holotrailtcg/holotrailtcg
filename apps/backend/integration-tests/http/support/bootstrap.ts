@@ -9,7 +9,8 @@ import {
 } from "../../../src/api/store/newsletter/shared/dependencies"
 import { TCGDEX_ADMIN_CLIENT_KEY } from "../../../src/api/admin/tcgdex/dependencies"
 import { R2_IMAGE_STORAGE_CLIENT_KEY } from "../../../src/api/admin/trading-cards/dependencies"
-import { FakeRecaptchaVerifier, FakeConfirmationEmailSender, FakeTcgDexClient, FakeR2ImageStorageClient } from "./fakes"
+import { EBAY_OAUTH_CLIENT_KEY } from "../../../src/modules/ebay-integration/dependencies"
+import { FakeRecaptchaVerifier, FakeConfirmationEmailSender, FakeTcgDexClient, FakeR2ImageStorageClient, FakeEbayOAuthClient } from "./fakes"
 
 /**
  * HTTP integration test bootstrap for the public newsletter routes
@@ -76,6 +77,20 @@ const TEST_ENV_OVERRIDES: Record<string, string> = {
   // no public base URL exists). Leaving this to the ambient environment
   // would make those assertions depend on machine-specific local state.
   R2_IMAGES_ENABLED: "false",
+  ADMIN_CORS: "http://localhost:9000",
+  EBAY_CONNECTIONS_ENABLED: "true",
+  EBAY_SANDBOX_CLIENT_ID: "http-test-sandbox-client-id",
+  EBAY_SANDBOX_CLIENT_SECRET: "http-test-sandbox-client-secret",
+  EBAY_SANDBOX_REDIRECT_URI: "http-test-sandbox-runame",
+  EBAY_PRODUCTION_CLIENT_ID: "http-test-production-client-id",
+  EBAY_PRODUCTION_CLIENT_SECRET: "http-test-production-client-secret",
+  EBAY_PRODUCTION_REDIRECT_URI: "http-test-production-runame",
+  EBAY_TOKEN_ENCRYPTION_KEY_VERSION: "http-test-v1",
+  EBAY_TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
+  // Medusa intentionally skips Morgan under NODE_ENV=test. This enables only
+  // the eBay test observer that reads originalUrl at the same response-finish
+  // boundary, before the callback redactor is registered downstream.
+  EBAY_TEST_CAPTURE_CALLBACK_LOG: "true",
   // RECAPTCHA_SECRET_KEY is deliberately left unset: the fake verifier is
   // registered before any request, so the real GoogleRecaptchaVerifier
   // (and its RECAPTCHA_SECRET_KEY requirement) must never be constructed
@@ -89,6 +104,7 @@ export interface NewsletterHttpTestApp {
   emailSender: FakeConfirmationEmailSender
   tcgdexClient: FakeTcgDexClient
   r2ImageClient: FakeR2ImageStorageClient
+  ebayOAuthClient: FakeEbayOAuthClient
   container: MedusaContainer
   close: () => Promise<void>
   /** POST /store/newsletter/subscribe with an optional client-address override header. */
@@ -222,10 +238,12 @@ export async function bootstrapNewsletterHttpTestApp(): Promise<NewsletterHttpTe
   const emailSender = new FakeConfirmationEmailSender()
   const tcgdexClient = new FakeTcgDexClient()
   const r2ImageClient = new FakeR2ImageStorageClient()
+  const ebayOAuthClient = new FakeEbayOAuthClient()
   container.register(NEWSLETTER_RECAPTCHA_VERIFIER_KEY, asValue(recaptcha))
   container.register(NEWSLETTER_CONFIRMATION_EMAIL_SENDER_KEY, asValue(emailSender))
   container.register(TCGDEX_ADMIN_CLIENT_KEY, asValue(tcgdexClient))
   container.register(R2_IMAGE_STORAGE_CLIENT_KEY, asValue(r2ImageClient))
+  container.register(EBAY_OAUTH_CLIENT_KEY, asValue(ebayOAuthClient))
 
   const publishableApiKey = await createTestPublishableApiKey(container)
 
@@ -244,6 +262,7 @@ export async function bootstrapNewsletterHttpTestApp(): Promise<NewsletterHttpTe
     emailSender,
     tcgdexClient,
     r2ImageClient,
+    ebayOAuthClient,
     container,
     close: async () => {
       await publishableApiKey.remove()

@@ -7,6 +7,11 @@ import { TRADING_CARDS_MODULE } from "../../src/modules/trading-cards"
 import type TradingCardsModuleService from "../../src/modules/trading-cards/service"
 import { TRADING_CARD_INVENTORY_MODULE } from "../../src/modules/trading-card-inventory"
 import type TradingCardInventoryModuleService from "../../src/modules/trading-card-inventory/service"
+import { EBAY_INTEGRATION_MODULE } from "../../src/modules/ebay-integration"
+import type EbayIntegrationModuleService from "../../src/modules/ebay-integration/service"
+import { getEbayAccessToken, invalidateEbayAccessToken } from "../../src/modules/ebay-integration/token-service"
+import { hashOAuthState } from "../../src/modules/ebay-integration/oauth/state"
+import { getEbayCallbackCompletionUrls, resetEbayCallbackCompletionUrls } from "../../src/api/admin/ebay/connections/callback/test-completion-observer"
 import { TCGDEX_ERROR_CODE, TcgDexError } from "../../src/modules/trading-cards/tcgdex"
 import { createTradingCardForProductWorkflow } from "../../src/workflows/trading-cards/create-trading-card-for-product"
 import { createVariantForProductVariantWorkflow } from "../../src/workflows/trading-cards/create-variant-for-product-variant"
@@ -2670,5 +2675,333 @@ describe("POST /admin/trading-cards/create-from-inventory-row", () => {
       const refreshedProposal = await inventory.retrieveInventoryProposal(proposal.id)
       expect(refreshedProposal).toMatchObject({ change_kind: "UNRESOLVED_VARIANT", trading_card_variant_id: null, card_creation_claim_token: null })
     })
+  })
+})
+
+describe("Stage E1 /admin/ebay/connections", () => {
+  if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required for HTTP integration tests")
+  const adminToken = generateJwtToken({
+    actor_id: "user_ebay_e1_http_test", actor_type: "user", auth_identity_id: "auth_ebay_e1_http_test",
+  }, { secret: process.env.JWT_SECRET, expiresIn: 3600 })
+  const origin = "http://localhost:9000"
+
+  const authHeaders = (token = adminToken) => ({ authorization: `Bearer ${token}` })
+  const post = (path: string, body: unknown, token = adminToken, includeOrigin = true) => fetch(`${app.baseUrl}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders(token), ...(includeOrigin ? { origin } : {}) },
+    body: JSON.stringify(body),
+  })
+  const start = async (environment: "SANDBOX" | "PRODUCTION" = "SANDBOX") => {
+    const response = await post("/admin/ebay/connections", {
+      environment, reconnect: true, confirmProduction: environment === "PRODUCTION",
+    })
+    expect(response.status).toBe(201)
+    const body = await response.json() as { authorisationUrl: string }
+    return { responseBody: body, state: new URL(body.authorisationUrl).searchParams.get("state")! }
+  }
+
+  it("observes the callback path without its query at the real response-completion boundary", async () => {
+    resetEbayCallbackCompletionUrls()
+    for (const environment of ["SANDBOX", "PRODUCTION"] as const) {
+      const attempt = await start(environment)
+      const query = environment === "SANDBOX"
+        ? new URLSearchParams({ state: attempt.state, code: "arbitrary-code-value" })
+        : new URLSearchParams({ state: attempt.state, error: "access_denied", error_description: "arbitrary-provider-detail" })
+      const response = await fetch(`${app.baseUrl}/admin/ebay/connections/callback/${environment}?${query}`, { redirect: "manual" })
+      expect(response.status).toBe(303)
+      expect(response.headers.get("location")).toContain(environment === "SANDBOX" ? "result=connected" : "result=denied")
+      const observed = getEbayCallbackCompletionUrls().at(-1) ?? ""
+      expect(observed).toBe(`/admin/ebay/connections/callback/${environment}`)
+      for (const secret of [attempt.state, "arbitrary-code-value", "access_denied", "arbitrary-provider-detail"]) expect(observed).not.toContain(secret)
+    }
+
+    const malformed = await fetch(`${app.baseUrl}/admin/ebay/connections/callback/SANDBOX?state=short&error_description=malformed-secret-value`, { redirect: "manual" })
+    expect(malformed.status).toBe(303)
+    expect(getEbayCallbackCompletionUrls().at(-1)).toBe("/admin/ebay/connections/callback/SANDBOX")
+    expect(getEbayCallbackCompletionUrls().at(-1)).not.toContain("malformed-secret-value")
+
+    // The route rejects an unknown dynamic environment segment before it can
+    // parse the query. It still needs callback-owned log redaction because
+    // arbitrary callers can put OAuth-shaped values in that query.
+    const invalidEnvironment = await fetch(`${app.baseUrl}/admin/ebay/connections/callback/UNKNOWN?state=invalid-environment-state&code=invalid-environment-code&error_description=invalid-environment-detail`, { redirect: "manual" })
+    expect(invalidEnvironment.status).toBe(303)
+    expect(getEbayCallbackCompletionUrls().at(-1)).toBe("/admin/ebay/connections/callback/UNKNOWN")
+    for (const secret of ["invalid-environment-state", "invalid-environment-code", "invalid-environment-detail"]) {
+      expect(getEbayCallbackCompletionUrls().at(-1)).not.toContain(secret)
+    }
+
+    const unrelated = await fetch(`${app.baseUrl}/admin/ebay/connections?marker=unrelated-query-sentinel`, { headers: authHeaders() })
+    expect(unrelated.status).toBe(200)
+    expect(getEbayCallbackCompletionUrls().at(-1)).toContain("marker=unrelated-query-sentinel")
+  })
+
+  it("coordinates stale cleanup with callback consumption and preserves the active current attempt", async () => {
+    const service = app.container.resolve<EbayIntegrationModuleService>(EBAY_INTEGRATION_MODULE)
+    const pg = app.container.resolve<any>(ContainerRegistrationKeys.PG_CONNECTION)
+    const stale = await start()
+    await pg.raw(
+      `update ebay_integration_oauth_state set expires_at = now() - interval '25 hours', created_at = now() - interval '26 hours'
+       where state_hash = ?`, [hashOAuthState(stale.state)]
+    )
+    const [cleanupCount, callback] = await Promise.all([
+      service.cleanupOAuthStates(100),
+      fetch(`${app.baseUrl}/admin/ebay/connections/callback/SANDBOX?state=${encodeURIComponent(stale.state)}&code=expired-race-code`, { redirect: "manual" }),
+    ])
+    expect(cleanupCount).toBeGreaterThanOrEqual(1)
+    expect(callback.headers.get("location")).toContain("result=failed")
+
+    const active = await start()
+    await pg.raw(
+      `update ebay_integration_oauth_state set created_at = now() - interval '26 hours' where state_hash = ?`,
+      [hashOAuthState(active.state)]
+    )
+    await service.cleanupOAuthStates(100)
+    const activeCallback = await fetch(`${app.baseUrl}/admin/ebay/connections/callback/SANDBOX?state=${encodeURIComponent(active.state)}&code=active-cleanup-code`, { redirect: "manual" })
+    expect(activeCallback.headers.get("location")).toContain("result=connected")
+  })
+
+  it("requires Admin authentication, trusted Origin, and explicit Production confirmation", async () => {
+    expect((await fetch(`${app.baseUrl}/admin/ebay/connections`)).status).toBe(401)
+    expect((await fetch(`${app.baseUrl}/admin/ebay/connections`, {
+      method: "POST", headers: { "Content-Type": "application/json", origin },
+      body: JSON.stringify({ environment: "SANDBOX", reconnect: true }),
+    })).status).toBe(401)
+    expect((await fetch(`${app.baseUrl}/admin/ebay/connections/disconnect`, {
+      method: "POST", headers: { "Content-Type": "application/json", origin },
+      body: JSON.stringify({ environment: "SANDBOX", confirm: true }),
+    })).status).toBe(401)
+    expect((await post("/admin/ebay/connections", { environment: "SANDBOX", reconnect: true }, adminToken, false)).status).toBe(400)
+    expect((await post("/admin/ebay/connections", {
+      environment: "PRODUCTION", reconnect: true, confirmProduction: false,
+    })).status).toBe(400)
+    const configuredClientId = process.env.EBAY_SANDBOX_CLIENT_ID
+    delete process.env.EBAY_SANDBOX_CLIENT_ID
+    expect((await post("/admin/ebay/connections", { environment: "SANDBOX", reconnect: true })).status).toBe(400)
+    process.env.EBAY_SANDBOX_CLIENT_ID = configuredClientId
+  })
+
+  it("uses state-authenticated callback without an Admin cookie and keeps output safe", async () => {
+    const { responseBody, state } = await start()
+    expect(JSON.stringify(responseBody)).not.toMatch(/client-secret|refresh-token-sentinel|access-token-sentinel/)
+
+    const spoofedActor = await fetch(`${app.baseUrl}/admin/ebay/connections/callback/SANDBOX?state=${encodeURIComponent(state)}&code=fake-code&actor_id=spoofed`, {
+      redirect: "manual",
+    })
+    expect(spoofedActor.status).toBe(303)
+    expect(spoofedActor.headers.get("location")).toContain("result=failed")
+
+    const callback = await fetch(`${app.baseUrl}/admin/ebay/connections/callback/SANDBOX?state=${encodeURIComponent(state)}&code=fake-code&expires_in=299`, {
+      redirect: "manual",
+    })
+    expect(callback.status).toBe(303)
+    expect(callback.headers.get("location")).toContain("result=connected")
+
+    const replay = await fetch(`${app.baseUrl}/admin/ebay/connections/callback/SANDBOX?state=${encodeURIComponent(state)}&code=fake-code`, {
+      redirect: "manual",
+    })
+    expect(replay.status).toBe(303)
+    expect(replay.headers.get("location")).toContain("result=failed")
+
+    const invented = await fetch(`${app.baseUrl}/admin/ebay/connections/callback/SANDBOX?state=${"x".repeat(43)}&code=fake-code`, {
+      redirect: "manual",
+    })
+    expect(invented.status).toBe(303)
+    expect(invented.headers.get("location")).toContain("result=failed")
+
+    const expiredAttempt = await start("PRODUCTION")
+    const pg = app.container.resolve<any>(ContainerRegistrationKeys.PG_CONNECTION)
+    await pg.raw(
+      `update ebay_integration_oauth_state set expires_at = now() - interval '1 second' where state_hash = ?`,
+      [hashOAuthState(expiredAttempt.state)]
+    )
+    const expired = await fetch(`${app.baseUrl}/admin/ebay/connections/callback/PRODUCTION?state=${encodeURIComponent(expiredAttempt.state)}&code=fake-code`, {
+      redirect: "manual",
+    })
+    expect(expired.status).toBe(303)
+    expect(expired.headers.get("location")).toContain("result=failed")
+
+    const status = await fetch(`${app.baseUrl}/admin/ebay/connections`, { headers: authHeaders() })
+    expect(status.status).toBe(200)
+    const statusBody = await status.json() as { environments: Array<{ environment: string; connection: { id: string } | null }> }
+    const text = JSON.stringify(statusBody)
+    expect(text).toContain("http-test-ebay-account")
+    expect(text).not.toMatch(/refresh-token-sentinel|access-token-sentinel|ciphertext|authTag|connectedBy/)
+
+    // This full app verifies same-process single-flight behavior. Separate
+    // cache instances and the shared database refresh reservation are covered
+    // by focused token-service/module tests; this assertion is not described
+    // as proof of multiple backend processes.
+    const connectionId = statusBody.environments.find((item) => item.environment === "SANDBOX")!.connection!.id
+    invalidateEbayAccessToken(connectionId)
+    const refreshCallsBefore = app.ebayOAuthClient.refreshCalls.length
+    expect(await Promise.all([
+      getEbayAccessToken(app.container, connectionId),
+      getEbayAccessToken(app.container, connectionId),
+    ])).toEqual([app.ebayOAuthClient.accessToken, app.ebayOAuthClient.accessToken])
+    expect(app.ebayOAuthClient.refreshCalls.length).toBe(refreshCallsBefore + 1)
+  })
+
+  it("records denial safely and disconnects explicitly and idempotently", async () => {
+    const deniedAttempt = await start()
+    const denied = await fetch(`${app.baseUrl}/admin/ebay/connections/callback/SANDBOX?state=${encodeURIComponent(deniedAttempt.state)}&error=access_denied`, {
+      redirect: "manual",
+    })
+    expect(denied.status).toBe(303)
+    expect(denied.headers.get("location")).toContain("result=denied")
+
+    const connectedAttempt = await start()
+    const connected = await fetch(`${app.baseUrl}/admin/ebay/connections/callback/SANDBOX?state=${encodeURIComponent(connectedAttempt.state)}&code=disconnect-code`, {
+      redirect: "manual",
+    })
+    expect(connected.status).toBe(303)
+    const revokeCallsBefore = app.ebayOAuthClient.revokeCalls.length
+    expect((await post("/admin/ebay/connections/disconnect", { environment: "SANDBOX", confirm: false })).status).toBe(400)
+    const disconnected = await post("/admin/ebay/connections/disconnect", { environment: "SANDBOX", confirm: true })
+    expect(disconnected.status).toBe(200)
+    expect(app.ebayOAuthClient.revokeCalls.length).toBe(revokeCallsBefore + 1)
+    expect(JSON.stringify(await disconnected.json())).not.toMatch(/refresh-token-sentinel|ciphertext|authTag/)
+    expect((await post("/admin/ebay/connections/disconnect", { environment: "SANDBOX", confirm: true })).status).toBe(200)
+  })
+
+  it("redacts a mocked token-exchange failure", async () => {
+    const attempt = await start()
+    app.ebayOAuthClient.failNextExchange = true
+    const failed = await fetch(`${app.baseUrl}/admin/ebay/connections/callback/SANDBOX?state=${encodeURIComponent(attempt.state)}&code=secret-shaped-code-sentinel`, {
+      redirect: "manual",
+    })
+    expect(failed.status).toBe(303)
+    expect(failed.headers.get("location")).toContain("result=failed")
+    expect(failed.headers.get("location")).not.toContain("secret-shaped-code-sentinel")
+    const status = await fetch(`${app.baseUrl}/admin/ebay/connections`, { headers: authHeaders() })
+    expect(await status.text()).not.toContain("secret-shaped-code-sentinel")
+  })
+
+  it("discards post-exchange credentials without revoking a potentially related grant", async () => {
+    const first = await start()
+    const revokeCallsBefore = app.ebayOAuthClient.revokeCalls.length
+    app.ebayOAuthClient.failNextIdentity = true
+    const identityFailed = await fetch(`${app.baseUrl}/admin/ebay/connections/callback/SANDBOX?state=${encodeURIComponent(first.state)}&code=identity-failure`, {
+      redirect: "manual",
+    })
+    expect(identityFailed.status).toBe(303)
+    expect(identityFailed.headers.get("location")).toContain("result=failed")
+    expect(app.ebayOAuthClient.revokeCalls.length).toBe(revokeCallsBefore)
+
+    const second = await start()
+    app.ebayOAuthClient.failNextIdentity = true
+    const cleanupFailed = await fetch(`${app.baseUrl}/admin/ebay/connections/callback/SANDBOX?state=${encodeURIComponent(second.state)}&code=cleanup-failure`, {
+      redirect: "manual",
+    })
+    expect(cleanupFailed.status).toBe(303)
+    expect(cleanupFailed.headers.get("location")).toContain("result=failed")
+    expect(cleanupFailed.headers.get("location")).not.toContain("cleanup-failure")
+  })
+
+  it("does not revoke an exchanged grant when its callback loses to a newer completed attempt", async () => {
+    const older = await start()
+    const pause = app.ebayOAuthClient.pauseNextIdentity()
+    const olderCallback = fetch(`${app.baseUrl}/admin/ebay/connections/callback/SANDBOX?state=${encodeURIComponent(older.state)}&code=older-code`, {
+      redirect: "manual",
+    })
+    await pause.started
+
+    const newer = await start()
+    const newerCallback = await fetch(`${app.baseUrl}/admin/ebay/connections/callback/SANDBOX?state=${encodeURIComponent(newer.state)}&code=newer-code`, {
+      redirect: "manual",
+    })
+    expect(newerCallback.headers.get("location")).toContain("result=connected")
+    const revocationsBeforeLosingCallback = app.ebayOAuthClient.revokeCalls.length
+
+    pause.release()
+    const losingCallback = await olderCallback
+    expect(losingCallback.status).toBe(303)
+    expect(losingCallback.headers.get("location")).toContain("result=superseded")
+    expect(app.ebayOAuthClient.revokeCalls.length).toBe(revocationsBeforeLosingCallback)
+
+    const status = await fetch(`${app.baseUrl}/admin/ebay/connections`, { headers: authHeaders() })
+    expect((await status.json() as any).environments.find((item: any) => item.environment === "SANDBOX").connection.status)
+      .toBe("CONNECTED")
+  })
+
+  it("lets disconnect finish while callback identity is paused and prevents callback resurrection", async () => {
+    const attempt = await start()
+    const pause = app.ebayOAuthClient.pauseNextIdentity()
+    const callbackPromise = fetch(`${app.baseUrl}/admin/ebay/connections/callback/SANDBOX?state=${encodeURIComponent(attempt.state)}&code=paused-identity-code`, {
+      redirect: "manual",
+    })
+    await pause.started
+    const disconnected = await post("/admin/ebay/connections/disconnect", { environment: "SANDBOX", confirm: true })
+    expect(disconnected.status).toBe(200)
+    pause.release()
+    const callback = await callbackPromise
+    expect(callback.headers.get("location")).toContain("result=superseded")
+    const service = app.container.resolve<EbayIntegrationModuleService>(EBAY_INTEGRATION_MODULE)
+    const connection = await service.retrieveSafeConnectionByEnvironment("SANDBOX")
+    expect(connection).not.toBeNull()
+    expect(["DISCONNECTED", "REVOKED"]).toContain(connection!.status)
+    await expect(service.retrieveStoredCredential(connection!.id)).rejects.toThrow("No usable")
+  })
+
+  it("rejects stale refresh success and failure after reconnect changes the generation", async () => {
+    const connect = async (accountId: string) => {
+      app.ebayOAuthClient.accountId = accountId
+      const attempt = await start()
+      const response = await fetch(`${app.baseUrl}/admin/ebay/connections/callback/SANDBOX?state=${encodeURIComponent(attempt.state)}&code=${accountId}`, { redirect: "manual" })
+      expect(response.headers.get("location")).toContain("result=connected")
+      const service = app.container.resolve<EbayIntegrationModuleService>(EBAY_INTEGRATION_MODULE)
+      return service.retrieveSafeConnectionByEnvironment("SANDBOX")
+    }
+
+    for (const remoteFailure of [false, true]) {
+      const current = await connect(`refresh-old-${remoteFailure}`)
+      expect(current).not.toBeNull()
+      invalidateEbayAccessToken(current!.id)
+      const pause = app.ebayOAuthClient.pauseNextRefresh()
+      app.ebayOAuthClient.failNextRefresh = remoteFailure
+      const refresh = getEbayAccessToken(app.container, current!.id)
+      await pause.started
+      const newer = await connect(`refresh-new-${remoteFailure}`)
+      expect(newer).not.toBeNull()
+      const newerCredential = await app.container.resolve<EbayIntegrationModuleService>(EBAY_INTEGRATION_MODULE)
+        .retrieveStoredCredential(newer!.id)
+      pause.release()
+      await expect(refresh).rejects.toThrow()
+      const service = app.container.resolve<EbayIntegrationModuleService>(EBAY_INTEGRATION_MODULE)
+      const saved = await service.retrieveSafeConnectionByEnvironment("SANDBOX")
+      expect(saved).toMatchObject({ status: "CONNECTED", ebayAccountId: `refresh-new-${remoteFailure}` })
+      expect((await service.retrieveStoredCredential(saved!.id)).credentialGeneration).toBe(newerCredential.credentialGeneration)
+    }
+  })
+
+  it("serializes simultaneous DISCONNECTING retries and keeps completed disconnect idempotent", async () => {
+    await start().then(async (attempt) => {
+      await fetch(`${app.baseUrl}/admin/ebay/connections/callback/SANDBOX?state=${encodeURIComponent(attempt.state)}&code=disconnect-retry-code`, { redirect: "manual" })
+    })
+    const pause = app.ebayOAuthClient.pauseNextRevoke()
+    const revokeBefore = app.ebayOAuthClient.revokeCalls.length
+    const first = post("/admin/ebay/connections/disconnect", { environment: "SANDBOX", confirm: true })
+    await pause.started
+    const second = await post("/admin/ebay/connections/disconnect", { environment: "SANDBOX", confirm: true })
+    pause.release()
+    expect((await first).status).toBe(200)
+    expect(second.status).toBe(200)
+    expect(app.ebayOAuthClient.revokeCalls.length).toBe(revokeBefore + 2)
+    const callsAfterCompletion = app.ebayOAuthClient.revokeCalls.length
+    expect((await post("/admin/ebay/connections/disconnect", { environment: "SANDBOX", confirm: true })).status).toBe(200)
+    expect(app.ebayOAuthClient.revokeCalls.length).toBe(callsAfterCompletion)
+  })
+
+  it("removes local credentials when a DISCONNECTING revocation retry fails", async () => {
+    const attempt = await start()
+    await fetch(`${app.baseUrl}/admin/ebay/connections/callback/SANDBOX?state=${encodeURIComponent(attempt.state)}&code=revocation-failure-code`, { redirect: "manual" })
+    const service = app.container.resolve<EbayIntegrationModuleService>(EBAY_INTEGRATION_MODULE)
+    const prepared = await service.beginDisconnect("SANDBOX")
+    expect(prepared.connection?.status).toBe("DISCONNECTING")
+    app.ebayOAuthClient.failNextRevoke = true
+    const retried = await post("/admin/ebay/connections/disconnect", { environment: "SANDBOX", confirm: true })
+    expect(retried.status).toBe(200)
+    const connection = await service.retrieveSafeConnectionByEnvironment("SANDBOX")
+    expect(connection).toMatchObject({ status: "DISCONNECTED", lastSafeErrorCategory: "REVOCATION_UNCONFIRMED" })
+    await expect(service.retrieveStoredCredential(connection!.id)).rejects.toThrow("No usable")
   })
 })
