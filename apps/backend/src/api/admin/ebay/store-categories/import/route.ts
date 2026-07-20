@@ -1,0 +1,3 @@
+import type { AuthenticatedMedusaRequest, MedusaResponse } from "@medusajs/framework/http"
+import { importCsvSchema, service, parseAdminInput, adminActor, previewBoundCategoryWrite, correlation } from "../shared"
+export async function POST(req: AuthenticatedMedusaRequest, res: MedusaResponse) { const body = parseAdminInput(importCsvSchema, req.body ?? {}); const actorId = adminActor(req); const result = await previewBoundCategoryWrite(req, body.previewId, actorId, () => service(req).applyStoreCategoryCsv({ previewId: body.previewId, csv: body.csv, actorId, correlationId: correlation() })); res.json(result) }

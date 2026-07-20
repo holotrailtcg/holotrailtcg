@@ -134,6 +134,13 @@ export default defineMiddlewares({
       methods: ["POST"],
       bodyParser: { sizeLimit: "1kb" },
     },
+    // E2A1 Store-category controls are JSON only. CSV bytes are held only in
+    // the request and parsed for preview/application; they are never stored.
+    {
+      matcher: "/admin/ebay/store-categories*",
+      methods: ["POST"],
+      bodyParser: { sizeLimit: "1100kb" },
+    },
     // The unauthenticated OAuth callback must retain its query for validation,
     // but Medusa's access logger must never see its code, state, or error.
     {

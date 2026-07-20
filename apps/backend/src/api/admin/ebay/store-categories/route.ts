@@ -1,0 +1,4 @@
+import type { AuthenticatedMedusaRequest, MedusaResponse } from "@medusajs/framework/http"
+import { environmentSchema, createCategorySchema, service, parseAdminInput, adminActor, categoryWrite, correlation } from "./shared"
+export async function GET(req: AuthenticatedMedusaRequest, res: MedusaResponse) { const environment = parseAdminInput(environmentSchema, req.query.environment); res.json(await service(req).listStoreCategories(environment)) }
+export async function POST(req: AuthenticatedMedusaRequest, res: MedusaResponse) { const body = parseAdminInput(createCategorySchema, req.body ?? {}); const category = await categoryWrite(req, body.environment, () => service(req).createStoreCategory({ ...body, parentExternalId: body.parentExternalId ?? null, actorId: adminActor(req), correlationId: correlation() })); res.status(201).json({ category }) }

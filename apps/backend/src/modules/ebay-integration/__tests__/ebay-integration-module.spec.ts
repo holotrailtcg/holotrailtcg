@@ -5,6 +5,8 @@ import { EBAY_INTEGRATION_MODULE } from "../index"
 import { encryptRefreshToken } from "../crypto/token-encryption"
 import { hashOAuthState } from "../oauth/state"
 import { Migration20260720100000 } from "../migrations/Migration20260720100000"
+import { Migration20260720110000 } from "../migrations/Migration20260720110000"
+import { Migration20260720120000 } from "../migrations/Migration20260720120000"
 import { createEbayTokenService } from "../token-service"
 import type { EbayEnvironmentConfig } from "../config"
 import type { EbayOAuthClient } from "../dependencies"
@@ -18,12 +20,24 @@ const rows = (result: any): any[] => Array.isArray(result) ? result : result.row
 
 beforeAll(async () => {
   pgConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
+  const previewsDown = new Migration20260720120000(undefined as never, undefined as never)
+  await previewsDown.down()
+  for (const query of previewsDown.getQueries().map(String)) await pgConnection.raw(query)
+  const categoriesDown = new Migration20260720110000(undefined as never, undefined as never)
+  await categoriesDown.down()
+  for (const query of categoriesDown.getQueries().map(String)) await pgConnection.raw(query)
   const down = new Migration20260720100000(undefined as never, undefined as never)
   await down.down()
   for (const query of down.getQueries().map(String)) await pgConnection.raw(query)
   const up = new Migration20260720100000(undefined as never, undefined as never)
   await up.up()
   for (const query of up.getQueries().map(String)) await pgConnection.raw(query)
+  const categories = new Migration20260720110000(undefined as never, undefined as never)
+  await categories.up()
+  for (const query of categories.getQueries().map(String)) await pgConnection.raw(query)
+  const previews = new Migration20260720120000(undefined as never, undefined as never)
+  await previews.up()
+  for (const query of previews.getQueries().map(String)) await pgConnection.raw(query)
   medusaApp = await MedusaApp({
     modulesConfig: {
       [EBAY_INTEGRATION_MODULE]: { resolve: "./src/modules/ebay-integration" },
@@ -67,6 +81,142 @@ async function complete(attempt: any, tokenValue = "secret-refresh-token") {
 }
 
 describe("eBay integration module", () => {
+  it("enforces Store category hierarchy directly in PostgreSQL", async () => {
+    const scope = `scope-${suffix()}`
+    const insert = (id: string, external: string, parent: string | null, level: number, environment = "SANDBOX", account = scope) => pgConnection.raw(
+      `insert into ebay_integration_store_category (id,environment,ebay_account_id,external_id,name,parent_external_id,sibling_order,level,path,status,source) values (?,?,?,?,?,?,0,?,'path','ACTIVE','MANUAL')`,
+      [id, environment, account, external, external, parent, level]
+    )
+    await expect(insert(`root-${scope}`, "24393782015", null, 1)).resolves.toBeDefined()
+    await expect(insert(`child-${scope}`, "child", "24393782015", 2)).resolves.toBeDefined()
+    await expect(insert(`third-${scope}`, "third", "child", 3)).resolves.toBeDefined()
+    await expect(insert(`fourth-${scope}`, "fourth", "third", 4)).rejects.toThrow()
+    await expect(insert(`self-${scope}`, "self", "self", 2)).rejects.toThrow()
+    await expect(insert(`wrong-${scope}`, "wrong", "24393782015", 3)).rejects.toThrow()
+    await expect(insert(`other-${scope}`, "other", "24393782015", 2, "PRODUCTION", `other-${scope}`)).rejects.toThrow()
+    await expect(insert(`same-prod-${scope}`, "24393782015", null, 1, "PRODUCTION", `other-${scope}`)).resolves.toBeDefined()
+    await expect(insert(`duplicate-${scope}`, "24393782015", null, 1)).rejects.toThrow()
+    await expect(pgConnection.raw(`update ebay_integration_store_category set parent_external_id = 'child', level = 3 where id = ?`, [`root-${scope}`])).rejects.toThrow()
+  })
+
+  it("previews and atomically applies a complete Store category CSV without numeric ID coercion", async () => {
+    const attempt = await begin("PRODUCTION", `catalogue-${suffix()}`)
+    await complete(attempt)
+    const csv = [
+      "ebay_store_category_id,name,parent_ebay_store_category_id,sibling_order",
+      "24393782015,Promos,,10",
+      "24393788015,Mega,24393782015,10",
+      "24393799015,Special,24393788015,10",
+    ].join("\n")
+    const preview = await service.previewStoreCategoryCsv({ environment: "PRODUCTION", csv, actorId: "admin", correlationId: randomUUID() })
+    expect(preview).toMatchObject({ valid: true, added: ["24393782015", "24393788015", "24393799015"] })
+    expect((await service.listStoreCategories("PRODUCTION")).categories).toHaveLength(0)
+    const applied = await service.applyStoreCategoryCsv({ previewId: preview.previewId, csv, actorId: "admin", correlationId: randomUUID() })
+    expect(applied.categories.map((category: any) => category.externalId)).toContain("24393782015")
+    const root = applied.categories.find((category: any) => category.externalId === "24393782015")!
+    const changedCsv = [
+      "ebay_store_category_id,name,parent_ebay_store_category_id,sibling_order", "24393782015,Promos renamed,,11",
+    ].join("\n")
+    const changedPreview = await service.previewStoreCategoryCsv({ environment: "PRODUCTION", csv: changedCsv, actorId: "admin", correlationId: randomUUID() })
+    const changed = await service.applyStoreCategoryCsv({ previewId: changedPreview.previewId, csv: changedCsv, actorId: "admin", correlationId: randomUUID() })
+    expect(changed.categories.find((category: any) => category.externalId === "24393782015")).toMatchObject({ id: root.id, name: "Promos renamed", siblingOrder: 11 })
+    expect(changed.categories.filter((category: any) => category.status === "REMOVED")).toHaveLength(2)
+    const badPreview = await service.previewStoreCategoryCsv({ environment: "PRODUCTION", csv: "bad", actorId: "admin", correlationId: randomUUID() })
+    await expect(service.applyStoreCategoryCsv({ previewId: badPreview.previewId, csv: "bad", actorId: "admin", correlationId: randomUUID() })).rejects.toThrow()
+    expect((await service.listStoreCategories("PRODUCTION")).categories.find((category: any) => category.externalId === "24393782015")?.name).toBe("Promos renamed")
+  })
+  it("binds imports to an unexpired actor-owned preview, exact bytes, and unchanged catalogue", async () => {
+    const exactCsv = "ebay_store_category_id,name,parent_ebay_store_category_id,sibling_order\n24393782015,Bound preview,,12\n"
+    const before = await service.listStoreCategories("PRODUCTION")
+    const mismatch = await service.previewStoreCategoryCsv({ environment: "PRODUCTION", csv: exactCsv, actorId: "preview-owner", correlationId: randomUUID() })
+    await expect(service.applyStoreCategoryCsv({ previewId: mismatch.previewId, csv: `${exactCsv}\n`, actorId: "preview-owner", correlationId: randomUUID() })).rejects.toThrow("Preview again")
+    expect((await service.listStoreCategories("PRODUCTION")).categories).toEqual(before.categories)
+
+    const unauthorized = await service.previewStoreCategoryCsv({ environment: "PRODUCTION", csv: exactCsv, actorId: "preview-owner", correlationId: randomUUID() })
+    await expect(service.applyStoreCategoryCsv({ previewId: unauthorized.previewId, csv: exactCsv, actorId: "other-actor", correlationId: randomUUID() })).rejects.toThrow("Preview again")
+
+    const expired = await service.previewStoreCategoryCsv({ environment: "PRODUCTION", csv: exactCsv, actorId: "preview-owner", correlationId: randomUUID() })
+    await pgConnection.raw("update ebay_integration_store_category_import_preview set expires_at=now() - interval '1 second' where id=?", [expired.previewId])
+    await expect(service.applyStoreCategoryCsv({ previewId: expired.previewId, csv: exactCsv, actorId: "preview-owner", correlationId: randomUUID() })).rejects.toThrow("Preview again")
+
+    const stale = await service.previewStoreCategoryCsv({ environment: "PRODUCTION", csv: exactCsv, actorId: "preview-owner", correlationId: randomUUID() })
+    await service.createStoreCategory({ environment: "PRODUCTION", externalId: `stale-${suffix()}`, name: "Concurrent local change", parentExternalId: null, siblingOrder: 99, actorId: "other-admin", correlationId: randomUUID() })
+    await expect(service.applyStoreCategoryCsv({ previewId: stale.previewId, csv: exactCsv, actorId: "preview-owner", correlationId: randomUUID() })).rejects.toThrow("Preview again")
+
+    const successful = await service.previewStoreCategoryCsv({ environment: "PRODUCTION", csv: exactCsv, actorId: "preview-owner", correlationId: randomUUID() })
+    await expect(service.applyStoreCategoryCsv({ previewId: successful.previewId, csv: exactCsv, actorId: "preview-owner", correlationId: randomUUID() })).resolves.toBeDefined()
+    await expect(service.applyStoreCategoryCsv({ previewId: successful.previewId, csv: exactCsv, actorId: "preview-owner", correlationId: randomUUID() })).rejects.toThrow("Preview again")
+    const stored = rows(await pgConnection.raw("select csv_sha256,catalogue_fingerprint,safe_summary::text as safe_summary,status,consumed_at from ebay_integration_store_category_import_preview where id=?", [successful.previewId]))[0]
+    expect(stored.csv_sha256).toMatch(/^[a-f0-9]{64}$/)
+    expect(stored.catalogue_fingerprint).toMatch(/^[a-f0-9]{64}$/)
+    expect(stored.consumed_at).toBeTruthy()
+    expect(stored.status).toBe("CONSUMED")
+    expect(stored.safe_summary).not.toContain(exactCsv)
+  })
+
+  it("requires every complete-snapshot parent in the same CSV and does not remove on failure", async () => {
+    const parentId = `parent-${suffix()}`
+    const childId = `child-${suffix()}`
+    await service.createStoreCategory({ environment: "PRODUCTION", externalId: parentId, name: "Existing omitted parent", parentExternalId: null, siblingOrder: 1, actorId: "admin", correlationId: randomUUID() })
+    const invalidCsv = `ebay_store_category_id,name,parent_ebay_store_category_id,sibling_order\n${childId},Child,${parentId},1\n`
+    const invalidPreview = await service.previewStoreCategoryCsv({ environment: "PRODUCTION", csv: invalidCsv, actorId: "admin", correlationId: randomUUID() })
+    expect(invalidPreview.valid).toBe(false)
+    expect(invalidPreview.invalid).toContain(`Category ${childId} has a missing parent.`)
+    await expect(service.applyStoreCategoryCsv({ previewId: invalidPreview.previewId, csv: invalidCsv, actorId: "admin", correlationId: randomUUID() })).rejects.toThrow("invalid")
+    expect((await service.listStoreCategories("PRODUCTION")).categories.find((category: any) => category.externalId === parentId)?.status).toBe("ACTIVE")
+
+    const validCsv = `ebay_store_category_id,name,parent_ebay_store_category_id,sibling_order\n${parentId},Included parent,,1\n${childId},Child,${parentId},1\n`
+    const validPreview = await service.previewStoreCategoryCsv({ environment: "PRODUCTION", csv: validCsv, actorId: "admin", correlationId: randomUUID() })
+    expect(validPreview.valid).toBe(true)
+    await expect(service.applyStoreCategoryCsv({ previewId: validPreview.previewId, csv: validCsv, actorId: "admin", correlationId: randomUUID() })).resolves.toBeDefined()
+  })
+
+  it("removes descendants by the scoped parent graph rather than display-path prefixes", async () => {
+    const targetId = `graph-root-${suffix()}`
+    const childId = `graph-child-${suffix()}`
+    const lookalikeId = `graph-lookalike-${suffix()}`
+    const target = await service.createStoreCategory({ environment: "PRODUCTION", externalId: targetId, name: "Graph root", parentExternalId: null, siblingOrder: 1, actorId: "admin", correlationId: randomUUID() })
+    await service.createStoreCategory({ environment: "PRODUCTION", externalId: childId, name: "Real child", parentExternalId: targetId, siblingOrder: 1, actorId: "admin", correlationId: randomUUID() })
+    await service.createStoreCategory({ environment: "PRODUCTION", externalId: lookalikeId, name: "Graph root / unrelated", parentExternalId: null, siblingOrder: 2, actorId: "admin", correlationId: randomUUID() })
+    await pgConnection.raw(`insert into ebay_integration_store_category (id,environment,ebay_account_id,external_id,name,parent_external_id,sibling_order,level,path,status,source) values (?, 'SANDBOX', ?, ?, 'Graph root / unrelated', null, 1, 1, 'Graph root / unrelated', 'ACTIVE', 'MANUAL')`, [`other-${suffix()}`, `other-account-${suffix()}`, lookalikeId])
+    await expect(service.removeStoreCategory({ environment: "PRODUCTION", id: target.id, reason: "Graph removal", actorId: "admin", correlationId: randomUUID() })).resolves.toEqual({ removed: 2 })
+    const catalogue = await service.listStoreCategories("PRODUCTION")
+    expect(catalogue.categories.find((category: any) => category.externalId === childId)?.status).toBe("REMOVED")
+    expect(catalogue.categories.find((category: any) => category.externalId === lookalikeId)?.status).toBe("ACTIVE")
+    expect(rows(await pgConnection.raw("select status from ebay_integration_store_category where environment='SANDBOX' and external_id=?", [lookalikeId]))[0].status).toBe("ACTIVE")
+  })
+
+  it("denies every generated Store-category and category-audit mutation bypass", async () => {
+    const generatedBypasses = [
+      "createEbayStoreCategories", "updateEbayStoreCategories", "deleteEbayStoreCategories", "softDeleteEbayStoreCategories", "restoreEbayStoreCategories",
+      "createEbayStoreCategoryAudits", "updateEbayStoreCategoryAudits", "deleteEbayStoreCategoryAudits", "softDeleteEbayStoreCategoryAudits", "restoreEbayStoreCategoryAudits",
+    ]
+    for (const method of generatedBypasses) await expect(service[method]()).rejects.toThrow("domain-owned")
+    await expect(service.createStoreCategory({ environment: "PRODUCTION", externalId: `domain-${suffix()}`, name: "Domain method remains available", parentExternalId: null, siblingOrder: 1, actorId: "admin", correlationId: randomUUID() })).resolves.toBeDefined()
+  })
+
+  it("records bounded reconstructable manual and complete-import audit history", async () => {
+    const externalId = `audit-${suffix()}`
+    const created = await service.createStoreCategory({ environment: "PRODUCTION", externalId, name: "Before audit edit", parentExternalId: null, siblingOrder: 4, actorId: "audit-admin", correlationId: randomUUID() })
+    await service.updateStoreCategory({ environment: "PRODUCTION", id: created.id, name: "After audit edit", parentExternalId: null, siblingOrder: 5, actorId: "audit-admin", correlationId: randomUUID() })
+    const history = await service.listStoreCategoryAudits("PRODUCTION", 100)
+    const edit = history.audits.find((audit: any) => audit.action === "MANUAL_EDITED" && audit.categoryId === created.id)!
+    expect(edit.actorId).toBe("audit-admin")
+    expect(edit.details).toMatchObject({ before: { externalId, name: "Before audit edit", siblingOrder: 4, status: "ACTIVE" }, after: { externalId, name: "After audit edit", siblingOrder: 5, status: "ACTIVE" } })
+
+    const importCsv = `ebay_store_category_id,name,parent_ebay_store_category_id,sibling_order\n${externalId},Imported audit edit,,6\nimport-added-${suffix()},Imported addition,,7\n`
+    const preview = await service.previewStoreCategoryCsv({ environment: "PRODUCTION", csv: importCsv, actorId: "audit-admin", correlationId: randomUUID() })
+    await service.applyStoreCategoryCsv({ previewId: preview.previewId, csv: importCsv, actorId: "audit-admin", correlationId: randomUUID() })
+    const imported = await service.listStoreCategoryAudits("PRODUCTION", 100)
+    const summary = imported.audits.find((audit: any) => audit.action === "CSV_IMPORT_APPLIED" && audit.details?.previewId === preview.previewId)!
+    expect(summary.details).toMatchObject({ csvSha256: expect.stringMatching(/^[a-f0-9]{64}$/), counts: { added: 1, changed: 1 }, ids: { added: expect.any(Array), changed: [externalId] }, truncated: false })
+    expect(imported.audits.some((audit: any) => audit.action === "CSV_CATEGORY_CHANGED" && audit.details?.before?.name === "After audit edit" && audit.details?.after?.name === "Imported audit edit")).toBe(true)
+    await pgConnection.raw(`insert into ebay_integration_store_category_audit (id,environment,ebay_account_id,actor_id,action,correlation_id,details) values (?, 'PRODUCTION', ?, 'other-actor', 'MANUAL_EDITED', ?, '{}'::jsonb)`, [`other-audit-${suffix()}`, `other-account-${suffix()}`, randomUUID()])
+    expect((await service.listStoreCategoryAudits("PRODUCTION", 100)).audits.some((audit: any) => audit.actorId === "other-actor")).toBe(false)
+    const persisted = JSON.stringify(rows(await pgConnection.raw("select details from ebay_integration_store_category_audit where ebay_account_id=?", [history.accountId])))
+    expect(persisted).not.toContain(importCsv)
+    expect(JSON.stringify(imported)).not.toMatch(/refresh_token|ciphertext|provider_response/i)
+  })
   it("enforces the lifecycle truth table directly in PostgreSQL for nullable and partial fields", async () => {
     const validUuid = () => randomUUID()
     const insert = async (status: string, overrides: Record<string, unknown> = {}) => {
