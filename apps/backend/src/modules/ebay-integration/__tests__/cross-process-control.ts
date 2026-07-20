@@ -1,4 +1,4 @@
-import type { createPgConnection } from "@medusajs/framework/utils"
+import { MedusaError, type createPgConnection } from "@medusajs/framework/utils"
 
 export const CROSS_PROCESS_TIMEOUT_MS = 30_000
 export const CROSS_PROCESS_POLL_MS = 40
@@ -15,7 +15,10 @@ export const CONTROL_MARKER = {
   RESUME_REFRESH: "RESUME_REFRESH",
   WORKER_COMPLETE: "WORKER_COMPLETE",
   INSTANCE: "INSTANCE",
+  CONNECTION: "CONNECTION",
   OUTCOME: "OUTCOME",
+  SAFE_FAILURE_CATEGORY: "SAFE_FAILURE_CATEGORY",
+  UNEXPECTED_FAILURE: "UNEXPECTED_FAILURE",
 } as const
 
 export async function ensureControlTable(pg: PgConnection): Promise<void> {
@@ -78,7 +81,10 @@ export async function waitForMarker(
     await new Promise<void>((resolve) => setTimeout(resolve, CROSS_PROCESS_POLL_MS))
   }
   const diagnostic = await readMarkers(pg, runId)
-  throw new Error(`Timed out waiting for ${marker} from ${roles.join(",")}; safe markers=${JSON.stringify(diagnostic)}`)
+  throw new MedusaError(
+    MedusaError.Types.UNEXPECTED_STATE,
+    `Timed out waiting for ${marker} from ${roles.join(",")}; safe markers=${JSON.stringify(diagnostic)}`
+  )
 }
 
 export async function cleanupControlRows(pg: PgConnection, runId: string): Promise<void> {

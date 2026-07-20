@@ -14,6 +14,9 @@ export const EBAY_CONNECTION_STATUS = {
   DISCONNECTED: "DISCONNECTED",
   ERROR: "ERROR",
 } as const
+
+export const EBAY_STORE_CATEGORY_STATUS = { ACTIVE: "ACTIVE", REMOVED: "REMOVED" } as const
+export const EBAY_STORE_CATEGORY_SOURCE = { MANUAL: "MANUAL", CSV: "CSV" } as const
 export type EbayConnectionStatus = (typeof EBAY_CONNECTION_STATUS)[keyof typeof EBAY_CONNECTION_STATUS]
 
 export const EBAY_SAFE_ERROR = {
