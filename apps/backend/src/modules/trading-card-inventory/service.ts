@@ -1868,7 +1868,7 @@ class TradingCardInventoryModuleService extends MedusaService({
     type PhaseAOutcome =
       | { outcome: "APPLIED"; row: Record<string, unknown> }
       | { outcome: "ALREADY_APPLIED"; row: Record<string, unknown> }
-      | { outcome: "INVALID_STATE"; row: Record<string, unknown> }
+      | { outcome: "INVALID_STATE"; row: Record<string, unknown>; categoryIssue?: "MISSING" | "REMOVED" | "NOT_SYNCED" }
       | { outcome: "OUT_OF_SCOPE"; row: Record<string, unknown> }
       | { outcome: "STALE_BASELINE"; row: Record<string, unknown>; liveQuantity: number }
       | { outcome: "SNAPSHOT_DISCARDED"; row: Record<string, unknown> }
@@ -1906,12 +1906,38 @@ class TradingCardInventoryModuleService extends MedusaService({
         return { outcome: "INVALID_STATE", row: proposal }
       }
       // E2B: a brand-new holding is the first Medusa-facing appearance of this
-      // row's card — it must carry a reviewer-confirmed, still-active eBay
-      // Store category before stock can move. QUANTITY_CHANGE never requires
-      // this: the underlying card/product was already categorised the first
-      // time it reached NEW_HOLDING.
-      if (changeKind === INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING && !proposal.confirmed_ebay_store_category_id) {
-        return { outcome: "INVALID_STATE", row: proposal }
+      // row's card — it must carry a reviewer-confirmed, still-active,
+      // Medusa-synced eBay Store category before stock can move. This is
+      // re-validated right here, inside the same locked transaction that is
+      // about to move stock — never relying on the confirmation-time check
+      // alone, since the category can be removed or desynced at any point
+      // between confirmation and this exact moment. QUANTITY_CHANGE never
+      // requires this: the underlying card/product was already categorised
+      // the first time it reached NEW_HOLDING.
+      if (changeKind === INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING) {
+        const confirmedCategoryId = proposal.confirmed_ebay_store_category_id as string | null
+        if (!confirmedCategoryId) {
+          return { outcome: "INVALID_STATE", row: proposal, categoryIssue: "MISSING" }
+        }
+        const [category] = await manager.execute<Record<string, unknown>>(
+          `select status, medusa_category_id from ebay_integration_store_category where id = ? and deleted_at is null`,
+          [confirmedCategoryId],
+        )
+        if (!category || category.status !== "ACTIVE") {
+          // The confirmation is now stale — clear it so the Admin is never
+          // shown a "confirmed" category that no longer exists/is active,
+          // and must explicitly select and confirm another active one.
+          await manager.execute(
+            `update trading_card_inventory_proposal
+             set confirmed_ebay_store_category_id = null, category_confirmed_at = null, category_confirmed_by = null, updated_at = now()
+             where id = ?`,
+            [parsed.id],
+          )
+          return { outcome: "INVALID_STATE", row: proposal, categoryIssue: "REMOVED" }
+        }
+        if (!category.medusa_category_id) {
+          return { outcome: "INVALID_STATE", row: proposal, categoryIssue: "NOT_SYNCED" }
+        }
       }
 
       const sourceId = proposal.inventory_source_id as string
@@ -2041,16 +2067,22 @@ class TradingCardInventoryModuleService extends MedusaService({
 
     if (phaseAResult.outcome === "INVALID_STATE") {
       const isApproved = phaseAResult.row.review_status === INVENTORY_PROPOSAL_REVIEW_STATUS.APPROVED
-      const missingConfirmedCategory =
-        isApproved &&
-        phaseAResult.row.change_kind === INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING &&
-        !phaseAResult.row.confirmed_ebay_store_category_id
+      const categoryErrorCode: Record<"MISSING" | "REMOVED" | "NOT_SYNCED", string> = {
+        MISSING: "CATEGORY_NOT_CONFIRMED",
+        REMOVED: "CATEGORY_NO_LONGER_ACTIVE",
+        NOT_SYNCED: "CATEGORY_NOT_SYNCED",
+      }
+      const categoryErrorMessage: Record<"MISSING" | "REMOVED" | "NOT_SYNCED", string> = {
+        MISSING: "This proposal has no confirmed eBay Store category. Confirm or override the category before applying.",
+        REMOVED: "The confirmed eBay Store category is no longer active. Select and confirm another active category before applying.",
+        NOT_SYNCED: "The confirmed eBay Store category has not been synchronised to a Medusa Product Category yet. Sync categories to Medusa before applying.",
+      }
       return {
         proposalId: parsed.id, localApplicationStatus: "INVALID_STATE", transactionId: null,
         priorQuantity: null, resultingQuantity: null, medusaSyncStatus: MEDUSA_SYNC_STATUS.NOT_APPLICABLE,
-        errorCode: missingConfirmedCategory ? "CATEGORY_NOT_CONFIRMED" : "INVALID_STATE",
-        errorMessage: missingConfirmedCategory
-          ? "This proposal has no confirmed eBay Store category. Confirm or override the category before applying."
+        errorCode: phaseAResult.categoryIssue ? categoryErrorCode[phaseAResult.categoryIssue] : "INVALID_STATE",
+        errorMessage: phaseAResult.categoryIssue
+          ? categoryErrorMessage[phaseAResult.categoryIssue]
           : isApproved
             ? "The approved proposal is missing a valid variant or proposed quantity."
             : `Proposal is ${phaseAResult.row.review_status}; only an APPROVED proposal can be applied.`,

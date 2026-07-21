@@ -1323,6 +1323,21 @@ class EbayIntegrationModuleService extends MedusaService({
     return (row?.medusa_category_id as string | null) ?? null;
   }
 
+  /**
+   * Same lookup as `medusaCategoryIdFor`, without requiring the caller to
+   * already know which environment the category belongs to — generated ids
+   * are globally unique, so this is safe. Used by the cross-module
+   * category-assignment Phase B sync (`medusa-inventory-sync.ts`), which
+   * only has a bare confirmed category id to work from.
+   */
+  async medusaCategoryIdForId(categoryId: string): Promise<string | null> {
+    const [row] = await this.manager_.execute<Record<string, unknown>>(
+      `select medusa_category_id from ebay_integration_store_category where id=? and deleted_at is null`,
+      [categoryId],
+    );
+    return (row?.medusa_category_id as string | null) ?? null;
+  }
+
   // -------------------------------------------------------------------
   // E2B: Medusa Product Category synchronisation
   // -------------------------------------------------------------------

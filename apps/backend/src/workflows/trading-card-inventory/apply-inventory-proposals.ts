@@ -3,7 +3,7 @@ import { createStep, createWorkflow, StepResponse, WorkflowResponse } from "@med
 import { TRADING_CARD_INVENTORY_MODULE } from "../../modules/trading-card-inventory"
 import type TradingCardInventoryModuleService from "../../modules/trading-card-inventory/service"
 import type { ApplyInventoryProposalItemResult } from "../../modules/trading-card-inventory/service"
-import { MEDUSA_SYNC_STATUS, type InventoryRecordSource } from "../../modules/trading-card-inventory/types"
+import { MEDUSA_SYNC_STATUS, type InventoryProposalChangeKind, type InventoryRecordSource } from "../../modules/trading-card-inventory/types"
 import { syncInventoryProposalToMedusa } from "./medusa-inventory-sync"
 import { advanceSnapshotProgressIfComplete } from "./advance-snapshot-progress"
 import { syncTradingCardProductMedia } from "../trading-cards/sync-product-media"
@@ -45,6 +45,8 @@ export async function applyInventoryProposalsWithSync(
       tradingCardVariantId: proposal.trading_card_variant_id as string,
       proposedQuantity: proposal.proposed_quantity as number,
       attemptToken,
+      changeKind: proposal.change_kind as InventoryProposalChangeKind,
+      confirmedEbayStoreCategoryId: (proposal.confirmed_ebay_store_category_id as string | null) ?? null,
     })
 
     const saved = await inventory.recordMedusaSyncResult(
