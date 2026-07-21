@@ -213,6 +213,31 @@ describe("eBay Store categories settings page", () => {
     ).toBe(false);
   });
 
+  it("restores the original server ID after a rejected rename", async () => {
+    const user = userEvent.setup();
+    const toastError = jest.spyOn(toast, "error");
+    fetchMock.mockImplementation((url: string) =>
+      url === "/admin/ebay/store-categories/category-root"
+        ? response({}, false)
+        : url.includes("/audit")
+          ? response(auditHistory)
+          : response(catalogue),
+    );
+    renderPage();
+    const idField = await screen.findByDisplayValue("24393782015");
+    await user.clear(idField);
+    await user.type(idField, "11111111111");
+    await user.tab();
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith(
+        "That Category ID could not be used — it may already be in use.",
+      ),
+    );
+    expect(await screen.findByDisplayValue("24393782015")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("11111111111")).not.toBeInTheDocument();
+    toastError.mockRestore();
+  });
+
   it("requires a bounded removal reason before opening the confirmation", async () => {
     const user = userEvent.setup();
     renderPage();

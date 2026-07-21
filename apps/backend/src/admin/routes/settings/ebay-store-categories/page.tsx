@@ -78,6 +78,9 @@ const EbayStoreCategoriesPage = () => {
   const [editing, setEditing] = useState<Category | null>(null);
   const [removing, setRemoving] = useState<Category | null>(null);
   const [reason, setReason] = useState("");
+  const [idFieldResetVersion, setIdFieldResetVersion] = useState<
+    Record<string, number>
+  >({});
   const catalogue = useQuery({
     queryKey: ["ebay-store-categories", environment],
     queryFn: () =>
@@ -171,7 +174,13 @@ const EbayStoreCategoriesPage = () => {
       toast.success("Category ID updated");
       refresh();
     },
-    onError: () => toast.error("That Category ID could not be used — it may already be in use."),
+    onError: (_error, variables) => {
+      toast.error("That Category ID could not be used — it may already be in use.");
+      setIdFieldResetVersion((prev) => ({
+        ...prev,
+        [variables.row.id]: (prev[variables.row.id] ?? 0) + 1,
+      }));
+    },
   });
   const previewImport = useMutation({
     mutationFn: () =>
@@ -306,6 +315,7 @@ const EbayStoreCategoriesPage = () => {
                     <td>
                       {row.status === "ACTIVE" ? (
                         <Input
+                          key={`${row.id}-${idFieldResetVersion[row.id] ?? 0}`}
                           aria-label={`Store category ID for ${row.path}`}
                           defaultValue={row.externalId}
                           onBlur={(event) => {
