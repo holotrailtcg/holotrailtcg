@@ -18,7 +18,7 @@ import { useState } from "react";
 import {
   fetchJson,
   postAction,
-} from "../../../../components/imports/fetch-json";
+} from "../../../components/imports/fetch-json";
 
 type Category = {
   id: string;
@@ -158,6 +158,21 @@ const EbayStoreCategoriesPage = () => {
     },
     onError: () => toast.error("The Store category could not be updated."),
   });
+  const renameId = useMutation({
+    mutationFn: ({ row, externalId }: { row: Category; externalId: string }) =>
+      postAction(`/admin/ebay/store-categories/${encodeURIComponent(row.id)}`, {
+        environment,
+        name: row.name,
+        parentExternalId: row.parentExternalId,
+        siblingOrder: row.siblingOrder,
+        externalId,
+      }),
+    onSuccess: () => {
+      toast.success("Category ID updated");
+      refresh();
+    },
+    onError: () => toast.error("That Category ID could not be used — it may already be in use."),
+  });
   const previewImport = useMutation({
     mutationFn: () =>
       postAction<{ preview: Preview }>("/admin/ebay/store-categories/preview", {
@@ -289,7 +304,25 @@ const EbayStoreCategoriesPage = () => {
                   >
                     <td>{row.path}</td>
                     <td>
-                      <code>{row.externalId}</code>
+                      {row.status === "ACTIVE" ? (
+                        <Input
+                          aria-label={`Store category ID for ${row.path}`}
+                          defaultValue={row.externalId}
+                          onBlur={(event) => {
+                            const nextExternalId = event.target.value.trim();
+                            if (
+                              !nextExternalId ||
+                              nextExternalId === row.externalId
+                            ) {
+                              event.target.value = row.externalId;
+                              return;
+                            }
+                            renameId.mutate({ row, externalId: nextExternalId });
+                          }}
+                        />
+                      ) : (
+                        <code>{row.externalId}</code>
+                      )}
                     </td>
                     <td>{row.level}</td>
                     <td>{row.siblingOrder}</td>

@@ -115,9 +115,9 @@ describe("eBay Store categories settings page", () => {
       expect.objectContaining({ label: "eBay Store categories" }),
     );
     renderPage();
-    expect(await screen.findByText("24393782015")).toHaveTextContent(
-      "24393782015",
-    );
+    expect(
+      await screen.findByDisplayValue("24393782015"),
+    ).toBeInTheDocument();
     expect(
       screen.getByText("Black Star Promo Cards > Mega Evolution Promos"),
     ).toBeInTheDocument();
@@ -143,7 +143,7 @@ describe("eBay Store categories settings page", () => {
   it("uses a FocusModal to create and a Drawer to edit local categories", async () => {
     const user = userEvent.setup();
     renderPage();
-    await screen.findByText("24393782015");
+    await screen.findByDisplayValue("24393782015");
     await user.click(
       screen.getByRole("button", { name: "Add local category" }),
     );
@@ -172,10 +172,51 @@ describe("eBay Store categories settings page", () => {
     ).toBeInTheDocument();
   });
 
+  it("renames a category's ID inline and sends the new value with its unchanged fields", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const idField = await screen.findByDisplayValue("24393782015");
+    await user.clear(idField);
+    await user.type(idField, "99999999999");
+    await user.tab();
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(
+          ([url]) =>
+            String(url) === "/admin/ebay/store-categories/category-root",
+        ),
+      ).toBe(true),
+    );
+    const renameCall = fetchMock.mock.calls.find(
+      ([url]) => String(url) === "/admin/ebay/store-categories/category-root",
+    );
+    expect(JSON.parse(String(renameCall?.[1]?.body))).toEqual({
+      environment: "SANDBOX",
+      name: "Black Star Promo Cards",
+      parentExternalId: null,
+      siblingOrder: 10,
+      externalId: "99999999999",
+    });
+  });
+
+  it("does not send a rename when the ID field is blurred unchanged", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const idField = await screen.findByDisplayValue("24393782015");
+    await user.click(idField);
+    await user.tab();
+    expect(
+      fetchMock.mock.calls.some(
+        ([url]) =>
+          String(url) === "/admin/ebay/store-categories/category-root",
+      ),
+    ).toBe(false);
+  });
+
   it("requires a bounded removal reason before opening the confirmation", async () => {
     const user = userEvent.setup();
     renderPage();
-    await screen.findByText("24393782015");
+    await screen.findByDisplayValue("24393782015");
     await user.click(screen.getByRole("button", { name: "Remove locally" }));
     expect(
       screen.getByRole("dialog", { name: "Remove local Store category" }),
@@ -213,7 +254,7 @@ describe("eBay Store categories settings page", () => {
       .mockImplementation(() => undefined);
     try {
       renderPage();
-      await screen.findByText("24393782015");
+      await screen.findByDisplayValue("24393782015");
       await user.click(
         screen.getByRole("button", { name: "Add local category" }),
       );
@@ -265,7 +306,7 @@ describe("eBay Store categories settings page", () => {
       ),
     );
     renderPage();
-    await screen.findByText("24393782015");
+    await screen.findByDisplayValue("24393782015");
     await user.type(
       screen.getByLabelText("Store category CSV"),
       "ebay_store_category_id,name,parent_ebay_store_category_id,sibling_order",
@@ -311,7 +352,7 @@ describe("eBay Store categories settings page", () => {
       ),
     );
     renderPage();
-    await screen.findByText("24393782015");
+    await screen.findByDisplayValue("24393782015");
     await user.type(
       screen.getByLabelText("Store category CSV"),
       "ebay_store_category_id,name,parent_ebay_store_category_id,sibling_order",
@@ -329,7 +370,7 @@ describe("eBay Store categories settings page", () => {
     const user = userEvent.setup();
     mockPrompt.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
     renderPage();
-    await screen.findByText("24393782015");
+    await screen.findByDisplayValue("24393782015");
     await user.type(
       screen.getByLabelText("Store category CSV"),
       "ebay_store_category_id,name,parent_ebay_store_category_id,sibling_order",
@@ -376,7 +417,7 @@ describe("eBay Store categories settings page", () => {
   it("invalidates a preview immediately when CSV or environment changes", async () => {
     const user = userEvent.setup();
     renderPage();
-    await screen.findByText("24393782015");
+    await screen.findByDisplayValue("24393782015");
     const csvInput = screen.getByLabelText("Store category CSV");
     await user.type(
       csvInput,
@@ -434,7 +475,7 @@ describe("eBay Store categories settings page", () => {
             : response(catalogue),
     );
     renderPage();
-    await screen.findByText("24393782015");
+    await screen.findByDisplayValue("24393782015");
     await user.type(
       screen.getByLabelText("Store category CSV"),
       "ebay_store_category_id,name,parent_ebay_store_category_id,sibling_order",

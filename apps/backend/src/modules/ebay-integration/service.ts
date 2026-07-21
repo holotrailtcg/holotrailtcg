@@ -1033,6 +1033,7 @@ class EbayIntegrationModuleService extends MedusaService({
     name: string;
     parentExternalId: string | null;
     siblingOrder: number;
+    externalId?: string;
     actorId: string;
     correlationId: string;
   }) {
@@ -1046,6 +1047,7 @@ class EbayIntegrationModuleService extends MedusaService({
       name: string;
       parentExternalId: string | null;
       siblingOrder: number;
+      externalId?: string;
       actorId: string;
       correlationId: string;
     },
@@ -1064,20 +1066,43 @@ class EbayIntegrationModuleService extends MedusaService({
           "Active Store category not found.",
         );
       const before = categorySnapshot(target);
+      const oldExternalId = target.external_id as string;
+      const newExternalId = input.externalId ?? oldExternalId;
+      if (newExternalId !== oldExternalId) {
+        const collision = current.some(
+          (r) =>
+            r.status === "ACTIVE" &&
+            r.id !== input.id &&
+            r.external_id === newExternalId,
+        );
+        if (collision)
+          throw new MedusaError(
+            MedusaError.Types.INVALID_DATA,
+            "That Store category ID is already in use.",
+          );
+      }
       const next = current
         .filter((r) => r.status === "ACTIVE")
         .map((r) =>
           r.id === input.id
             ? {
-                externalId: r.external_id as string,
+                currentExternalId: oldExternalId,
+                externalId: newExternalId,
                 name: input.name,
-                parentExternalId: input.parentExternalId,
+                parentExternalId:
+                  input.parentExternalId === oldExternalId
+                    ? newExternalId
+                    : input.parentExternalId,
                 siblingOrder: input.siblingOrder,
               }
             : {
+                currentExternalId: r.external_id as string,
                 externalId: r.external_id as string,
                 name: r.name as string,
-                parentExternalId: r.parent_external_id as string | null,
+                parentExternalId:
+                  r.parent_external_id === oldExternalId
+                    ? newExternalId
+                    : (r.parent_external_id as string | null),
                 siblingOrder: Number(r.sibling_order),
               },
         );
@@ -1106,16 +1131,17 @@ class EbayIntegrationModuleService extends MedusaService({
       for (const row of next) resolve(row);
       for (const row of next)
         await manager.execute(
-          `update ebay_integration_store_category set name=?, parent_external_id=?, sibling_order=?, level=?, path=?, updated_at=now() where environment=? and ebay_account_id=? and external_id=?`,
+          `update ebay_integration_store_category set name=?, parent_external_id=?, sibling_order=?, level=?, path=?, external_id=?, updated_at=now() where environment=? and ebay_account_id=? and external_id=?`,
           [
             row.name,
             row.parentExternalId,
             row.siblingOrder,
             levels.get(row.externalId),
             paths.get(row.externalId),
+            row.externalId,
             scope.environment,
             scope.ebayAccountId,
-            row.externalId,
+            row.currentExternalId,
           ],
         );
       const saved = (await this.categoryRows(manager, scope)).find(
