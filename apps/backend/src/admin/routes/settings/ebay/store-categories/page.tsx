@@ -103,6 +103,27 @@ const EbayStoreCategoriesPage = () => {
     });
     setPreview(null);
   };
+  const syncMedusa = useMutation({
+    mutationFn: () =>
+      postAction<{
+        summary: {
+          scanned: number;
+          created: number;
+          updated: number;
+          unchanged: number;
+          failed: number;
+          failures: { categoryId: string; externalId: string; message: string }[];
+        };
+      }>("/admin/ebay/store-categories/sync-medusa", { environment }),
+    onSuccess: (result) => {
+      if (result.summary.failed > 0) {
+        toast.warning(`Synced with ${result.summary.failed} failure(s). See details below.`);
+      } else {
+        toast.success("Categories synced to Medusa.");
+      }
+    },
+    onError: () => toast.error("The Medusa sync could not be started."),
+  });
   const add = useMutation({
     mutationFn: () =>
       postAction("/admin/ebay/store-categories", {
@@ -206,6 +227,33 @@ const EbayStoreCategoriesPage = () => {
           <option value="SANDBOX">Sandbox</option>
           <option value="PRODUCTION">Production</option>
         </select>
+        <div className="flex items-center gap-3">
+          <Button
+            variant="secondary"
+            isLoading={syncMedusa.isPending}
+            onClick={() => syncMedusa.mutate()}
+          >
+            Sync categories to Medusa
+          </Button>
+          <a href="/app/settings/ebay/category-rules">Manage assignment rules</a>
+        </div>
+        {syncMedusa.data && (
+          <Text size="small">
+            Scanned {syncMedusa.data.summary.scanned} · created{" "}
+            {syncMedusa.data.summary.created} · updated{" "}
+            {syncMedusa.data.summary.updated} · unchanged{" "}
+            {syncMedusa.data.summary.unchanged} · failed{" "}
+            {syncMedusa.data.summary.failed}
+            {syncMedusa.data.summary.failed > 0 && (
+              <>
+                {" "}
+                — {syncMedusa.data.summary.failures
+                  .map((failure: { externalId: string; message: string }) => `${failure.externalId}: ${failure.message}`)
+                  .join("; ")}
+              </>
+            )}
+          </Text>
+        )}
       </Container>
       {catalogue.isError && (
         <Text role="alert">

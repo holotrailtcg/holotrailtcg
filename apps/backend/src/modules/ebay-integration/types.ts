@@ -53,6 +53,21 @@ export const EBAY_AUDIT_ACTION = {
   DISCONNECTED: "DISCONNECTED",
 } as const
 
+// E2B category assignment rules — the field names a rule condition may test.
+// Kept intentionally small and additive: new fields can be appended later
+// without touching existing rules (an unrecognised field on an old rule is
+// simply never satisfied).
+export const CATEGORY_ASSIGNMENT_CONDITION_FIELD = {
+  LANGUAGE: "LANGUAGE",
+  FINISH: "FINISH",
+  RARITY: "RARITY",
+  SPECIAL_TREATMENT: "SPECIAL_TREATMENT",
+  SET_CODE: "SET_CODE",
+  SET_NAME: "SET_NAME",
+} as const
+export type CategoryAssignmentConditionField =
+  (typeof CATEGORY_ASSIGNMENT_CONDITION_FIELD)[keyof typeof CATEGORY_ASSIGNMENT_CONDITION_FIELD]
+
 export const EBAY_OAUTH_STATE_TTL_MINUTES = 10
 export const EBAY_OAUTH_STATE_RETENTION_HOURS = 24
 export const EBAY_OAUTH_STATE_CLEANUP_LIMIT = 100

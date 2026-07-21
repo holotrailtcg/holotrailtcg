@@ -243,6 +243,13 @@ export function toSafeInventoryProposalDto(row: Record<string, unknown>) {
     medusaSyncSucceededAt: row.medusa_sync_succeeded_at ?? null,
     medusaSyncRetryCount: row.medusa_sync_retry_count ?? 0,
     medusaSyncLastError: row.medusa_sync_last_error ?? null,
+    // E2B category assignment
+    proposedEbayStoreCategoryId: (row.proposed_ebay_store_category_id as string | null) ?? null,
+    proposedCategoryReason: (row.proposed_category_reason as string | null) ?? null,
+    proposedCategoryRuleId: (row.proposed_category_rule_id as string | null) ?? null,
+    confirmedEbayStoreCategoryId: (row.confirmed_ebay_store_category_id as string | null) ?? null,
+    categoryConfirmedAt: row.category_confirmed_at ?? null,
+    categoryConfirmedBy: row.category_confirmed_by ?? null,
   }
 }
 

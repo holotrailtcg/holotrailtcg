@@ -1,7 +1,9 @@
-import type { IInventoryService, MedusaContainer } from "@medusajs/framework/types"
+import type { IInventoryService, IProductModuleService, MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys, isDuplicateError, MedusaError, Modules } from "@medusajs/framework/utils"
-import { MEDUSA_SYNC_ERROR_CATEGORY, type MedusaSyncErrorCategory } from "../../modules/trading-card-inventory/types"
+import { INVENTORY_PROPOSAL_CHANGE_KIND, MEDUSA_SYNC_ERROR_CATEGORY, type InventoryProposalChangeKind, type MedusaSyncErrorCategory } from "../../modules/trading-card-inventory/types"
 import { resolveMedusaStockLocationId } from "./medusa-inventory-sync-config"
+import { EBAY_INTEGRATION_MODULE } from "../../modules/ebay-integration"
+import type EbayIntegrationModuleService from "../../modules/ebay-integration/service"
 
 export interface SyncInventoryProposalToMedusaInput {
   proposalId: string
@@ -9,6 +11,10 @@ export interface SyncInventoryProposalToMedusaInput {
   proposedQuantity: number
   /** Minted by `TradingCardInventoryModuleService#beginMedusaSyncAttempt` and round-tripped back through `recordMedusaSyncResult`. */
   attemptToken: string
+  /** E2B: only `NEW_HOLDING` ever triggers a category assignment attempt. Omitted/undefined behaves exactly like a change kind other than `NEW_HOLDING` (no category assignment attempted). */
+  changeKind?: InventoryProposalChangeKind
+  /** The reviewer-confirmed local eBay Store category id, already re-validated ACTIVE + synced by `applyInventoryProposal`'s own gate. */
+  confirmedEbayStoreCategoryId?: string | null
 }
 
 export type SyncInventoryProposalToMedusaResult =
@@ -73,7 +79,10 @@ export async function syncInventoryProposalToMedusa(
   try {
     const result = await query.graph({
       entity: "trading_card_variant",
-      fields: ["id", "product_variant.id", "product_variant.inventory_items.inventory_item_id"],
+      fields: [
+        "id", "product_variant.id", "product_variant.inventory_items.inventory_item_id",
+        "product_variant.product.id", "product_variant.product.categories.id",
+      ],
       filters: { id: input.tradingCardVariantId },
     })
     linkedVariants = result.data as Record<string, unknown>[]
@@ -82,7 +91,11 @@ export async function syncInventoryProposalToMedusa(
     return failed(attemptToken, MEDUSA_SYNC_ERROR_CATEGORY.MEDUSA_DEPENDENCY_FAILED, "Failed to resolve the Medusa inventory link.")
   }
   const productVariant = linkedVariants[0]?.product_variant as
-    | { id?: string; inventory_items?: Array<{ inventory_item_id?: string }> | null }
+    | {
+        id?: string
+        inventory_items?: Array<{ inventory_item_id?: string }> | null
+        product?: { id?: string; categories?: Array<{ id?: string }> | null } | null
+      }
     | null
   if (!productVariant?.id) {
     return failed(attemptToken, MEDUSA_SYNC_ERROR_CATEGORY.NO_PRODUCT_VARIANT_LINK, "This trading card variant has no linked Medusa product variant.")
@@ -136,6 +149,42 @@ export async function syncInventoryProposalToMedusa(
       levelExists ? MEDUSA_SYNC_ERROR_CATEGORY.MEDUSA_LEVEL_UPDATE_FAILED : MEDUSA_SYNC_ERROR_CATEGORY.MEDUSA_LEVEL_CREATE_FAILED,
       levelExists ? "Failed to update the Medusa inventory level." : "Failed to create the Medusa inventory level."
     )
+  }
+
+  // E2B: assign the linked Medusa Product Category the very first time this
+  // product is ever getting stock (NEW_HOLDING) — never for QUANTITY_CHANGE,
+  // and never touching a product that already has a category, so an
+  // existing approved product is never recategorised merely because this
+  // feature was deployed (no backfill). Covers both the brand-new-card path
+  // (handled at Product creation in `create-card-from-inventory-row.ts`,
+  // where the product already has no categories yet) and a NEW_HOLDING that
+  // resolves to an already-existing canonical TradingCard/Product that has
+  // simply never been categorised before.
+  if (input.changeKind === INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING && input.confirmedEbayStoreCategoryId) {
+    const productId = productVariant.product?.id
+    const alreadyCategorised = (productVariant.product?.categories?.length ?? 0) > 0
+    if (productId && !alreadyCategorised) {
+      const ebayIntegration = container.resolve<EbayIntegrationModuleService>(EBAY_INTEGRATION_MODULE)
+      const medusaCategoryId = await ebayIntegration.medusaCategoryIdForId(input.confirmedEbayStoreCategoryId)
+      if (!medusaCategoryId) {
+        // `applyInventoryProposal`'s own gate already requires the confirmed
+        // category to be synced before local application succeeds — reaching
+        // this means it was desynced in the narrow window since. Fail
+        // clearly rather than silently leaving the product uncategorised;
+        // this is retried the same way as any other Medusa sync failure.
+        return failed(
+          attemptToken, MEDUSA_SYNC_ERROR_CATEGORY.NO_LINKED_MEDUSA_CATEGORY,
+          "The confirmed eBay Store category has no linked, synchronised Medusa Product Category.",
+        )
+      }
+      try {
+        const productModuleService = container.resolve<IProductModuleService>(Modules.PRODUCT)
+        await productModuleService.updateProducts(productId, { category_ids: [medusaCategoryId] })
+      } catch (error) {
+        console.error(`[trading-card-inventory] failed to assign Medusa product category for product ${productId}`, error)
+        return failed(attemptToken, MEDUSA_SYNC_ERROR_CATEGORY.CATEGORY_ASSIGNMENT_FAILED, "Failed to assign the Medusa Product Category.")
+      }
+    }
   }
 
   return { outcome: "SYNCED", attemptToken, medusaInventoryItemId: inventoryItemId, medusaStockLocationId: locationId }
