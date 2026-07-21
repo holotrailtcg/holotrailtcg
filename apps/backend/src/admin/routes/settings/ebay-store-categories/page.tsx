@@ -18,7 +18,7 @@ import { useState } from "react";
 import {
   fetchJson,
   postAction,
-} from "../../../../components/imports/fetch-json";
+} from "../../../components/imports/fetch-json";
 
 type Category = {
   id: string;
@@ -78,6 +78,9 @@ const EbayStoreCategoriesPage = () => {
   const [editing, setEditing] = useState<Category | null>(null);
   const [removing, setRemoving] = useState<Category | null>(null);
   const [reason, setReason] = useState("");
+  const [idFieldResetVersion, setIdFieldResetVersion] = useState<
+    Record<string, number>
+  >({});
   const catalogue = useQuery({
     queryKey: ["ebay-store-categories", environment],
     queryFn: () =>
@@ -157,6 +160,27 @@ const EbayStoreCategoriesPage = () => {
       refresh();
     },
     onError: () => toast.error("The Store category could not be updated."),
+  });
+  const renameId = useMutation({
+    mutationFn: ({ row, externalId }: { row: Category; externalId: string }) =>
+      postAction(`/admin/ebay/store-categories/${encodeURIComponent(row.id)}`, {
+        environment,
+        name: row.name,
+        parentExternalId: row.parentExternalId,
+        siblingOrder: row.siblingOrder,
+        externalId,
+      }),
+    onSuccess: () => {
+      toast.success("Category ID updated");
+      refresh();
+    },
+    onError: (_error, variables) => {
+      toast.error("That Category ID could not be used — it may already be in use.");
+      setIdFieldResetVersion((prev) => ({
+        ...prev,
+        [variables.row.id]: (prev[variables.row.id] ?? 0) + 1,
+      }));
+    },
   });
   const previewImport = useMutation({
     mutationFn: () =>
@@ -289,7 +313,26 @@ const EbayStoreCategoriesPage = () => {
                   >
                     <td>{row.path}</td>
                     <td>
-                      <code>{row.externalId}</code>
+                      {row.status === "ACTIVE" ? (
+                        <Input
+                          key={`${row.id}-${idFieldResetVersion[row.id] ?? 0}`}
+                          aria-label={`Store category ID for ${row.path}`}
+                          defaultValue={row.externalId}
+                          onBlur={(event) => {
+                            const nextExternalId = event.target.value.trim();
+                            if (
+                              !nextExternalId ||
+                              nextExternalId === row.externalId
+                            ) {
+                              event.target.value = row.externalId;
+                              return;
+                            }
+                            renameId.mutate({ row, externalId: nextExternalId });
+                          }}
+                        />
+                      ) : (
+                        <code>{row.externalId}</code>
+                      )}
                     </td>
                     <td>{row.level}</td>
                     <td>{row.siblingOrder}</td>

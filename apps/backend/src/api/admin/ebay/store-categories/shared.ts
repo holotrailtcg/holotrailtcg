@@ -11,7 +11,7 @@ export { adminActor, assertTrustedAdminOrigin, parseAdminInput }
 export const environmentSchema = z.enum([EBAY_ENVIRONMENT.SANDBOX, EBAY_ENVIRONMENT.PRODUCTION])
 const id = z.string().trim().min(1).max(128).regex(/^[^\u0000-\u001f,]+$/)
 export const createCategorySchema = z.object({ environment: environmentSchema, externalId: id, name: z.string().trim().min(1).max(255), parentExternalId: id.nullish(), siblingOrder: z.number().int().min(0).max(2147483647) }).strict()
-export const updateCategorySchema = createCategorySchema.omit({ externalId: true })
+export const updateCategorySchema = createCategorySchema.omit({ externalId: true }).extend({ externalId: id.optional() }).strict()
 export const csvSchema = z.object({ environment: environmentSchema, csv: z.string().min(1).max(1024 * 1024), confirm: z.literal(true).optional() }).strict()
 export const importCsvSchema = z.object({ previewId: z.string().trim().min(1).max(128), csv: z.string().min(1).max(1024 * 1024), confirm: z.literal(true) }).strict()
 export const removeSchema = z.object({ environment: environmentSchema, reason: z.string().trim().min(1).max(500), confirm: z.literal(true) }).strict()
