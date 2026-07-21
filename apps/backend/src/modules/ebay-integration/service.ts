@@ -10,6 +10,8 @@ import EbayConnectionAudit from "./models/ebay-connection-audit";
 import EbayStoreCategory from "./models/ebay-store-category";
 import EbayStoreCategoryAudit from "./models/ebay-store-category-audit";
 import EbayStoreCategoryImportPreview from "./models/ebay-store-category-import-preview";
+import EbayCategoryAssignmentRule from "./models/ebay-category-assignment-rule";
+import EbayCategoryAssignmentSettings from "./models/ebay-category-assignment-settings";
 import {
   EBAY_AUDIT_ACTION,
   EBAY_CONNECTION_STATUS,
@@ -20,7 +22,14 @@ import {
   EBAY_REFRESH_OPERATION_STALE_SECONDS,
   type EbayEnvironment,
   type EbaySafeErrorCategory,
+  type CategoryAssignmentConditionField,
 } from "./types";
+import {
+  evaluateCategoryAssignment,
+  type CategoryAssignmentCardAttributes,
+  type CategoryAssignmentResult,
+  type CategoryAssignmentRule as CategoryAssignmentRuleInput,
+} from "./category-assignment/evaluate";
 import {
   parseStoreCategoryCsv,
   type StoreCategoryCsvRow,
@@ -135,6 +144,8 @@ export interface StoreCategoryDto {
   status: "ACTIVE" | "REMOVED";
   source: "MANUAL" | "CSV";
   updatedAt: Date | string;
+  medusaCategoryId: string | null;
+  medusaCategorySyncedAt: Date | string | null;
 }
 export interface StoreCategoryAuditDto {
   id: string;
@@ -159,6 +170,8 @@ const categoryRow = (r: Record<string, unknown>): StoreCategoryDto => ({
   status: r.status as "ACTIVE" | "REMOVED",
   source: r.source as "MANUAL" | "CSV",
   updatedAt: r.updated_at as Date | string,
+  medusaCategoryId: (r.medusa_category_id as string | null) ?? null,
+  medusaCategorySyncedAt: (r.medusa_category_synced_at as Date | string | null) ?? null,
 });
 const categorySnapshot = (r: Record<string, unknown>) => ({
   externalId: String(r.external_id),
@@ -168,6 +181,32 @@ const categorySnapshot = (r: Record<string, unknown>) => ({
   level: Number(r.level),
   status: String(r.status),
   source: String(r.source),
+});
+export interface RuleConditionInput {
+  field: CategoryAssignmentConditionField;
+  values: string[];
+}
+export interface CategoryAssignmentRuleDto {
+  id: string;
+  environment: EbayEnvironment;
+  ebayAccountId: string;
+  name: string;
+  enabled: boolean;
+  priority: number;
+  targetStoreCategoryId: string;
+  conditions: RuleConditionInput[];
+  updatedAt: Date | string;
+}
+const assignmentRuleRow = (r: Record<string, unknown>): CategoryAssignmentRuleDto => ({
+  id: r.id as string,
+  environment: r.environment as EbayEnvironment,
+  ebayAccountId: r.ebay_account_id as string,
+  name: r.name as string,
+  enabled: Boolean(r.enabled),
+  priority: Number(r.priority),
+  targetStoreCategoryId: r.target_store_category_id as string,
+  conditions: (r.conditions as RuleConditionInput[]) ?? [],
+  updatedAt: r.updated_at as Date | string,
 });
 const sha256 = (value: string): string =>
   createHash("sha256").update(value, "utf8").digest("hex");
@@ -195,14 +234,24 @@ function safeAuditDetails(value: unknown): Record<string, unknown> | null {
     };
   };
   const result: Record<string, unknown> = {};
-  for (const key of ["previewId", "csvSha256", "rootExternalId"] as const)
+  for (const key of ["previewId", "csvSha256", "rootExternalId", "ruleId", "name", "fallbackStoreCategoryId"] as const)
     if (typeof details[key] === "string")
       result[key] = details[key].slice(0, 128);
+  if (details.fallbackStoreCategoryId === null) result.fallbackStoreCategoryId = null;
   for (const key of ["beforeStatus", "afterStatus"] as const)
     if (typeof details[key] === "string")
       result[key] = details[key].slice(0, 16);
-  for (const key of ["rowCount", "invalidCount", "affectedCount"] as const)
+  for (const key of ["rowCount", "invalidCount", "affectedCount", "priority", "scanned", "created", "updated", "unchanged", "failed"] as const)
     if (Number.isInteger(details[key])) result[key] = Number(details[key]);
+  if (Array.isArray(details.failures))
+    result.failures = details.failures.slice(0, 100).map((failure) => {
+      const row = failure as Record<string, unknown>;
+      return {
+        categoryId: String(row.categoryId ?? "").slice(0, 128),
+        externalId: String(row.externalId ?? "").slice(0, 128),
+        message: String(row.message ?? "").slice(0, 500),
+      };
+    });
   if (typeof details.reason === "string")
     result.reason = details.reason.slice(0, 500);
   if (typeof details.truncated === "boolean")
@@ -251,6 +300,8 @@ class EbayIntegrationModuleService extends MedusaService({
   EbayStoreCategory,
   EbayStoreCategoryAudit,
   EbayStoreCategoryImportPreview,
+  EbayCategoryAssignmentRule,
+  EbayCategoryAssignmentSettings,
 }) {
   protected manager_: EntityManager;
 
@@ -308,6 +359,16 @@ class EbayIntegrationModuleService extends MedusaService({
   deleteEbayConnectionAudits = async (): Promise<never> => this.blocked();
   softDeleteEbayConnectionAudits = async (): Promise<never> => this.blocked();
   restoreEbayConnectionAudits = async (): Promise<never> => this.blocked();
+  createEbayCategoryAssignmentRules = async (): Promise<never> => this.blocked();
+  updateEbayCategoryAssignmentRules = async (): Promise<never> => this.blocked();
+  deleteEbayCategoryAssignmentRules = async (): Promise<never> => this.blocked();
+  softDeleteEbayCategoryAssignmentRules = async (): Promise<never> => this.blocked();
+  restoreEbayCategoryAssignmentRules = async (): Promise<never> => this.blocked();
+  createEbayCategoryAssignmentSettings = async (): Promise<never> => this.blocked();
+  updateEbayCategoryAssignmentSettings = async (): Promise<never> => this.blocked();
+  deleteEbayCategoryAssignmentSettings = async (): Promise<never> => this.blocked();
+  softDeleteEbayCategoryAssignmentSettings = async (): Promise<never> => this.blocked();
+  restoreEbayCategoryAssignmentSettings = async (): Promise<never> => this.blocked();
 
   private async writeAudit(
     manager: TxManager,
@@ -799,6 +860,7 @@ class EbayIntegrationModuleService extends MedusaService({
         [input.previewId],
       );
       return {
+        environment: scope.environment,
         accountId: scope.ebayAccountId,
         categories: (await this.categoryRows(manager, scope)).map(categoryRow),
       };
@@ -1072,6 +1134,234 @@ class EbayIntegrationModuleService extends MedusaService({
         ],
       );
       return categoryRow(saved);
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // E2B: Category assignment rules + fallback
+  // -------------------------------------------------------------------
+
+  async listCategoryAssignmentRules(environment: EbayEnvironment): Promise<CategoryAssignmentRuleDto[]> {
+    const scope = await this.categoryScope(this.manager_, environment);
+    const rows = await this.manager_.execute<Record<string, unknown>>(
+      `select * from ebay_integration_category_assignment_rule where environment=? and ebay_account_id=? and deleted_at is null order by priority, id`,
+      [scope.environment, scope.ebayAccountId],
+    );
+    return rows.map(assignmentRuleRow);
+  }
+
+  async createCategoryAssignmentRule(input: {
+    environment: EbayEnvironment;
+    name: string;
+    enabled: boolean;
+    priority: number;
+    targetStoreCategoryId: string;
+    conditions: RuleConditionInput[];
+    actorId: string;
+    correlationId: string;
+  }): Promise<CategoryAssignmentRuleDto> {
+    return this.manager_.transactional(async (manager) => {
+      const scope = await this.categoryScope(manager, input.environment);
+      await this.assertActiveCategory(manager, scope, input.targetStoreCategoryId);
+      const id = generateEntityId(undefined, "ebcatrule");
+      await manager.execute(
+        `insert into ebay_integration_category_assignment_rule (id,environment,ebay_account_id,name,enabled,priority,target_store_category_id,conditions,created_at,updated_at) values (?,?,?,?,?,?,?,?::jsonb,now(),now())`,
+        [id, scope.environment, scope.ebayAccountId, input.name, input.enabled, input.priority, input.targetStoreCategoryId, JSON.stringify(input.conditions)],
+      );
+      await this.writeCategoryAudit(manager, scope, { actorId: input.actorId, action: "RULE_CREATED", categoryId: input.targetStoreCategoryId, correlationId: input.correlationId, details: { ruleId: id, name: input.name, priority: input.priority } });
+      const [saved] = await manager.execute<Record<string, unknown>>(`select * from ebay_integration_category_assignment_rule where id=?`, [id]);
+      return assignmentRuleRow(saved);
+    });
+  }
+
+  async updateCategoryAssignmentRule(input: {
+    environment: EbayEnvironment;
+    id: string;
+    name: string;
+    enabled: boolean;
+    priority: number;
+    targetStoreCategoryId: string;
+    conditions: RuleConditionInput[];
+    actorId: string;
+    correlationId: string;
+  }): Promise<CategoryAssignmentRuleDto> {
+    return this.manager_.transactional(async (manager) => {
+      const scope = await this.categoryScope(manager, input.environment);
+      await this.assertActiveCategory(manager, scope, input.targetStoreCategoryId);
+      const [existing] = await manager.execute<Record<string, unknown>>(
+        `select * from ebay_integration_category_assignment_rule where id=? and environment=? and ebay_account_id=? and deleted_at is null for update`,
+        [input.id, scope.environment, scope.ebayAccountId],
+      );
+      if (!existing) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Category assignment rule not found.");
+      await manager.execute(
+        `update ebay_integration_category_assignment_rule set name=?, enabled=?, priority=?, target_store_category_id=?, conditions=?::jsonb, updated_at=now() where id=?`,
+        [input.name, input.enabled, input.priority, input.targetStoreCategoryId, JSON.stringify(input.conditions), input.id],
+      );
+      await this.writeCategoryAudit(manager, scope, { actorId: input.actorId, action: "RULE_UPDATED", categoryId: input.targetStoreCategoryId, correlationId: input.correlationId, details: { ruleId: input.id, name: input.name, priority: input.priority } });
+      const [saved] = await manager.execute<Record<string, unknown>>(`select * from ebay_integration_category_assignment_rule where id=?`, [input.id]);
+      return assignmentRuleRow(saved);
+    });
+  }
+
+  async removeCategoryAssignmentRule(input: { environment: EbayEnvironment; id: string; actorId: string; correlationId: string }): Promise<void> {
+    return this.manager_.transactional(async (manager) => {
+      const scope = await this.categoryScope(manager, input.environment);
+      const [existing] = await manager.execute<Record<string, unknown>>(
+        `select * from ebay_integration_category_assignment_rule where id=? and environment=? and ebay_account_id=? and deleted_at is null for update`,
+        [input.id, scope.environment, scope.ebayAccountId],
+      );
+      if (!existing) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Category assignment rule not found.");
+      await manager.execute(`update ebay_integration_category_assignment_rule set deleted_at=now(), updated_at=now() where id=?`, [input.id]);
+      await this.writeCategoryAudit(manager, scope, { actorId: input.actorId, action: "RULE_REMOVED", categoryId: existing.target_store_category_id as string, correlationId: input.correlationId, details: { ruleId: input.id, name: existing.name } });
+    });
+  }
+
+  async getCategoryAssignmentSettings(environment: EbayEnvironment): Promise<{ fallbackStoreCategoryId: string | null }> {
+    const scope = await this.categoryScope(this.manager_, environment);
+    const [row] = await this.manager_.execute<Record<string, unknown>>(
+      `select * from ebay_integration_category_assignment_settings where environment=? and ebay_account_id=? and deleted_at is null`,
+      [scope.environment, scope.ebayAccountId],
+    );
+    return { fallbackStoreCategoryId: (row?.fallback_store_category_id as string | null) ?? null };
+  }
+
+  async setCategoryAssignmentFallback(input: {
+    environment: EbayEnvironment;
+    fallbackStoreCategoryId: string | null;
+    actorId: string;
+    correlationId: string;
+  }): Promise<{ fallbackStoreCategoryId: string | null }> {
+    return this.manager_.transactional(async (manager) => {
+      const scope = await this.categoryScope(manager, input.environment);
+      if (input.fallbackStoreCategoryId) await this.assertActiveCategory(manager, scope, input.fallbackStoreCategoryId);
+      const [existing] = await manager.execute<Record<string, unknown>>(
+        `select id from ebay_integration_category_assignment_settings where environment=? and ebay_account_id=? and deleted_at is null for update`,
+        [scope.environment, scope.ebayAccountId],
+      );
+      if (existing) {
+        await manager.execute(`update ebay_integration_category_assignment_settings set fallback_store_category_id=?, updated_at=now() where id=?`, [input.fallbackStoreCategoryId, existing.id]);
+      } else {
+        await manager.execute(
+          `insert into ebay_integration_category_assignment_settings (id,environment,ebay_account_id,fallback_store_category_id,created_at,updated_at) values (?,?,?,?,now(),now())`,
+          [generateEntityId(undefined, "ebcatsettings"), scope.environment, scope.ebayAccountId, input.fallbackStoreCategoryId],
+        );
+      }
+      await this.writeCategoryAudit(manager, scope, { actorId: input.actorId, action: "FALLBACK_SET", categoryId: input.fallbackStoreCategoryId, correlationId: input.correlationId, details: { fallbackStoreCategoryId: input.fallbackStoreCategoryId } });
+      return { fallbackStoreCategoryId: input.fallbackStoreCategoryId };
+    });
+  }
+
+  private async assertActiveCategory(manager: TxManager, scope: StoreScope, categoryId: string): Promise<void> {
+    const [row] = await manager.execute<Record<string, unknown>>(
+      `select id from ebay_integration_store_category where id=? and environment=? and ebay_account_id=? and status='ACTIVE' and deleted_at is null`,
+      [categoryId, scope.environment, scope.ebayAccountId],
+    );
+    if (!row) throw new MedusaError(MedusaError.Types.INVALID_DATA, "The target Store category must be an active local category.");
+  }
+
+  private async writeCategoryAudit(
+    manager: TxManager,
+    scope: StoreScope,
+    input: { actorId: string; action: string; categoryId: string | null; correlationId: string; details: Record<string, unknown> },
+  ): Promise<void> {
+    await manager.execute(
+      `insert into ebay_integration_store_category_audit (id,environment,ebay_account_id,actor_id,action,category_id,correlation_id,details,created_at,updated_at) values (?,?,?,?,?,?,?,?::jsonb,now(),now())`,
+      [generateEntityId(undefined, "ebstoreaudit"), scope.environment, scope.ebayAccountId, input.actorId, input.action, input.categoryId, input.correlationId.slice(0, 128), JSON.stringify(input.details)],
+    );
+  }
+
+  /** Evaluates enabled rules + fallback against the given card attributes for the environment's single (account-scoped) rule set. Returns a proposal, or a "no proposal" result requiring a manual choice. */
+  async evaluateCategoryAssignment(
+    environment: EbayEnvironment,
+    attributes: CategoryAssignmentCardAttributes,
+  ): Promise<CategoryAssignmentResult> {
+    const scope = await this.categoryScope(this.manager_, environment);
+    const [rules, settings, activeRows] = await Promise.all([
+      this.manager_.execute<Record<string, unknown>>(
+        `select * from ebay_integration_category_assignment_rule where environment=? and ebay_account_id=? and deleted_at is null order by priority, id`,
+        [scope.environment, scope.ebayAccountId],
+      ),
+      this.manager_.execute<Record<string, unknown>>(
+        `select fallback_store_category_id from ebay_integration_category_assignment_settings where environment=? and ebay_account_id=? and deleted_at is null`,
+        [scope.environment, scope.ebayAccountId],
+      ),
+      this.manager_.execute<Record<string, unknown>>(
+        `select id from ebay_integration_store_category where environment=? and ebay_account_id=? and status='ACTIVE' and deleted_at is null`,
+        [scope.environment, scope.ebayAccountId],
+      ),
+    ]);
+    const ruleInputs: CategoryAssignmentRuleInput[] = rules.map((row) => ({
+      id: row.id as string,
+      name: row.name as string,
+      enabled: row.enabled as boolean,
+      priority: Number(row.priority),
+      targetStoreCategoryId: row.target_store_category_id as string,
+      conditions: (row.conditions as { field: CategoryAssignmentConditionField; values: string[] }[]) ?? [],
+    }));
+    const activeIds = new Set(activeRows.map((row) => row.id as string));
+    const fallbackId = (settings[0]?.fallback_store_category_id as string | null) ?? null;
+    return evaluateCategoryAssignment(ruleInputs, fallbackId, activeIds, attributes);
+  }
+
+  /** Whether `categoryId` is currently an active local Store category — used to gate approval on a still-valid confirmed selection. */
+  async isActiveStoreCategory(environment: EbayEnvironment, categoryId: string): Promise<boolean> {
+    const scope = await this.categoryScope(this.manager_, environment);
+    const [row] = await this.manager_.execute<Record<string, unknown>>(
+      `select id from ebay_integration_store_category where id=? and environment=? and ebay_account_id=? and status='ACTIVE' and deleted_at is null`,
+      [categoryId, scope.environment, scope.ebayAccountId],
+    );
+    return Boolean(row);
+  }
+
+  /** The linked Medusa Product Category id for a local Store category, if it has been synchronised. */
+  async medusaCategoryIdFor(environment: EbayEnvironment, categoryId: string): Promise<string | null> {
+    const scope = await this.categoryScope(this.manager_, environment);
+    const [row] = await this.manager_.execute<Record<string, unknown>>(
+      `select medusa_category_id from ebay_integration_store_category where id=? and environment=? and ebay_account_id=? and deleted_at is null`,
+      [categoryId, scope.environment, scope.ebayAccountId],
+    );
+    return (row?.medusa_category_id as string | null) ?? null;
+  }
+
+  // -------------------------------------------------------------------
+  // E2B: Medusa Product Category synchronisation
+  // -------------------------------------------------------------------
+
+  /** All active local Store categories for the environment, in a safe create/update order (parents before children). */
+  async listActiveStoreCategoriesForMedusaSync(environment: EbayEnvironment): Promise<StoreScope & { categories: StoreCategoryDto[] }> {
+    const scope = await this.categoryScope(this.manager_, environment);
+    const rows = await this.manager_.execute<Record<string, unknown>>(
+      `select * from ebay_integration_store_category where environment=? and ebay_account_id=? and status='ACTIVE' and deleted_at is null order by level, sibling_order, external_id`,
+      [scope.environment, scope.ebayAccountId],
+    );
+    return { ...scope, categories: rows.map(categoryRow) };
+  }
+
+  async linkStoreCategoryToMedusaCategory(id: string, medusaCategoryId: string): Promise<void> {
+    await this.manager_.execute(
+      `update ebay_integration_store_category set medusa_category_id=?, medusa_category_synced_at=now(), updated_at=now() where id=?`,
+      [medusaCategoryId, id],
+    );
+  }
+
+  async markStoreCategorySynced(id: string): Promise<void> {
+    await this.manager_.execute(`update ebay_integration_store_category set medusa_category_synced_at=now(), updated_at=now() where id=?`, [id]);
+  }
+
+  async recordMedusaSyncAudit(input: {
+    environment: EbayEnvironment;
+    actorId: string;
+    correlationId: string;
+    summary: { scanned: number; created: number; updated: number; unchanged: number; failed: number };
+    failures: Array<{ categoryId: string; externalId: string; message: string }>;
+  }): Promise<void> {
+    const scope = await this.categoryScope(this.manager_, input.environment);
+    await this.writeCategoryAudit(this.manager_, scope, {
+      actorId: input.actorId,
+      action: input.failures.length > 0 ? "MEDUSA_SYNC_COMPLETED_WITH_FAILURES" : "MEDUSA_SYNC_COMPLETED",
+      categoryId: null,
+      correlationId: input.correlationId,
+      details: { ...input.summary, failures: input.failures.slice(0, AUDIT_ID_LIMIT) },
     });
   }
 

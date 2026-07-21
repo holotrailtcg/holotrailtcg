@@ -69,6 +69,8 @@ export interface CreateCardFromInventoryRowInput {
   specialTreatment: SpecialTreatment
   finishConfirmed: boolean
   specialTreatmentConfirmed: boolean
+  /** E2B: the linked Medusa Product Category id for the reviewer-confirmed eBay Store category, if one was assigned. Applied only when a new Product is actually created — see `ensureProductChainForTradingCard`. */
+  categoryId?: string | null
 }
 
 type VariantDimensions = { condition: CardCondition; finish: CardFinish; specialTreatment: SpecialTreatment }
@@ -423,6 +425,7 @@ async function ensureProductChainForTradingCard(
     title: input.name, handle, status: "draft",
     options: [{ title: "Card Variant", values: [optionValue] }],
     variants: [{ title: optionValue, sku: variantSku, manage_inventory: true, options: { "Card Variant": optionValue } }],
+    ...(input.categoryId ? { category_ids: [input.categoryId] } : {}),
   })
   const productVariantId = product.variants?.[0]?.id
   if (!productVariantId) throw new MedusaError(MedusaError.Types.UNEXPECTED_STATE, "Product was created without its variant")

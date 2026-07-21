@@ -72,6 +72,22 @@ const InventoryProposal = model
      */
     card_creation_claim_token: model.text().nullable(),
     card_creation_claimed_at: model.dateTime().nullable(),
+    /**
+     * E2B category assignment — computed once, shortly after this proposal
+     * is created, from the enabled eBay category assignment rules (see
+     * `ebay-integration`'s `evaluateCategoryAssignment`). Both ids reference
+     * `EbayStoreCategory.id` in the ebay-integration module (a plain text
+     * id, not a DB foreign key, matching this module's existing
+     * cross-module reference style for `trading_card_variant_id`).
+     */
+    proposed_ebay_store_category_id: model.text().nullable(),
+    proposed_category_reason: model.text().nullable(),
+    proposed_category_rule_id: model.text().nullable(),
+    // Reviewer-confirmed selection — either the accepted proposal or a manual override. Required before an
+    // in-scope (NEW_HOLDING/UNRESOLVED_VARIANT) proposal may be applied; see `applyInventoryProposal`.
+    confirmed_ebay_store_category_id: model.text().nullable(),
+    category_confirmed_at: model.dateTime().nullable(),
+    category_confirmed_by: model.text().nullable(),
   })
   .indexes([
     {
@@ -159,6 +175,12 @@ const InventoryProposal = model
       expression: (columns) =>
         `${columns.medusa_sync_attempt_token} is null or ` +
         `(${columns.review_status} = 'APPLIED' and ${columns.medusa_sync_status} = 'PENDING')`,
+    },
+    {
+      name: "CK_tci_proposal_category_confirmation_consistency",
+      expression: (columns) =>
+        `(${columns.confirmed_ebay_store_category_id} is null and ${columns.category_confirmed_at} is null and ${columns.category_confirmed_by} is null) or ` +
+        `(${columns.confirmed_ebay_store_category_id} is not null and ${columns.category_confirmed_at} is not null and ${columns.category_confirmed_by} is not null)`,
     },
   ])
 

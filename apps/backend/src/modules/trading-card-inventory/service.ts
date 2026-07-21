@@ -1905,6 +1905,14 @@ class TradingCardInventoryModuleService extends MedusaService({
       if (!proposal.trading_card_variant_id || !Number.isInteger(proposal.proposed_quantity) || (proposal.proposed_quantity as number) < 0) {
         return { outcome: "INVALID_STATE", row: proposal }
       }
+      // E2B: a brand-new holding is the first Medusa-facing appearance of this
+      // row's card — it must carry a reviewer-confirmed, still-active eBay
+      // Store category before stock can move. QUANTITY_CHANGE never requires
+      // this: the underlying card/product was already categorised the first
+      // time it reached NEW_HOLDING.
+      if (changeKind === INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING && !proposal.confirmed_ebay_store_category_id) {
+        return { outcome: "INVALID_STATE", row: proposal }
+      }
 
       const sourceId = proposal.inventory_source_id as string
       const variantId = proposal.trading_card_variant_id as string
@@ -2033,13 +2041,19 @@ class TradingCardInventoryModuleService extends MedusaService({
 
     if (phaseAResult.outcome === "INVALID_STATE") {
       const isApproved = phaseAResult.row.review_status === INVENTORY_PROPOSAL_REVIEW_STATUS.APPROVED
+      const missingConfirmedCategory =
+        isApproved &&
+        phaseAResult.row.change_kind === INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING &&
+        !phaseAResult.row.confirmed_ebay_store_category_id
       return {
         proposalId: parsed.id, localApplicationStatus: "INVALID_STATE", transactionId: null,
         priorQuantity: null, resultingQuantity: null, medusaSyncStatus: MEDUSA_SYNC_STATUS.NOT_APPLICABLE,
-        errorCode: "INVALID_STATE",
-        errorMessage: isApproved
-          ? "The approved proposal is missing a valid variant or proposed quantity."
-          : `Proposal is ${phaseAResult.row.review_status}; only an APPROVED proposal can be applied.`,
+        errorCode: missingConfirmedCategory ? "CATEGORY_NOT_CONFIRMED" : "INVALID_STATE",
+        errorMessage: missingConfirmedCategory
+          ? "This proposal has no confirmed eBay Store category. Confirm or override the category before applying."
+          : isApproved
+            ? "The approved proposal is missing a valid variant or proposed quantity."
+            : `Proposal is ${phaseAResult.row.review_status}; only an APPROVED proposal can be applied.`,
       }
     }
 
@@ -2070,6 +2084,71 @@ class TradingCardInventoryModuleService extends MedusaService({
       results.push(await this.applyInventoryProposal({ ...input, id }))
     }
     return { results }
+  }
+
+  /**
+   * E2B: records the computed rule/fallback outcome for a freshly-created
+   * proposal. Called once, shortly after reconciliation, from the
+   * `reconcileInventorySnapshotWithPriceLocks` workflow (which has the
+   * cross-module access to the ebay-integration rule engine that this
+   * module itself intentionally does not). A `null` `storeCategoryId` is
+   * recorded as-is — it means "no rule matched and there is no active
+   * fallback", which correctly leaves the proposal with no proposed
+   * category and requires a manual Admin choice.
+   */
+  async setProposedCategoryAssignment(input: {
+    proposalId: string
+    storeCategoryId: string | null
+    reason: string
+    ruleId: string | null
+  }): Promise<void> {
+    idSchema.parse(input.proposalId)
+    await this.manager_.transactional(async (manager) => {
+      const [proposal] = await manager.execute<Record<string, unknown>>(
+        `select id from trading_card_inventory_proposal where id = ? and deleted_at is null for update`, [input.proposalId]
+      )
+      if (!proposal) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory proposal not found")
+      await manager.execute(
+        `update trading_card_inventory_proposal
+         set proposed_ebay_store_category_id = ?, proposed_category_reason = ?, proposed_category_rule_id = ?, updated_at = now()
+         where id = ?`,
+        [input.storeCategoryId, input.reason.slice(0, 500), input.ruleId, input.proposalId]
+      )
+    })
+  }
+
+  /**
+   * Reviewer confirmation of a proposal's eBay Store category — either
+   * accepting the computed proposal or overriding it with a manual choice.
+   * The caller (the admin route) is responsible for verifying `storeCategoryId`
+   * is an active local Store category before calling this; this method only
+   * enforces that the proposal itself is still confirmable (not yet applied).
+   */
+  async confirmProposalCategory(input: { proposalId: string; storeCategoryId: string; actor: string }): Promise<Record<string, unknown>> {
+    idSchema.parse(input.proposalId)
+    return this.manager_.transactional(async (manager) => {
+      const [proposal] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_inventory_proposal where id = ? and deleted_at is null for update`, [input.proposalId]
+      )
+      if (!proposal) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory proposal not found")
+      if (proposal.review_status === INVENTORY_PROPOSAL_REVIEW_STATUS.APPLIED) {
+        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This proposal has already been applied; its category assignment can no longer be changed.")
+      }
+      await manager.execute(
+        `update trading_card_inventory_proposal
+         set confirmed_ebay_store_category_id = ?, category_confirmed_at = now(), category_confirmed_by = ?, updated_at = now()
+         where id = ?`,
+        [input.storeCategoryId, input.actor, input.proposalId]
+      )
+      await this.writeAudit(manager, {
+        actor: input.actor, source: "MANUAL", entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_PROPOSAL, entityId: input.proposalId,
+        action: INVENTORY_AUDIT_ACTION.PROPOSAL_CATEGORY_CONFIRMED,
+        oldValue: { confirmedStoreCategoryId: proposal.confirmed_ebay_store_category_id ?? null },
+        newValue: { confirmedStoreCategoryId: input.storeCategoryId },
+      })
+      const [saved] = await manager.execute<Record<string, unknown>>(`select * from trading_card_inventory_proposal where id = ?`, [input.proposalId])
+      return saved
+    })
   }
 
   /**

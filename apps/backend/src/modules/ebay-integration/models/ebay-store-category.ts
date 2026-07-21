@@ -16,6 +16,11 @@ const EbayStoreCategory = model.define({ name: "EbayStoreCategory", tableName: "
   removed_at: model.dateTime().nullable(),
   removed_by: model.text().nullable(),
   removal_reason: model.text().nullable(),
+  // Stable link to the mirrored Medusa Product Category, set the first time
+  // this row is synchronised. Retained across rename/re-parent/external-id
+  // changes so eBay-side identity churn never orphans the Medusa category.
+  medusa_category_id: model.text().nullable(),
+  medusa_category_synced_at: model.dateTime().nullable(),
 }).indexes([
   { name: "IDX_ebay_store_category_identity", on: ["environment", "ebay_account_id", "external_id"], unique: true, where: "deleted_at is null" },
   { name: "IDX_ebay_store_category_tree", on: ["environment", "ebay_account_id", "parent_external_id", "sibling_order"], where: "deleted_at is null" },

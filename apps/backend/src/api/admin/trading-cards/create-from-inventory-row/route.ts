@@ -5,6 +5,9 @@ import { retryPulseSnapshotMatching } from "../../../../workflows/trading-card-i
 import { parseProductId } from "../../../../modules/trading-card-inventory/pulse/product-id"
 import type { InventoryRecordSource } from "../../../../modules/trading-card-inventory/types"
 import { tradingCardInventoryService } from "../../trading-card-inventory/shared"
+import { EBAY_INTEGRATION_MODULE } from "../../../../modules/ebay-integration"
+import type EbayIntegrationModuleService from "../../../../modules/ebay-integration/service"
+import { EBAY_CONNECTION_STATUS } from "../../../../modules/ebay-integration/types"
 import {
   adminActor, CARD_GAME, createCardFromInventoryRowBodySchema, parseAdminInput, safeAdminRead, safeAdminWrite,
   tradingCardsService,
@@ -70,6 +73,28 @@ export async function POST(req: AuthenticatedMedusaRequest, res: MedusaResponse)
     throw new MedusaError(MedusaError.Types.UNEXPECTED_STATE, "This row's provider reference does not carry a set code and card number")
   }
 
+  // E2B: this route is the point where a brand-new Medusa Product is
+  // created for the row's TradingCard, so it is also the approval gate for
+  // category assignment — a displayed proposal is never enough, and the
+  // confirmed category must still be active right now (not just when it was
+  // confirmed). `beginCardCreationClaim`'s lease naturally expires if this
+  // check rejects, so no separate claim release is needed here.
+  const confirmedCategoryId = proposal.confirmed_ebay_store_category_id as string | null
+  if (!confirmedCategoryId) {
+    throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "This row has no confirmed eBay Store category. Confirm or override the category before creating the card.")
+  }
+  const ebayIntegration = req.scope.resolve<EbayIntegrationModuleService>(EBAY_INTEGRATION_MODULE)
+  let categoryId: string | null = null
+  const connections = await safeAdminRead(() => ebayIntegration.listSafeConnections())
+  const connectedEnvironment = connections.find((connection) => connection.status === EBAY_CONNECTION_STATUS.CONNECTED)?.environment
+  if (connectedEnvironment) {
+    const stillActive = await safeAdminRead(() => ebayIntegration.isActiveStoreCategory(connectedEnvironment, confirmedCategoryId))
+    if (!stillActive) {
+      throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "The confirmed eBay Store category is no longer active. Choose another category and re-confirm.")
+    }
+    categoryId = await safeAdminRead(() => ebayIntegration.medusaCategoryIdFor(connectedEnvironment, confirmedCategoryId))
+  }
+
   try {
     const { result } = await safeAdminWrite(() => createCardFromInventoryRowWorkflow(req.scope).run({
       input: {
@@ -79,6 +104,7 @@ export async function POST(req: AuthenticatedMedusaRequest, res: MedusaResponse)
         name: body.name, cardNumber: body.cardNumber, rarityRaw: body.rarityRaw ?? null,
         condition: body.condition as never, finish: body.finish as never, specialTreatment: body.specialTreatment as never,
         finishConfirmed: body.finishConfirmed, specialTreatmentConfirmed: body.specialTreatmentConfirmed,
+        categoryId,
       },
     }))
     const [variant] = await cards.listTradingCardVariants(
