@@ -1,7 +1,8 @@
+import { randomUUID } from "node:crypto"
 import { MedusaApp } from "@medusajs/framework/modules-sdk"
 import { asValue } from "@medusajs/framework/awilix"
 import { ContainerRegistrationKeys, createPgConnection, Modules } from "@medusajs/framework/utils"
-import type { IProductModuleService, IStockLocationService } from "@medusajs/framework/types"
+import type { IInventoryService, IProductModuleService, IStockLocationService } from "@medusajs/framework/types"
 import { TRADING_CARDS_MODULE } from "../../trading-cards"
 import { TRADING_CARD_INVENTORY_MODULE } from "../index"
 import { EBAY_INTEGRATION_MODULE } from "../../ebay-integration"
@@ -26,6 +27,7 @@ let cards: any
 let ebayIntegration: any
 let container: ReturnType<typeof buildContainer>
 let link: NonNullable<Awaited<ReturnType<typeof MedusaApp>>["link"]>
+let connectedScopeFixture: { environment: "SANDBOX"; ebayAccountId: string } | undefined
 
 const suffix = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 9)}`
 
@@ -90,6 +92,12 @@ async function productVariantFixture(categoryIds: string[] = []) {
   })
   const productVariant = product.variants?.[0]
   if (!productVariant) throw new Error("Expected created product variant")
+  const inventory = container.resolve<IInventoryService>(Modules.INVENTORY)
+  const inventoryItem = await inventory.createInventoryItems({ sku: `ITEM-CAT-${id}` })
+  await link.create({
+    [Modules.PRODUCT]: { variant_id: productVariant.id },
+    [Modules.INVENTORY]: { inventory_item_id: inventoryItem.id },
+  })
   return { product, productVariant }
 }
 
@@ -101,13 +109,36 @@ async function linkTradingCardVariantToProductVariant(tradingCardVariantId: stri
 }
 
 async function connectedEbayScope() {
+  if (connectedScopeFixture) return connectedScopeFixture
+
   const id = suffix()
+  const attemptId = randomUUID()
+  const [existing] = (await pgConnection.raw(
+    `select id, ebay_account_id from ebay_integration_connection
+     where environment = 'SANDBOX' and deleted_at is null limit 1`,
+  )).rows as Array<{ id: string; ebay_account_id: string | null }>
+  if (existing) {
+    const ebayAccountId = existing.ebay_account_id ?? `acct_${id}`
+    await pgConnection.raw(
+      `update ebay_integration_connection set status = 'CONNECTED', ebay_account_id = ?, current_attempt_id = ?,
+       credential_generation = ?, refresh_token_ciphertext = 'fixture-ciphertext', refresh_token_iv = 'fixture-iv',
+       refresh_token_auth_tag = 'fixture-auth-tag', encryption_key_version = 'fixture-key-v1',
+       refresh_operation_id = null, refresh_operation_started_at = null where id = ?`,
+      [ebayAccountId, attemptId, attemptId, existing.id],
+    )
+    connectedScopeFixture = { environment: "SANDBOX", ebayAccountId }
+    return connectedScopeFixture
+  }
+
   await pgConnection.raw(
-    `insert into ebay_integration_connection (id, environment, status, ebay_account_id, current_attempt_id, granted_scopes)
-     values (?, 'SANDBOX', 'CONNECTED', ?, ?, '[]'::jsonb)`,
-    [`ebconn_${id}`, `acct_${id}`, `attempt_${id}`],
+    `insert into ebay_integration_connection
+      (id, environment, status, ebay_account_id, current_attempt_id, credential_generation,
+       refresh_token_ciphertext, refresh_token_iv, refresh_token_auth_tag, encryption_key_version, granted_scopes)
+     values (?, 'SANDBOX', 'CONNECTED', ?, ?, ?, 'fixture-ciphertext', 'fixture-iv', 'fixture-auth-tag', 'fixture-key-v1', '[]'::jsonb)`,
+    [`ebconn_${id}`, `acct_${id}`, attemptId, attemptId],
   )
-  return { environment: "SANDBOX" as const, ebayAccountId: `acct_${id}` }
+  connectedScopeFixture = { environment: "SANDBOX", ebayAccountId: `acct_${id}` }
+  return connectedScopeFixture
 }
 
 /** Isolates `resolveMedusaStockLocationId`'s fallback from whatever else exists in the shared test database, mirroring the sibling spec file. */
@@ -150,10 +181,8 @@ describe("syncInventoryProposalToMedusa — E2B category assignment", () => {
       })
       expect(result.outcome).toBe("SYNCED")
 
-      const [updated] = await productModuleService.listProductCategories({ product_id: [product.id] } as never)
       const categories = await productModuleService.retrieveProduct(product.id, { relations: ["categories"] })
       expect((categories as unknown as { categories?: Array<{ id: string }> }).categories?.map((c) => c.id)).toContain(medusaCategory.id)
-      void updated
     })
   }, 60000)
 
