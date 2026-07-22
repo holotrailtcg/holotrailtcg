@@ -10,6 +10,13 @@ import type TradingCardsModuleService from "../modules/trading-cards/service"
 import type { EbayEnvironment } from "../modules/ebay-integration/types"
 
 /**
+ * KEEP — reusable ops tool, not a one-off. The eBay category-assignment
+ * ruleset is expected to keep growing (more sets, more rarities, PRODUCTION
+ * rules once that environment connects) — every time it changes, proposals
+ * created under the old rules need this to pick up the new ones. Takes
+ * `snapshotId`/`environment` as inputs, no hard-coded data; same shape as
+ * the already-kept `retry-snapshot-matching.ts`.
+ *
  * Re-runs `evaluateCategoryAssignment` against every PENDING, in-scope
  * proposal on a snapshot and overwrites its stored category proposal —
  * needed because `annotateCategoryProposals` only ever computes a

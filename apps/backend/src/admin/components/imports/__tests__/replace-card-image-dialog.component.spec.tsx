@@ -5,6 +5,7 @@ import "@testing-library/jest-dom"
 import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import type { ComponentProps } from "react"
 import ReplaceCardImageDialog from "../replace-card-image-dialog"
 import type { CardImageDetail, CardImageDto } from "../image-types"
 
@@ -67,7 +68,10 @@ async function driveUploadToReady() {
   xhr.onload?.()
 }
 
-function renderDialog(fetchImpl: (url: string, init?: RequestInit) => Promise<unknown>) {
+function renderDialog(
+  fetchImpl: (url: string, init?: RequestInit) => Promise<unknown>,
+  props: Partial<ComponentProps<typeof ReplaceCardImageDialog>> = {},
+) {
   const fetchMock = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => fetchImpl(String(input), init))
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -75,7 +79,13 @@ function renderDialog(fetchImpl: (url: string, init?: RequestInit) => Promise<un
   const onUploaded = jest.fn()
   render(
     <QueryClientProvider client={queryClient}>
-      <ReplaceCardImageDialog tradingCardId="tcard_1" tradingCardVariantId="tcvar_1" onClose={onClose} onUploaded={onUploaded} />
+      <ReplaceCardImageDialog
+        tradingCardId="tcard_1"
+        tradingCardVariantId="tcvar_1"
+        onClose={onClose}
+        onUploaded={onUploaded}
+        {...props}
+      />
     </QueryClientProvider>
   )
   return { fetchMock, onClose, onUploaded }
@@ -182,7 +192,7 @@ describe("ReplaceCardImageDialog — replacement success only after archive succ
     await screen.findByAltText("new.jpg")
   })
 
-  it("shows uploaded photographs in a larger gallery and accepts multiple additional files", async () => {
+  it("uses selectable thumbnails, promotes the selected image, and accepts multiple additional files", async () => {
     const detail = detailWithExistingImage()
     detail.variants[0].ready_images.push(existingImage({
       id: "tcimg_second",
@@ -190,19 +200,33 @@ describe("ReplaceCardImageDialog — replacement success only after archive succ
       imageUrl: "https://images.example/back.jpg",
       sortOrder: 1,
     }))
-    renderDialog(async (url) => {
+    const onNext = jest.fn()
+    const { fetchMock, onUploaded } = renderDialog(async (url) => {
       if (url.includes("/trading-cards/tcard_1/images")) return mockResponse(detail)
+      if (url.includes("/variants/tcvar_1/images/reorder")) return mockResponse({})
       throw new Error(`Unexpected fetch: ${url}`)
-    })
+    }, { showNext: true, onNext })
 
     const user = userEvent.setup()
     expect(await screen.findByText("Uploaded images (2)")).toBeInTheDocument()
-    expect(screen.getByAltText("old.jpg")).toHaveClass("max-h-[22rem]", "w-full")
-    expect(screen.getByAltText("back.jpg")).toHaveClass("max-h-[22rem]", "w-full")
+    expect(screen.getAllByAltText("old.jpg")[0]).toHaveClass("max-h-[26rem]", "w-full")
+    expect(screen.getByAltText("back.jpg")).toHaveClass("h-full", "w-full")
     expect(screen.queryByText(/Hover/)).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "back.jpg" }))
+    expect(screen.getByRole("button", { name: "Set as primary" })).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Set as primary" }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/admin/trading-cards/variants/tcvar_1/images/reorder",
+      expect.objectContaining({ body: JSON.stringify({ orderedImageIds: ["tcimg_second", "tcimg_old"] }) }),
+    ))
+    expect(onUploaded).toHaveBeenCalled()
 
     await user.click(screen.getByRole("button", { name: "Add more images" }))
     expect(screen.getByText("Add more images", { selector: "p" })).toBeInTheDocument()
     expect(document.querySelector('input[type="file"]')).toHaveAttribute("multiple")
+
+    await user.click(screen.getByRole("button", { name: /Next card/ }))
+    expect(onNext).toHaveBeenCalledTimes(1)
   })
 })

@@ -59,6 +59,29 @@ describe("evaluateCategoryAssignment", () => {
     expect(result.outcome).toBe("RULE_MATCH")
   })
 
+  it("matches Pulse's raw-text rarity when the rule's condition also lists the canonical enum form (per the E2B raw/canonical gotcha)", () => {
+    // `pulse/rarity-mapping.ts` only produces a canonical enum for a limited
+    // set of rarities — Illustration Rare stays as Pulse's raw text forever.
+    // Rules must list both forms as separate condition values; only the raw
+    // text form is what real Pulse input actually carries.
+    const rules: CategoryAssignmentRule[] = [
+      rule({ priority: 1, conditions: [{ field: "RARITY", values: ["ILLUSTRATION_RARE", "Illustration Rare"] }] }),
+    ]
+    const active = new Set(["cat-1"])
+
+    const result = evaluateCategoryAssignment(rules, null, active, { rarity: "Illustration Rare" })
+    expect(result.outcome).toBe("RULE_MATCH")
+    expect(result.storeCategoryId).toBe("cat-1")
+  })
+
+  it("does not match on the canonical enum value alone when the incoming attribute is only ever the raw Pulse text", () => {
+    const rules: CategoryAssignmentRule[] = [
+      rule({ priority: 1, conditions: [{ field: "RARITY", values: ["ILLUSTRATION_RARE"] }] }),
+    ]
+    const result = evaluateCategoryAssignment(rules, null, new Set(["cat-1"]), { rarity: "Illustration Rare" })
+    expect(result.outcome).toBe("NO_MATCH")
+  })
+
   it("never matches a rule with zero conditions", () => {
     const rules: CategoryAssignmentRule[] = [rule({ priority: 1, conditions: [] })]
     const result = evaluateCategoryAssignment(rules, null, new Set(["cat-1"]), { finish: "HOLO" })

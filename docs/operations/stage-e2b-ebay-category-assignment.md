@@ -80,6 +80,58 @@ Both are additive/nullable. No backfill runs. Existing rows are untouched.
 See `docs/decisions/0016-ebay-e2b-category-assignment.md` — no
 `defineLink` to `ProductCategory`, no supertype/card-type condition field,
 category proposal computation is skipped whenever zero or more than one
-eBay environment is currently connected, and the proposal category page is
-not yet linked from the main proposals table (navigate to it directly with
-a proposal id).
+eBay environment is currently connected.
+
+As of 2026-07-22 the proposal category page is reached via a modal from
+Step 4 of the Pulse import wizard (`CategoryAssignmentDialog`) rather than
+only by navigating to `/imports/proposals/<id>/category` directly, and Apply
+is gated in the UI (not just the API) for any NEW_HOLDING proposal without
+a confirmed category.
+
+## Initial SANDBOX ruleset (2026-07-22)
+
+Created via one-off scripts that have since been deleted (their real,
+account-specific category ids weren't safe to keep as reusable code — see
+`apps/backend/src/scripts/` cleanup, 2026-07-22). Recreate by working
+through Settings → eBay → eBay category rules if this environment's rules
+are ever lost; the table below is the reproducible reference.
+
+Evaluated in ascending priority order (lowest number first); the first
+matching enabled rule targeting a still-ACTIVE category wins.
+
+| Priority | Rule | Condition(s) | Target category |
+|---|---|---|---|
+| 10 | Japanese cards | Language = JA | Japanese Pokémon Cards |
+| 20 | Chinese cards | Language = ZH | Chinese Pokémon Cards |
+| 30 | Illustration Rare — Paradox Rift | Rarity = Illustration Rare, Set = Paradox Rift | Illustration Rares & SIRs / Scarlet & Violet Series / SV04 Paradox Rift |
+| 31 | Illustration Rare — Temporal Forces | Rarity = Illustration Rare, Set = Temporal Forces | .../SV05 Temporal Forces |
+| 32 | Illustration Rare — Scarlet & Violet | Rarity = Illustration Rare, Set = Scarlet & Violet | .../SV01 Scarlet & Violet |
+| 33 | Illustration Rare — Twilight Masquerade | Rarity = Illustration Rare, Set = Twilight Masquerade | .../SV06 Twilight Masquerade |
+| 34 | Illustration Rare — Surging Sparks | Rarity = Illustration Rare, Set = Surging Sparks | .../SV08 Surging Sparks |
+| 35 | Illustration Rare — Black Bolt | Rarity = Illustration Rare, Set = Black Bolt | .../SV10.5 Black Bolt |
+| 40 | Illustration Rare — other sets | Rarity = Illustration Rare | Illustration Rares & SIRs (top) |
+| 50 | Ultra/Hyper/Shiny Ultra/Mega Hyper rare | Rarity in {Ultra Rare, Ultra Rare Single, Hyper Rare, Shiny Ultra Rare, Mega Hyper Rare} | Ultra Rares & Full Arts |
+| 60 | Promo cards | Rarity = Promo | Black Star Promo Cards |
+| 61–75 | Reverse Holo — <set> | Finish = Reverse Holo, Set = <one of the 15 SV sets: Scarlet & Violet, Paldea Evolved, Obsidian Flames, Paradox Rift, Temporal Forces, Twilight Masquerade, Stellar Crown, Surging Sparks, Journey Together, Destined Rivals, Black Bolt, 151, Paldean Fates, Shrouded Fable, Prismatic Evolutions> | Reverse Holos / Scarlet & Violet Series / <matching SV set> |
+| 80 | Cosmos Holo special treatment | Special Treatment = Cosmos Holo | Special Holos & Variants / Cosmos Holos |
+| 90 | Reverse Holo finish | Finish = Reverse Holo | Reverse Holos (top) |
+
+Fallback category: whatever is configured on the eBay category rules page
+(was "Other Pokémon Cards" as of 2026-07-22).
+
+**Rarity matching gotcha**: Pulse's rarity mapper
+(`pulse/rarity-mapping.ts`) only produces a canonical enum value for
+common/uncommon/double rare/ultra rare/ace spec/promo/no rarity — every
+other rarity (Illustration Rare, Hyper Rare, Shiny Ultra Rare, Mega Hyper
+Rare, Ultra Rare Single, Black White Rare) stays as Pulse's raw text
+forever. Rules matching on those rarities must include both the canonical
+enum value (e.g. `ILLUSTRATION_RARE`) and the raw text form (e.g.
+`Illustration Rare`) as separate condition values, or they will silently
+never match real data.
+
+**Deliberately not covered**: Pokémon ex Cards, Pokémon V/VMAX/VSTAR
+Cards, and Trainer Gallery — no condition field (Language/Finish/Rarity/
+Special Treatment/Set Code/Set Name) can distinguish these from an
+ordinary card of the same rarity. Cards that belong there fall to the
+fallback category for manual assignment until a real signal exists to
+rule on.

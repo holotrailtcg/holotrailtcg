@@ -8,6 +8,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
 import { TooltipProvider } from "@medusajs/ui"
 import InventoryProposalsPage from "../page"
+import type { InventoryProposalListItem } from "../../../../../../components/imports/pulse-import-types"
 
 jest.mock("@medusajs/ui", () => {
   const actual = jest.requireActual("@medusajs/ui")
@@ -30,13 +31,23 @@ const BASE_PROGRESS = {
   appliedSyncFailed: 0, blocked: 0, outOfScope: 0, allReviewed: false, allApplicableApplied: false, fullyComplete: false,
 }
 
-const PENDING_PROPOSAL = {
+const PENDING_PROPOSAL: InventoryProposalListItem = {
   id: "tciprop_1", inventorySourceId: "tcisrc_1", inventorySnapshotId: "tcisnap_1",
-  tradingCardVariantId: "tcvar_1", providerReference: "ref-1", previousQuantity: 0, proposedQuantity: 5,
+  tradingCardVariantId: "tcvar_1",
+  card: {
+    tradingCardId: "tcard_1", name: "Pikachu", setDisplayName: "Base Set", cardNumber: "025/100",
+    rarity: "COMMON", rarityRaw: "Common", condition: "NEAR_MINT", finish: "REVERSE_HOLO", specialTreatment: "NONE", sku: "PIKA-025",
+  },
+  cardIdentityHint: null, providerReference: "ref-1", previousQuantity: 0, proposedQuantity: 5,
   quantityDelta: 5, changeKind: "NEW_HOLDING", reviewStatus: "PENDING", resolvedBy: null, resolvedAt: null,
   reviewNote: null, appliedAt: null, appliedTransactionId: null, medusaSyncStatus: "NOT_APPLICABLE",
   medusaInventoryItemId: null, medusaStockLocationId: null, medusaSyncRetryCount: 0, medusaSyncLastError: null,
   createdAt: "2026-07-01T00:00:00.000Z",
+  // A NEW_HOLDING proposal needs a reviewer-confirmed eBay Store category
+  // before it is eligible for Apply (see `needsCategoryConfirmation` in the
+  // page under test) — most fixtures here are already past that gate.
+  proposedEbayStoreCategoryId: null, proposedCategoryReason: null, proposedCategoryRuleId: null,
+  confirmedEbayStoreCategoryId: "ebcat_1", categoryConfirmedAt: "2026-07-01T00:00:00.000Z", categoryConfirmedBy: "reviewer",
 }
 
 const APPROVED_PROPOSAL = {
@@ -46,7 +57,7 @@ const APPROVED_PROPOSAL = {
 const READY_IMAGE_READINESS = { ready: true, totalMatchedCards: 1, cardsWithPhoto: 1 }
 
 function renderPage(
-  proposals = [PENDING_PROPOSAL, APPROVED_PROPOSAL],
+  proposals: InventoryProposalListItem[] = [PENDING_PROPOSAL, APPROVED_PROPOSAL],
   overrides: {
     progress?: Partial<typeof BASE_PROGRESS>
     imageReadiness?: typeof READY_IMAGE_READINESS
@@ -66,6 +77,19 @@ function renderPage(
     }
     if (method === "POST" && url.includes("/apply")) {
       return mockResponse({ result: { proposalId: "tciprop_2", localApplicationStatus: "APPLIED", transactionId: "tcitxn_1", priorQuantity: 0, resultingQuantity: 5, medusaSyncStatus: "SYNCED", errorCode: null, errorMessage: null } })
+    }
+    if (method === "POST" && url.includes("/category")) {
+      const match = url.match(/\/proposals\/(tciprop_\d+)\/category/)
+      const id = match?.[1]
+      const target = proposals.find((p) => p.id === id)
+      if (target) target.confirmedEbayStoreCategoryId = "ebcat_1"
+      return mockResponse({ proposal: { ...target, confirmedEbayStoreCategoryId: "ebcat_1" } })
+    }
+    if (url.includes("/admin/ebay/store-categories")) {
+      return mockResponse({
+        accountId: "acct_1",
+        categories: [{ id: "ebcat_1", externalId: "1", name: "Pokemon", parentExternalId: null, siblingOrder: 1, level: 1, path: "Pokemon", status: "ACTIVE" }],
+      })
     }
     if (url.includes("/summary")) return mockResponse({ summary: { inventorySourceId: "tcisrc_1" }, progress, imageReadiness })
     if (url.includes("/variants/images?")) return mockResponse({ thumbnails: overrides.thumbnails ?? {} })
@@ -89,7 +113,11 @@ function renderPage(
       return mockResponse({ trading_card: { id: "tcard_1", name: "Pikachu", card_number: "025/100" }, card_set: { id: "set_1", display_name: "Base Set", language: "EN" }, tcgdex_reference_artwork_url: null, variants: [] })
     }
     if (url.includes("/proposals?")) return mockResponse({ proposals, count: proposals.length, limit: 20, offset: 0 })
-    if (url.match(/\/proposals\/tciprop_\d$/)) return mockResponse({ proposal: proposals[0], history: [] })
+    if (url.match(/\/proposals\/tciprop_\d+$/)) {
+      const match = url.match(/\/proposals\/(tciprop_\d+)$/)
+      const target = proposals.find((p) => p.id === match?.[1]) ?? proposals[0]
+      return mockResponse({ proposal: target, history: [] })
+    }
     throw new Error(`Unexpected fetch: ${url}`)
   })
   global.fetch = fetchMock as unknown as typeof fetch
@@ -219,10 +247,73 @@ describe("InventoryProposalsPage", () => {
   })
 
   it("shows a retry-sync action only for an applied proposal with a failed Medusa sync", async () => {
-    const failedSyncProposal = { ...APPROVED_PROPOSAL, id: "tciprop_3", reviewStatus: "APPLIED", medusaSyncStatus: "FAILED" }
+    const failedSyncProposal: InventoryProposalListItem = { ...APPROVED_PROPOSAL, id: "tciprop_3", reviewStatus: "APPLIED", medusaSyncStatus: "FAILED" }
     renderPage([failedSyncProposal])
     expect(await screen.findByText("Inventory applied — Medusa sync failed")).toBeInTheDocument()
     expect(screen.getByRole("button", { name: "Retry sync" })).toBeInTheDocument()
+  })
+
+  it("does not offer Apply for an approved NEW_HOLDING proposal without a confirmed eBay Store category", async () => {
+    const unconfirmedApproved = { ...APPROVED_PROPOSAL, confirmedEbayStoreCategoryId: null, categoryConfirmedAt: null, categoryConfirmedBy: null }
+    renderPage([unconfirmedApproved])
+    await screen.findByText("Approved — not yet applied")
+
+    expect(screen.queryByRole("button", { name: "Apply" })).not.toBeInTheDocument()
+    expect(screen.getByText("Confirm the eBay category before this can be applied")).toBeInTheDocument()
+    // Also excluded from bulk-select — selectionKind is null for it.
+    expect(screen.getByRole("checkbox")).toBeDisabled()
+  })
+
+  it("offers Apply for an approved NEW_HOLDING proposal once its eBay Store category is confirmed", async () => {
+    renderPage([APPROVED_PROPOSAL])
+    await screen.findByText("Approved — not yet applied")
+
+    expect(screen.getByRole("button", { name: "Apply" })).toBeInTheDocument()
+    expect(screen.queryByText("Confirm the eBay category before this can be applied")).not.toBeInTheDocument()
+  })
+
+  it("navigates to Inventory via 'View in Inventory →' once the snapshot is fully applied, not the Assign card images link", async () => {
+    const user = userEvent.setup()
+    renderPage([APPROVED_PROPOSAL], { progress: { fullyComplete: true, allApplicableApplied: true, allReviewed: true } })
+    await screen.findByText("Snapshot fully applied")
+
+    const viewInInventory = screen.getByRole("button", { name: "View in Inventory →" })
+    expect(viewInInventory).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /Next: Assign card images/ })).not.toBeInTheDocument()
+
+    await user.click(viewInInventory)
+    // No route for /inventory is mounted in this test harness, so a
+    // successful navigation away is observed as this page's own content
+    // disappearing rather than by asserting on the (unmounted) destination.
+    await waitFor(() => expect(screen.queryByText("Snapshot fully applied")).not.toBeInTheDocument())
+  })
+
+  it("auto-advances the category dialog's 'Next card →' to the next row still needing category confirmation", async () => {
+    const user = userEvent.setup()
+    const firstNeedsCategory = {
+      ...PENDING_PROPOSAL, id: "tciprop_1", changeKind: "NEW_HOLDING",
+      proposedEbayStoreCategoryId: "ebcat_1", confirmedEbayStoreCategoryId: null,
+    }
+    const secondNeedsCategory = {
+      ...PENDING_PROPOSAL, id: "tciprop_2", changeKind: "NEW_HOLDING",
+      proposedEbayStoreCategoryId: "ebcat_1", confirmedEbayStoreCategoryId: null,
+    }
+    const { fetchMock } = renderPage([firstNeedsCategory, secondNeedsCategory])
+    await screen.findAllByText("Pending review")
+
+    await user.click(screen.getAllByRole("button", { name: "Review proposed category" })[0])
+    await screen.findByRole("dialog")
+    expect(await screen.findByRole("button", { name: "Next card →" })).toBeEnabled()
+
+    await user.click(screen.getByRole("button", { name: "Next card →" }))
+
+    // The dialog is remounted (keyed by proposal id) and re-fetches for the
+    // next proposal — still open, now scoped to tciprop_2.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/proposals/tciprop_2"),
+      expect.anything(),
+    ))
+    expect(screen.getByRole("dialog")).toBeInTheDocument()
   })
 
   it("expands and collapses the history panel for a proposal", async () => {

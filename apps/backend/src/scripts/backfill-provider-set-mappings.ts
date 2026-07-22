@@ -10,6 +10,13 @@ import { TRADING_CARDS_MODULE } from "../modules/trading-cards"
 import type TradingCardsModuleService from "../modules/trading-cards/service"
 
 /**
+ * KEEP — not disposable. English sets were backfilled 2026-07-21; JA/ZH are
+ * still pending, blocked only on Pulse's daily API quota resetting (see
+ * project memory `project_pulse_set_mapping_backfill.md`). This script is
+ * the actual tool for finishing that open task, not a diagnostic — do not
+ * delete it in a later cleanup pass without finishing or explicitly
+ * abandoning the JA/ZH backfill first.
+ *
  * One-off backfill: pre-populate `ProviderSetMapping` rows for every Pulse
  * set code we can discover, so the "N sets need mapping" banner never has
  * to ask about a set we've already resolved.

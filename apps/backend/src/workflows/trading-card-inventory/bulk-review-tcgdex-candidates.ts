@@ -1,3 +1,4 @@
+import type { MedusaContainer } from "@medusajs/framework/types"
 import { createStep, createWorkflow, StepResponse, WorkflowResponse } from "@medusajs/framework/workflows-sdk"
 import { createCardFromInventoryRowWorkflow } from "../trading-cards/create-card-from-inventory-row"
 import { TRADING_CARD_INVENTORY_MODULE } from "../../modules/trading-card-inventory"
@@ -49,25 +50,31 @@ export interface BulkReviewTcgdexCandidatesResult {
   results: CandidateReviewResult[]
 }
 
-const bulkReviewTcgdexCandidatesStep = createStep(
-  "bulk-review-tcgdex-candidates",
-  async (input: BulkReviewTcgdexCandidatesInput, { container }): Promise<StepResponse<BulkReviewTcgdexCandidatesResult>> => {
+/**
+ * Exported as a plain function (not only the wrapped step) so it is directly
+ * unit-testable with a fake container, matching this module's existing
+ * workflow convention (see `importPulseCsvSnapshot`).
+ */
+export async function bulkReviewTcgdexCandidates(
+  container: MedusaContainer,
+  input: BulkReviewTcgdexCandidatesInput,
+): Promise<BulkReviewTcgdexCandidatesResult> {
     const inventory = container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
     const cards = container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
 
     if (input.action === "REJECT") {
       await cards.reviewTcgdexLookupCandidates({ ids: input.candidateIds, reviewStatus: "REJECTED" })
-      return new StepResponse({
+      return {
         results: input.candidateIds.map((candidateId) => ({ candidateId, createdVariantCount: 0, skippedRowCount: 0, errors: [] })),
-      })
+      }
     }
 
     const summary = await inventory.getSnapshotImportSummary(input.snapshotId)
     const language = (summary.inventorySourceLanguage as CardLanguage | null) ?? null
     if (!language) {
-      return new StepResponse({
+      return {
         results: input.candidateIds.map((candidateId) => ({ candidateId, createdVariantCount: 0, skippedRowCount: 0, errors: ["This inventory source has no configured language."] })),
-      })
+      }
     }
 
     const unmatchedEntries = await inventory.listUnmatchedSnapshotEntriesForAdmin(input.snapshotId)
@@ -209,8 +216,13 @@ const bulkReviewTcgdexCandidatesStep = createStep(
       } catch { /* best-effort — see comment above */ }
     }
 
-    return new StepResponse({ results })
-  },
+    return { results }
+}
+
+const bulkReviewTcgdexCandidatesStep = createStep(
+  "bulk-review-tcgdex-candidates",
+  async (input: BulkReviewTcgdexCandidatesInput, { container }): Promise<StepResponse<BulkReviewTcgdexCandidatesResult>> =>
+    new StepResponse(await bulkReviewTcgdexCandidates(container, input)),
 )
 
 export const bulkReviewTcgdexCandidatesWorkflow = createWorkflow(

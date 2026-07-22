@@ -169,6 +169,10 @@ describe("ImportsSnapshotDetailPage", () => {
         tcgdexCandidate: {
           id: "tclookup_1", name: "Gengar", setName: "Ascended Heroes", seriesName: "Mega Evolution",
           referenceArtworkUrl: "https://assets.example/gengar.png", providerRarity: "Rare",
+          // The candidate itself is ACCEPTED (Step 2's bulk Accept already ran) even
+          // though this particular row still has no tradingCardVariantId — the
+          // finish/condition-unresolved case `isCandidateSelectable` must exclude.
+          reviewStatus: "ACCEPTED",
         },
       }],
       count: 1, limit: 20, offset: 0,
@@ -544,6 +548,36 @@ describe("ImportsSnapshotDetailPage", () => {
     expect(selectAll).not.toBeChecked()
     screen.getAllByRole("checkbox", { name: /Select (Gengar|Hypno)/ }).forEach((checkbox) => expect(checkbox).not.toBeChecked())
     expect(screen.queryByText("2 selected")).not.toBeInTheDocument()
+  })
+
+  it("excludes an already-ACCEPTED candidate from 'select all', even when mixed with still-pending ones", async () => {
+    const user = userEvent.setup()
+    const makeCandidate = (id: string, name: string, reviewStatus: string) => ({
+      id, name, setName: "Ascended Heroes", seriesName: "Mega Evolution", referenceArtworkUrl: null, providerRarity: "Rare", reviewStatus,
+    })
+    const candidateEntries = {
+      entries: [
+        { ...BASE_ENTRIES.entries[0], id: "tcisentry_1", providerReference: "card:sv1|001/196|holo|nm", tcgdexCandidate: makeCandidate("tclookup_1", "Gengar", "PENDING") },
+        // Accepted-but-skipped: reviewStatus ACCEPTED yet still no tradingCardVariantId — falls through to
+        // "Create card" (see the other test covering that), and must never be selectable via "select all".
+        { ...BASE_ENTRIES.entries[0], id: "tcisentry_2", providerReference: "card:sv1|002/196|holo|nm", tcgdexCandidate: makeCandidate("tclookup_2", "Hypno", "ACCEPTED") },
+        { ...BASE_ENTRIES.entries[0], id: "tcisentry_3", providerReference: "card:sv1|003/196|holo|nm", tcgdexCandidate: makeCandidate("tclookup_3", "Absol", "PENDING") },
+      ],
+      count: 3, limit: 20, offset: 0,
+    }
+    renderPage({}, { entries: candidateEntries })
+    await screen.findByText("import.csv")
+
+    expect(screen.queryByRole("checkbox", { name: "Select Hypno" })).not.toBeInTheDocument()
+
+    const selectAll = screen.getByRole("checkbox", { name: "Select all TCGdex matches on this page" })
+    await user.click(selectAll)
+
+    expect(selectAll).toBeChecked()
+    expect(screen.getByRole("checkbox", { name: "Select Gengar" })).toBeChecked()
+    expect(screen.getByRole("checkbox", { name: "Select Absol" })).toBeChecked()
+    // Only the two still-pending candidates were selected — the accepted one was excluded, not just unchecked.
+    expect(screen.getByText("2 selected")).toBeInTheDocument()
   })
 
   it("labels the special-treatment column as Variant", async () => {

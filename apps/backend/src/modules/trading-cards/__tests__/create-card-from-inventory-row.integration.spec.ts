@@ -1639,21 +1639,22 @@ describe("Stage 5B.2 stock-location policy, reused by card creation (Phase 7)", 
       // committed is ever deleted, including inside a single step's own
       // failure handling. The CardSet (step 1) and the bare TradingCard
       // identity row (step 2's own insert, which itself never touches
-      // stock locations) are both preserved. The Product this same step 2
-      // invocation created for its first variant is preserved too — its
-      // failure happens inside `createAndLinkInventoryItem`, resolving the
-      // stock location, which is *after* the Product already committed —
-      // left behind unlinked to the TradingCard (a `retryUntilDefined` read
-      // of `trading_card.product` finds nothing until a later attempt
-      // repairs it; see the "retry repairs a preserved incomplete
-      // TradingCard chain" test below for that repair in action).
+      // stock locations) are both preserved.
+      //
+      // `ensureProductChainForTradingCard` now resolves the stock location
+      // *before* calling `products.createProducts` (not after, inside
+      // `createAndLinkInventoryItem`, as an earlier version of this file
+      // did) specifically so a foreseeable, config-level failure like this
+      // one never produces an orphaned Product in the first place — see the
+      // comment above that stock-location check. So no Product is created
+      // here at all, not even an unlinked one.
       const matchingCardSets = await cards.listCardSets({ provider_set_code: setCode })
       expect(matchingCardSets).toHaveLength(1)
       const matchingCards = await cards.listTradingCards({ card_number: cardNumber })
       expect(matchingCards).toHaveLength(1)
       const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
       const orphanProducts = await products.listProducts({ title: input.name })
-      expect(orphanProducts).toHaveLength(1)
+      expect(orphanProducts).toHaveLength(0)
     },
     30000,
   )

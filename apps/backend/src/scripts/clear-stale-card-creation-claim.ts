@@ -4,6 +4,17 @@ import { TRADING_CARD_INVENTORY_MODULE } from "../modules/trading-card-inventory
 import type TradingCardInventoryModuleService from "../modules/trading-card-inventory/service"
 
 /**
+ * KEEP — reusable ops tool, not a diagnostic. `create-card-from-inventory-row.ts`
+ * deliberately has no in-workflow compensation for a failed card-creation
+ * attempt — recovery is by the claim's 5-minute lease expiring on its own
+ * (see that file's own doc comment). That design choice means a genuinely
+ * failed attempt (e.g. the missing-stock-location bug hit 2026-07-21/22)
+ * will recur in some form eventually, and this is the sanctioned way to
+ * unstick it early rather than wait. Already scoped to one provider
+ * reference, only touches a row with a live claim, and refuses to act on
+ * an ambiguous match — do not delete as "unsafe", it already has the
+ * guardrails a safe mutation script needs.
+ *
  * One-off operational unstick: clears a proposal's card-creation claim early
  * instead of waiting for its 5-minute lease to expire. Only ever touches a
  * proposal that currently holds a live claim token — never a resolved or

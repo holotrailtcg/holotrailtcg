@@ -181,6 +181,16 @@ describe("ImportsImagesPage", () => {
       expect.anything(),
     )
     expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining("/proposals"), expect.anything())
+  })
+
+  it("scopes the snapshot-entries query to only MATCHED rows — a row still awaiting Step 2 review isn't eligible for a photo yet", async () => {
+    const { fetchMock } = renderPage(async (url) => scopedFetch(url), "/imports/images?snapshotId=tcisnap_1")
+    await screen.findByText("Pikachu")
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("reviewStatus=MATCHED"),
+      expect.anything(),
+    )
 
     const user = userEvent.setup()
     await user.click(screen.getByRole("button", { name: "View the full catalogue instead" }))
