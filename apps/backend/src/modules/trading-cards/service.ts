@@ -708,6 +708,82 @@ class TradingCardsModuleService extends MedusaService({
     return this.findTcgdexLookupCandidate(input)
   }
 
+  /**
+   * Stage 1: manual retry for one TCGdex lookup-candidate identity.
+   * `process-tcgdex-lookup-batch.ts`'s batch flow only ever attempts a live
+   * lookup for an identity with no cached row at all — once a NO_MATCH/
+   * UNRESOLVED_SET/IDENTITY_MISMATCH result is cached it is skipped forever,
+   * with no way to re-attempt it after (for example) a set-mapping fix or a
+   * TCGdex-side data correction. This bypasses that: it discards the stale
+   * cached failure (soft-delete, never a hard delete — the row remains for
+   * audit/history) and makes a fresh live call.
+   *
+   * - Idempotent on success: if the cached result is already `MATCHED`,
+   *   returns it unchanged rather than re-querying TCGdex or creating a
+   *   second candidate row.
+   * - Never caches `PROVIDER_ERROR`/`INVALID_LOCAL_IDENTITY` (same rule as
+   *   the batch flow) — a transient failure must remain retryable, not
+   *   remembered as a stable outcome.
+   * - Serialised per identity via a transaction-scoped advisory lock, so two
+   *   concurrent retries for the same card never race into two live rows.
+   */
+  async retryTcgdexLookupCandidate(input: AuditContext & {
+    provider: ExternalProvider; language: CardLanguage; tcgdexSetId: string; cardNumber: string; client: TcgDexLookupDependency
+  }): Promise<{ code: TcgDexMatchResult["code"]; candidate: Record<string, unknown> | null; retried: boolean }> {
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    return this.manager_.transactional(async (manager) => {
+      await manager.execute(
+        `select pg_advisory_xact_lock(hashtextextended(?::text, 0))`,
+        [`tcgdex-lookup:${input.provider}:${input.language}:${input.tcgdexSetId}:${input.cardNumber}`],
+      )
+      const [existing] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_tcgdex_lookup_candidate
+         where provider = ? and language = ? and tcgdex_set_id = ? and card_number = ? and deleted_at is null`,
+        [input.provider, input.language, input.tcgdexSetId, input.cardNumber],
+      )
+      if (existing && existing.match_outcome === "MATCHED") {
+        return { code: "MATCHED" as const, candidate: existing, retried: false }
+      }
+
+      const result = await matchTcgdexCard(
+        { language: input.language, setCode: input.tcgdexSetId, cardNumber: input.cardNumber, setIdentity: { tcgdexSetId: input.tcgdexSetId } },
+        input.client,
+      )
+
+      if (existing) {
+        await manager.execute(`update trading_card_tcgdex_lookup_candidate set deleted_at = now() where id = ?`, [existing.id])
+      }
+
+      let candidate: Record<string, unknown> | null = null
+      if (result.code !== "PROVIDER_ERROR" && result.code !== "INVALID_LOCAL_IDENTITY") {
+        const id = generateEntityId(undefined, "tclookup")
+        const reviewStatus = result.code === "MATCHED" ? "PENDING" : null
+        const enrichment = result.code === "MATCHED" ? (result.enrichment as unknown as Record<string, unknown>) : null
+        await manager.execute(
+          `insert into trading_card_tcgdex_lookup_candidate
+             (id, provider, language, tcgdex_set_id, card_number, match_outcome, enrichment, review_status)
+           values (?, ?, ?, ?, ?, ?, ?::jsonb, ?)`,
+          [id, input.provider, input.language, input.tcgdexSetId, input.cardNumber, result.code,
+            enrichment ? JSON.stringify(enrichment) : null, reviewStatus],
+        )
+        const [saved] = await manager.execute<Record<string, unknown>>(
+          `select * from trading_card_tcgdex_lookup_candidate where id = ?`, [id],
+        )
+        candidate = saved
+      }
+
+      await this.writeAudit(manager, {
+        ...input, entityType: AUDIT_ENTITY_TYPE.TCGDEX_LOOKUP_CANDIDATE,
+        entityId: (candidate?.id as string | undefined) ?? `${input.provider}:${input.language}:${input.tcgdexSetId}:${input.cardNumber}`,
+        action: AUDIT_ACTION.TCGDEX_LOOKUP_RETRIED,
+        oldValue: { previousOutcome: (existing?.match_outcome as string | undefined) ?? null },
+        newValue: { outcome: result.code },
+      })
+
+      return { code: result.code, candidate, retried: true }
+    })
+  }
+
   /** Batch existence check for a set of exact card identities — used to skip already-cached lookups before spending a live TCGdex call. */
   async listTcgdexLookupCandidates(input: {
     provider: ExternalProvider; language: CardLanguage; keys: Array<{ tcgdexSetId: string; cardNumber: string }>

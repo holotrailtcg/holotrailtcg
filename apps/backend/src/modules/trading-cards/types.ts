@@ -171,6 +171,8 @@ export const AUDIT_ENTITY_TYPE = {
   EXTERNAL_CARD_REFERENCE: "EXTERNAL_CARD_REFERENCE",
   ENRICHMENT_PROPOSAL: "ENRICHMENT_PROPOSAL",
   CARD_IMAGE: "CARD_IMAGE",
+  /** Stage 1: a pre-card-creation TCGdex lookup-candidate identity (see `TcgDexLookupCandidate`) — has no `TradingCard` row yet. */
+  TCGDEX_LOOKUP_CANDIDATE: "TCGDEX_LOOKUP_CANDIDATE",
 } as const
 
 export const AUDIT_ACTION = {
@@ -198,6 +200,8 @@ export const AUDIT_ACTION = {
   IMAGE_FOCAL_CHANGED: "IMAGE_FOCAL_CHANGED",
   IMAGE_ARCHIVED: "IMAGE_ARCHIVED",
   IMAGE_RESTORED: "IMAGE_RESTORED",
+  /** Stage 1: a reviewer manually retried a failed (NO_MATCH/UNRESOLVED_SET/IDENTITY_MISMATCH) cached TCGdex lookup. */
+  TCGDEX_LOOKUP_RETRIED: "TCGDEX_LOOKUP_RETRIED",
 } as const
 
 /**
