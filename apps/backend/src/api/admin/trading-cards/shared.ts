@@ -9,9 +9,21 @@ import {
 } from "../../../modules/trading-cards/types"
 import { resolveR2Config } from "../../../modules/trading-cards/images/r2-config"
 import { CARD_NUMBER_PATTERN } from "../../../modules/trading-cards/identity/card-number"
+import { TRADING_CARD_INVENTORY_MODULE } from "../../../modules/trading-card-inventory"
+import type TradingCardInventoryModuleService from "../../../modules/trading-card-inventory/service"
+import { EBAY_INTEGRATION_MODULE } from "../../../modules/ebay-integration"
+import type EbayIntegrationModuleService from "../../../modules/ebay-integration/service"
 
 export function tradingCardsService(req: MedusaRequest): TradingCardsModuleService {
   return req.scope.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
+}
+
+export function tradingCardInventoryService(req: MedusaRequest): TradingCardInventoryModuleService {
+  return req.scope.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
+}
+
+export function ebayIntegrationService(req: MedusaRequest): EbayIntegrationModuleService {
+  return req.scope.resolve<EbayIntegrationModuleService>(EBAY_INTEGRATION_MODULE)
 }
 
 /** The authenticated Admin user's actor ID. Never accepted from the request body. */
@@ -133,6 +145,124 @@ export const suggestSetMappingQuerySchema = z.object({
   providerSetCode: z.string().trim().min(1).max(64),
   language: z.enum(Object.values(CARD_LANGUAGE) as [string, ...string[]]),
 }).strict()
+
+/**
+ * Fills gaps in a `trading_card` row's own display fields using the most
+ * recently accepted (APPROVED or APPLIED) TCGdex enrichment proposal for
+ * that card, without ever calling TCGdex live.
+ *
+ * `applyApprovedEnrichmentProposal` (see `service.ts`) only copies an
+ * accepted proposal's `name`/`rarity*` fields onto `trading_card` once a
+ * reviewer has taken the separate "apply" action, and only copies the
+ * rarity fields at all when the proposal's rarity mapped cleanly
+ * (`rarityCandidate.status === "MAPPED"`). A proposal that is merely
+ * `APPROVED` (accepted, but not yet applied) therefore is not reflected on
+ * `trading_card` yet, even though the match itself has already been
+ * accepted. This only ever *fills nulls* — it never overrides a
+ * `trading_card` field that already has a value, so it can't contradict a
+ * deliberate manual edit or a later, different accepted match.
+ */
+export async function fillFromAcceptedTcgdexProposal(
+  service: TradingCardsModuleService,
+  cardFields: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const tradingCardId = cardFields.id
+  if (typeof tradingCardId !== "string" || !tradingCardId) return cardFields
+
+  const needsName = !cardFields.name
+  const needsRarity = !cardFields.rarity
+  if (!needsName && !needsRarity) return cardFields
+
+  const [proposal] = await service.listTcgDexEnrichmentProposals(
+    { trading_card_id: tradingCardId, review_status: ["APPROVED", "APPLIED"] },
+    { order: { created_at: "DESC" }, take: 1 },
+  )
+  const snapshot = proposal?.snapshot as Record<string, unknown> | undefined
+  if (!snapshot) return cardFields
+
+  const filled = { ...cardFields }
+  if (needsName && typeof snapshot.name === "string" && snapshot.name) {
+    filled.name = snapshot.name
+  }
+  const rarityCandidate = snapshot.rarityCandidate as
+    | { status?: string; rarity?: unknown; iconKey?: unknown; providerValue?: unknown }
+    | undefined
+  if (needsRarity && rarityCandidate?.status === "MAPPED") {
+    filled.rarity = rarityCandidate.rarity ?? filled.rarity
+    filled.rarity_icon_key = filled.rarity_icon_key ?? rarityCandidate.iconKey ?? null
+    filled.rarity_raw = filled.rarity_raw ?? rarityCandidate.providerValue ?? null
+  }
+  return filled
+}
+
+export interface EbayCategoryView { name: string; path: string }
+
+/**
+ * Resolves the most recently *confirmed* eBay Store category for a trading
+ * card variant, via the most recent `inventory_proposal` row for that
+ * variant with a non-null `confirmed_ebay_store_category_id` — the only
+ * signal that a category has actually been confirmed (see
+ * `POST /admin/trading-card-inventory/proposals/:id/category`), as opposed
+ * to merely computed/proposed. Deliberately does not re-run rule evaluation
+ * — this reflects what was actually confirmed at import time, not a live
+ * recomputation that could disagree with it. Returns `null` if no
+ * confirmed proposal exists yet for this variant.
+ */
+export async function loadConfirmedEbayCategory(
+  inventoryService: TradingCardInventoryModuleService,
+  ebayService: EbayIntegrationModuleService,
+  tradingCardVariantId: string,
+): Promise<EbayCategoryView | null> {
+  const [proposal] = await inventoryService.listInventoryProposals(
+    { trading_card_variant_id: tradingCardVariantId, confirmed_ebay_store_category_id: { $ne: null } },
+    { order: { created_at: "DESC" }, take: 1 },
+  )
+  const categoryId = (proposal as { confirmed_ebay_store_category_id?: string | null } | undefined)?.confirmed_ebay_store_category_id
+  if (!categoryId) return null
+
+  const [category] = await ebayService.listEbayStoreCategories({ id: [categoryId] }, { take: 1 })
+  if (!category) return null
+  return { name: (category as { name: string }).name, path: (category as { path: string }).path }
+}
+
+export interface TcgdexSnapshotExtras {
+  illustrator: string | null
+  types: string[] | null
+  variants: { normal: boolean; reverse: boolean; holo: boolean; firstEdition: boolean } | null
+}
+
+/**
+ * Surfaces extra TCGdex-sourced display data that has never been copied onto
+ * the `trading_card` row (see `applyApprovedEnrichmentProposal` in
+ * `service.ts`, which only ever copies `name`/`rarity*`): the illustrator,
+ * energy types, and which finish variants (normal/reverse holo/holo/1st
+ * edition) TCGdex records as existing for this print. Read-only, sourced
+ * from the same accepted (APPROVED/APPLIED) proposal snapshot
+ * `fillFromAcceptedTcgdexProposal` uses — never a live TCGdex call.
+ *
+ * This is deliberately a separate concept from `trading_card_variant.finish`
+ * (the reviewer-confirmed finish Holo Trail is actually selling): TCGdex's
+ * `variants` flags describe which finishes exist for the print in general,
+ * not which one a specific physical card in stock is.
+ */
+export async function loadTcgdexSnapshotExtras(
+  service: TradingCardsModuleService, tradingCardId: string,
+): Promise<TcgdexSnapshotExtras | null> {
+  const [proposal] = await service.listTcgDexEnrichmentProposals(
+    { trading_card_id: tradingCardId, review_status: ["APPROVED", "APPLIED"] },
+    { order: { created_at: "DESC" }, take: 1 },
+  )
+  const snapshot = proposal?.snapshot as Record<string, unknown> | undefined
+  if (!snapshot) return null
+
+  return {
+    illustrator: typeof snapshot.illustrator === "string" ? snapshot.illustrator : null,
+    types: Array.isArray(snapshot.types) ? (snapshot.types as string[]) : null,
+    variants: (snapshot.variants && typeof snapshot.variants === "object")
+      ? (snapshot.variants as TcgdexSnapshotExtras["variants"])
+      : null,
+  }
+}
 
 export const cardSetsQuerySchema = z.object({
   language: z.enum(Object.values(CARD_LANGUAGE) as [string, ...string[]]).optional(),

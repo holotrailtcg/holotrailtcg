@@ -4,6 +4,13 @@ export type CardGame = (typeof CARD_GAME)[keyof typeof CARD_GAME]
 export const CARD_LANGUAGE = { EN: "EN", JA: "JA", ZH: "ZH" } as const
 export type CardLanguage = (typeof CARD_LANGUAGE)[keyof typeof CARD_LANGUAGE]
 
+/** Display label for each `CardLanguage` — used when generating human-readable product copy (see create-card-from-inventory-row.ts). */
+export const CARD_LANGUAGE_LABELS: Record<CardLanguage, string> = {
+  EN: "English",
+  JA: "Japanese",
+  ZH: "Chinese",
+}
+
 export const RECORD_ORIGIN = {
   MANUAL: "MANUAL",
   TCGDEX: "TCGDEX",

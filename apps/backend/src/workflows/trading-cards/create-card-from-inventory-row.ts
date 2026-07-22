@@ -9,9 +9,10 @@ import { rarityComparisonForm } from "../../modules/trading-cards/rarity/normali
 import { generateSku } from "../../modules/trading-cards/sku/generate-sku"
 import { machineSegment } from "../../modules/trading-cards/sku/slugify"
 import {
-  CARD_CONDITION_LABELS, CARD_FINISH_LABELS, CARD_GAME, RECORD_ORIGIN, SPECIAL_TREATMENT,
+  CARD_CONDITION_LABELS, CARD_FINISH_LABELS, CARD_GAME, CARD_LANGUAGE_LABELS, RECORD_ORIGIN, SPECIAL_TREATMENT,
   SPECIAL_TREATMENT_LABELS, type CardCondition, type CardFinish, type CardLanguage, type SpecialTreatment,
 } from "../../modules/trading-cards/types"
+import { ensureSeriesCollection, ensureTradingCardProductType, resolveSeriesName } from "./ensure-product-taxonomy"
 import { TRADING_CARD_INVENTORY_MODULE } from "../../modules/trading-card-inventory"
 import type TradingCardInventoryModuleService from "../../modules/trading-card-inventory/service"
 import type { InventoryRecordSource } from "../../modules/trading-card-inventory/types"
@@ -103,6 +104,21 @@ function variantDisplayTitle(dimensions: VariantDimensions): string {
   const parts = [CARD_CONDITION_LABELS[dimensions.condition], CARD_FINISH_LABELS[dimensions.finish]]
   if (dimensions.specialTreatment !== SPECIAL_TREATMENT.NONE) parts.push(SPECIAL_TREATMENT_LABELS[dimensions.specialTreatment])
   return parts.join(" · ")
+}
+
+/**
+ * A cosmetic, human-readable label for the InventoryItem's `title` field
+ * only — never used for identity/matching. This is what Medusa Admin's
+ * built-in Inventory list shows in its "Title" column, which otherwise
+ * renders "-" (InventoryItem.title is never set by default).
+ */
+function inventoryItemDisplayTitle(cardName: string, cardSetDisplayName: string, dimensions: VariantDimensions): string {
+  return `${cardName} - ${cardSetDisplayName} - ${CARD_FINISH_LABELS[dimensions.finish]}`
+}
+
+/** The Medusa Product's `description` — a single human-readable sentence identifying the card, its set, card number and language. */
+function productDescription(cardName: string, cardSetDisplayName: string, cardNumber: string, cardLanguage: CardLanguage): string {
+  return `${cardName} — ${cardSetDisplayName} ${cardNumber} (${CARD_LANGUAGE_LABELS[cardLanguage]})`
 }
 
 function shortId(): string {
@@ -219,7 +235,7 @@ function handleSegment(value: string): string {
  * locked critical section below — never directly by a step.
  */
 async function createAndLinkInventoryItem(
-  container: MedusaContainer, sku: string, productVariantId: string,
+  container: MedusaContainer, sku: string, productVariantId: string, title?: string,
 ): Promise<string> {
   const inventory = container.resolve<IInventoryService>(Modules.INVENTORY)
   // Same Stage 5B.2 stock-location policy `syncInventoryProposalToMedusa`
@@ -231,7 +247,7 @@ async function createAndLinkInventoryItem(
     throw new MedusaError(MedusaError.Types.NOT_ALLOWED, `Could not resolve a Medusa stock location for the new card (${locationResolution.category}): ${locationResolution.message}`)
   }
   const locationId = locationResolution.locationId
-  const item = await inventory.createInventoryItems({ sku })
+  const item = await inventory.createInventoryItems({ sku, ...(title ? { title } : {}) })
   // No cleanup on failure below — see the invariant note above `delay()`.
   // Once created, this InventoryItem is never deleted, even if its level or
   // its link to `productVariantId` never commits. It has no identity a
@@ -312,7 +328,7 @@ async function ensureInventoryLevelForItem(container: MedusaContainer, inventory
  * this file) is trusted once the lock is held.
  */
 async function ensureSingleInventoryItemForProductVariant(
-  container: MedusaContainer, productVariantId: string, skuForNewItem: string,
+  container: MedusaContainer, productVariantId: string, skuForNewItem: string, titleForNewItem?: string,
 ): Promise<string> {
   const locking = container.resolve<ILockingModule>(Modules.LOCKING)
   const lockKey = `trading-card-inventory-repair:${productVariantId}`
@@ -338,7 +354,7 @@ async function ensureSingleInventoryItemForProductVariant(
     // — still holding the lock, so no concurrent repairer could have raced
     // us here — rather than trusting the thrown error.
     try {
-      return await createAndLinkInventoryItem(container, skuForNewItem, productVariantId)
+      return await createAndLinkInventoryItem(container, skuForNewItem, productVariantId, titleForNewItem)
     } catch (error) {
       const afterError = await readInventoryItemLinksForProductVariant(container, productVariantId)
       if (afterError.length === 1) return afterError[0]
@@ -439,21 +455,37 @@ async function ensureProductChainForTradingCard(
   }
 
   const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+  const cards = container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
   const numberForms = cardNumberForms(input.cardNumber)
   const handle = `${handleSegment(input.cardSetProviderSetCode)}-${handleSegment(numberForms.normalised)}-${shortId().toLowerCase()}`
   const variantSku = `HT-PULSE-${shortId()}`
   const dimensions: VariantDimensions = { condition: input.condition, finish: input.finish, specialTreatment: input.specialTreatment }
   const optionValues = variantOptionValues(dimensions)
 
+  // Taxonomy is best-effort — a missing Series mapping or a transient Type/
+  // Collection lookup failure must never block card creation itself.
+  const [typeId, seriesName] = await Promise.all([
+    ensureTradingCardProductType(container).catch(() => null),
+    resolveSeriesName(cards, input.cardGame, input.cardLanguage, input.cardSetProviderSetCode).catch(() => null),
+  ])
+  const collectionId = seriesName ? await ensureSeriesCollection(container, seriesName).catch(() => null) : null
+
   const product = await products.createProducts({
     title: input.name, handle, status: "draft",
+    subtitle: input.cardSetDisplayName,
+    description: productDescription(input.name, input.cardSetDisplayName, numberForms.original, input.cardLanguage),
+    ...(typeId ? { type_id: typeId } : {}),
+    ...(collectionId ? { collection_id: collectionId } : {}),
     options: VARIANT_OPTION_TITLES.map((title) => ({ title, values: [optionValues[title]] })),
     variants: [{ title: variantDisplayTitle(dimensions), sku: variantSku, manage_inventory: true, options: optionValues }],
     ...(input.categoryId ? { category_ids: [input.categoryId] } : {}),
   })
   const productVariantId = product.variants?.[0]?.id
   if (!productVariantId) throw new MedusaError(MedusaError.Types.UNEXPECTED_STATE, "Product was created without its variant")
-  await ensureSingleInventoryItemForProductVariant(container, productVariantId, variantSku)
+  await ensureSingleInventoryItemForProductVariant(
+    container, productVariantId, variantSku,
+    inventoryItemDisplayTitle(input.name, input.cardSetDisplayName, dimensions),
+  )
 
   const link = container.resolve(ContainerRegistrationKeys.LINK)
   try {
@@ -677,6 +709,7 @@ async function ensureProductVariantForDimensions(
  */
 async function ensureVariantProductChain(
   container: MedusaContainer, cardResult: CardStepResult, dimensions: VariantDimensions, tradingCardVariantId: string,
+  inventoryItemTitle?: string,
 ): Promise<{ productVariantId: string; inventoryItemId: string }> {
   let productVariantId = await retryUntilDefined(() => readVariantProductVariantId(container, tradingCardVariantId))
 
@@ -702,7 +735,7 @@ async function ensureVariantProductChain(
     }
   }
 
-  const inventoryItemId = await ensureSingleInventoryItemForProductVariant(container, productVariantId, `HT-PULSE-${shortId()}`)
+  const inventoryItemId = await ensureSingleInventoryItemForProductVariant(container, productVariantId, `HT-PULSE-${shortId()}`, inventoryItemTitle)
 
   return { productVariantId, inventoryItemId }
 }
@@ -747,7 +780,10 @@ const resolveOrCreateVariantStep = createStep(
       }
     }
 
-    const { productVariantId, inventoryItemId } = await ensureVariantProductChain(container, input.cardResult, dimensions, tradingCardVariantId)
+    const { productVariantId, inventoryItemId } = await ensureVariantProductChain(
+      container, input.cardResult, dimensions, tradingCardVariantId,
+      inventoryItemDisplayTitle(input.name, input.cardSetDisplayName, dimensions),
+    )
     return new StepResponse({ tradingCardVariantId, productVariantId, inventoryItemId })
   },
   // No compensation, and no same-step delete either — see the invariant
