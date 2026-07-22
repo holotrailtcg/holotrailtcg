@@ -32,11 +32,29 @@ const ReplaceCardImageDialog = ({ tradingCardId, tradingCardVariantId, onClose, 
   const [adding, setAdding] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [justUploaded, setJustUploaded] = useState<CardImageDto | null>(null)
+  const [selectedImageId, setSelectedImageId] = useState<string | null>(null)
+  const [settingPrimary, setSettingPrimary] = useState(false)
 
   const variantGroup = imagesQuery.data?.variants.find((variant) => variant.id === tradingCardVariantId)
   const existingReadyImage = variantGroup?.ready_images[0] ?? null
   const readyImages = variantGroup?.ready_images ?? []
   const showUploadControl = !existingReadyImage || replacing || adding
+  const selectedImage = readyImages.find((image) => image.id === selectedImageId) ?? existingReadyImage
+
+  const handleSetPrimary = async (imageId: string) => {
+    if (imageId === existingReadyImage?.id) return
+    setSettingPrimary(true)
+    try {
+      const orderedImageIds = [imageId, ...readyImages.filter((image) => image.id !== imageId).map((image) => image.id)]
+      await postAction(`/admin/trading-cards/variants/${encodeURIComponent(tradingCardVariantId)}/images/reorder`, { orderedImageIds })
+      await imagesQuery.refetch()
+      onUploaded()
+    } catch {
+      toast.error("This image could not be set as primary. Please try again.")
+    } finally {
+      setSettingPrimary(false)
+    }
+  }
 
   const handleUploaded = async (image: CardImageDto) => {
     setJustUploaded(image)
@@ -63,6 +81,7 @@ const ReplaceCardImageDialog = ({ tradingCardId, tradingCardVariantId, onClose, 
     toast.success("Image saved")
     await imagesQuery.refetch()
     onUploaded()
+    setSelectedImageId(null)
     if (replacing) {
       setReplacing(false)
       setPendingFiles([])
@@ -81,6 +100,7 @@ const ReplaceCardImageDialog = ({ tradingCardId, tradingCardVariantId, onClose, 
     setReplacing(false)
     setUploadError(null)
     setJustUploaded(null)
+    setSelectedImageId(null)
     onNext?.()
   }
 
@@ -106,23 +126,57 @@ const ReplaceCardImageDialog = ({ tradingCardId, tradingCardVariantId, onClose, 
           {imagesQuery.isError && <Text size="small" className="text-ui-fg-error">This card's images could not be loaded.</Text>}
 
           {existingReadyImage && !replacing && (
-            <div className="flex flex-col gap-2">
+            <div className="flex flex-col gap-3">
               <Text size="small" weight="plus">
                 {readyImages.length === 1 ? "Current image" : `Uploaded images (${readyImages.length})`}
               </Text>
-              <div className={readyImages.length > 1 ? "grid gap-3 sm:grid-cols-2" : "grid grid-cols-1"}>
-                {readyImages.map((image) => image.imageUrl && (
+              {selectedImage?.imageUrl && (
+                <div className="bg-ui-bg-subtle flex items-center justify-center rounded-md border p-2">
                   <img
-                    key={image.id}
-                    src={image.imageUrl}
-                    alt={image.originalFilename}
-                    className="max-h-[22rem] w-full rounded-md border object-contain"
+                    src={selectedImage.imageUrl}
+                    alt={selectedImage.originalFilename}
+                    className="max-h-[26rem] w-full object-contain"
                   />
-                ))}
-              </div>
-              <div className="flex flex-wrap gap-2">
+                </div>
+              )}
+              {readyImages.length > 1 && (
+                <div className="flex flex-wrap gap-2">
+                  {readyImages.map((image) => {
+                    const isSelected = (selectedImage?.id ?? existingReadyImage.id) === image.id
+                    const isPrimary = image.id === existingReadyImage.id
+                    return image.imageUrl && (
+                      <button
+                        key={image.id}
+                        type="button"
+                        onClick={() => setSelectedImageId(image.id)}
+                        className={`relative h-16 w-16 shrink-0 overflow-hidden rounded-md border ${
+                          isSelected ? "border-ui-border-interactive border-2" : "border-ui-border-base"
+                        }`}
+                      >
+                        <img src={image.imageUrl} alt={image.originalFilename} className="h-full w-full object-cover" />
+                        {isPrimary && (
+                          <span className="bg-ui-bg-base/90 text-ui-fg-base absolute inset-x-0 bottom-0 text-[10px] leading-tight">
+                            Primary
+                          </span>
+                        )}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+              <div className="flex flex-wrap items-center gap-2">
                 <Button size="small" variant="secondary" onClick={() => { setAdding(true); setReplacing(false) }}>Add more images</Button>
                 <Button size="small" variant="secondary" onClick={() => { setReplacing(true); setAdding(false) }}>Replace image</Button>
+                {selectedImage && selectedImage.id !== existingReadyImage.id && (
+                  <Button
+                    size="small"
+                    variant="secondary"
+                    isLoading={settingPrimary}
+                    onClick={() => handleSetPrimary(selectedImage.id)}
+                  >
+                    Set as primary
+                  </Button>
+                )}
               </div>
             </div>
           )}

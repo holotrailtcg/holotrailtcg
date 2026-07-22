@@ -21,6 +21,15 @@ export const CARD_CONDITION = {
 } as const
 export type CardCondition = (typeof CARD_CONDITION)[keyof typeof CARD_CONDITION]
 
+/** Display label for each `CardCondition` — the single source of truth for anywhere a condition is shown to a human, including the Medusa "Condition" product option (see create-card-from-inventory-row.ts). */
+export const CARD_CONDITION_LABELS: Record<CardCondition, string> = {
+  NEAR_MINT: "Near Mint",
+  LIGHTLY_PLAYED: "Lightly Played",
+  MODERATELY_PLAYED: "Moderately Played",
+  HEAVILY_PLAYED: "Heavily Played",
+  DAMAGED: "Damaged",
+}
+
 export const CONDITION_SOURCE = { EXPLICIT: "EXPLICIT", DEFAULTED: "DEFAULTED" } as const
 export type ConditionSource = (typeof CONDITION_SOURCE)[keyof typeof CONDITION_SOURCE]
 
@@ -31,6 +40,14 @@ export const CARD_FINISH = {
   OTHER: "OTHER",
 } as const
 export type CardFinish = (typeof CARD_FINISH)[keyof typeof CARD_FINISH]
+
+/** Display label for each `CardFinish` — the single source of truth for anywhere a finish is shown to a human, including the Medusa "Finish" product option. */
+export const CARD_FINISH_LABELS: Record<CardFinish, string> = {
+  NORMAL: "Normal",
+  HOLO: "Holo",
+  REVERSE_HOLO: "Reverse Holo",
+  OTHER: "Other",
+}
 
 export const SPECIAL_TREATMENT = {
   NONE: "NONE",
@@ -56,6 +73,38 @@ export const SPECIAL_TREATMENT = {
   OTHER: "OTHER",
 } as const
 export type SpecialTreatment = (typeof SPECIAL_TREATMENT)[keyof typeof SPECIAL_TREATMENT]
+
+/**
+ * Display label for each `SpecialTreatment` — the single source of truth
+ * for anywhere a special treatment is shown to a human, including the
+ * Medusa "Special Treatment" product option. Built from real Pulse
+ * `material` strings observed in `pulse/material-mapping.ts` — neither
+ * TCGdex nor Pulse's own API has a dedicated special-treatment field to
+ * source this from instead (confirmed against both before choosing this).
+ */
+export const SPECIAL_TREATMENT_LABELS: Record<SpecialTreatment, string> = {
+  NONE: "None",
+  ENERGY_REVERSE: "Energy Reverse",
+  POKE_BALL_REVERSE: "Poké Ball Reverse",
+  MASTER_BALL_REVERSE: "Master Ball Reverse",
+  LOVE_BALL_REVERSE: "Love Ball Reverse",
+  QUICK_BALL_REVERSE: "Quick Ball Reverse",
+  FRIEND_BALL_REVERSE: "Friend Ball Reverse",
+  DUSK_BALL_REVERSE: "Dusk Ball Reverse",
+  ROCKET_REVERSE: "Rocket Reverse",
+  POKE_BALL: "Poké Ball",
+  MASTER_BALL: "Master Ball",
+  STARLIGHT_HOLO: "Starlight Holo",
+  COSMOS_HOLO: "Cosmos Holo",
+  GALAXY_HOLO: "Galaxy Holo",
+  CRACKED_ICE: "Cracked Ice",
+  STAMPED: "Stamped",
+  PRERELEASE_STAMPED: "Prerelease Stamped",
+  PROMOTIONAL_STAMPED: "Promotional Stamped",
+  TEXTURED: "Textured",
+  ETCHED: "Etched",
+  OTHER: "Other",
+}
 
 export const RARITY = {
   ACE_SPEC: "ACE_SPEC",

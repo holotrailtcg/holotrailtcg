@@ -18,6 +18,18 @@ describe("resolveCondition", () => {
     expect(result.source).toBe("DEFAULTED")
     expect(result.unknownToken).toBe("mint")
   })
+
+  it("maps all four tokens Pulse actually emits", () => {
+    expect(resolveCondition("NM").condition).toBe(INVENTORY_CARD_CONDITION.NEAR_MINT)
+    expect(resolveCondition("LP").condition).toBe(INVENTORY_CARD_CONDITION.LIGHTLY_PLAYED)
+    expect(resolveCondition("MP").condition).toBe(INVENTORY_CARD_CONDITION.MODERATELY_PLAYED)
+    expect(resolveCondition("HP").condition).toBe(INVENTORY_CARD_CONDITION.HEAVILY_PLAYED)
+  })
+
+  it("does not recognise dmg/dm — Pulse has no Damaged token", () => {
+    expect(resolveCondition("dmg").unknownToken).toBe("dmg")
+    expect(resolveCondition("dm").unknownToken).toBe("dm")
+  })
 })
 
 describe("language resolution", () => {

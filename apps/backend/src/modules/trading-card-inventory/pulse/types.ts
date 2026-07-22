@@ -11,6 +11,18 @@ export const PULSE_EXPECTED_HEADERS = [
   "Total Cost", "Total Market Value", "Total Sticker Value", "Profit", "Margin %", "Markup vs Market %",
 ] as const
 
+/**
+ * Headers Pulse's export now includes that we tolerate but never read: not
+ * required, and not treated as "unsupported" either. `Condition` is the
+ * first case — Pulse added a free-text Condition column, but this importer
+ * deliberately keeps trusting the short token embedded in `Product ID`
+ * instead (see pulse/condition.ts), since that is Pulse's stable identifier
+ * field rather than free text. If a real need to read `Condition` directly
+ * ever comes up, that is a deliberate parsing change, not a side effect of
+ * merely allowing the column to be present.
+ */
+export const PULSE_OPTIONAL_HEADERS = ["Condition"] as const
+
 export const PULSE_FILE_LIMITS = {
   MAX_FILE_SIZE_BYTES: 10 * 1024 * 1024,
   MAX_ROWS: 50_000,

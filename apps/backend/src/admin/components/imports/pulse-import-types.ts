@@ -177,6 +177,12 @@ export interface InventoryProposalListItem {
   medusaSyncRetryCount: number
   medusaSyncLastError: { category: string; message: string; occurredAt?: string } | null
   createdAt: string
+  proposedEbayStoreCategoryId: string | null
+  proposedCategoryReason: string | null
+  proposedCategoryRuleId: string | null
+  confirmedEbayStoreCategoryId: string | null
+  categoryConfirmedAt: string | null
+  categoryConfirmedBy: string | null
 }
 
 export interface InventoryProposalListResponse {

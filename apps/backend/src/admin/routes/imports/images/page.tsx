@@ -82,6 +82,10 @@ const ImportsImagesPage = () => {
     queryFn: () => {
       const params = new URLSearchParams({
         limit: String(PAGE_SIZE), offset: String(offset), sortBy: entrySort.key, sortDirection: entrySort.direction,
+        // Step 3 is for assigning photos to cards that actually exist —
+        // a row still awaiting Step 2 review has nothing to attach a photo
+        // to yet, so it must not appear here until it's been accepted.
+        reviewStatus: "MATCHED",
       })
       return fetchJson<SnapshotEntryListResponse>(
         `/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/entries?${params.toString()}`,
@@ -162,7 +166,9 @@ const ImportsImagesPage = () => {
           <CardImageThumbnail
             imageUrl={uploadedPhotoUrl}
             alt={`${uploadedPhotoUrl ? "Replace" : "Upload"} image for ${row.card?.name ?? row.tcgdexCandidate?.name ?? row.providerReference}`}
-            title={target ? (uploadedPhotoUrl ? "Click to replace the uploaded photo" : "Click to upload a card photo") : undefined}
+            title={target
+              ? (uploadedPhotoUrl ? "Click to replace the uploaded photo" : "Click to upload a card photo")
+              : "This card isn't fully created yet — finish it on step 2, Sync with TCGdex"}
             onClick={target ? () => setReplaceImageTarget(target) : undefined}
           />
         )
@@ -221,7 +227,7 @@ const ImportsImagesPage = () => {
         <ImportStepper compact />
         <Text size="small" className="text-ui-fg-subtle">
           {isScoped
-            ? "This list shows every card from this import. Click an image placeholder to upload a real card photograph, or click the rest of a row to view its import details."
+            ? "This list shows the cards from this import that have been approved on step 2. Click an image placeholder to upload a real card photograph, or click the rest of a row to view its import details."
             : "This list shows every card that still needs a real photograph. Click a card, then upload a photo for each of its versions (for example, Near Mint and Holo are separate versions and each need their own photo). This page works on its own — you do not need to come here as part of an import, and you can add photos to a card at any time."}
         </Text>
         <div className="flex flex-wrap items-center justify-between gap-3">

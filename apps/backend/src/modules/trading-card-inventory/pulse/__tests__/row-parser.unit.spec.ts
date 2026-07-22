@@ -70,6 +70,26 @@ describe("parsePulseRow", () => {
     expect(row.diagnostics.some((diagnostic) => diagnostic.code === "OVERSIZED_FIELD")).toBe(true)
   })
 
+  it("prefers the explicit Condition column over the Product ID token when both are present", () => {
+    const row = parsePulseRow(
+      baseRecord({ Rarity: "Common", Condition: "LP", "Product ID": "card:swsh4pt5|044/072|Holo|null|null|null|nm" }),
+      2,
+      INVENTORY_SOURCE_LANGUAGE.EN,
+    )
+    expect(row.conditionCandidate).toBe("LIGHTLY_PLAYED")
+    expect(row.conditionSource).toBe("EXPLICIT")
+  })
+
+  it("falls back to the Product ID token when the Condition column is absent", () => {
+    const row = parsePulseRow(
+      baseRecord({ Rarity: "Common", "Product ID": "card:swsh4pt5|044/072|Holo|null|null|null|hp" }),
+      2,
+      INVENTORY_SOURCE_LANGUAGE.EN,
+    )
+    expect(row.conditionCandidate).toBe("HEAVILY_PLAYED")
+    expect(row.conditionSource).toBe("EXPLICIT")
+  })
+
   it("keeps raw fields bounded and never stores the full raw row", () => {
     const row = parsePulseRow(baseRecord(), 2, INVENTORY_SOURCE_LANGUAGE.EN)
     expect(Object.keys(row.rawFields).sort()).toEqual(

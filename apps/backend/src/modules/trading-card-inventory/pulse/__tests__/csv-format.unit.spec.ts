@@ -1,5 +1,5 @@
 import { decodeUtf8Strict, validateHeaders } from "../csv-format"
-import { PULSE_EXPECTED_HEADERS } from "../types"
+import { PULSE_EXPECTED_HEADERS, PULSE_OPTIONAL_HEADERS } from "../types"
 
 describe("decodeUtf8Strict", () => {
   it("decodes plain UTF-8 and strips an optional BOM", () => {
@@ -50,5 +50,17 @@ describe("validateHeaders", () => {
     expect(result.ok).toBe(false)
     expect(result.unsupported).toContain("Some Unrelated Column")
     expect(result.missing.length).toBeGreaterThan(0)
+  })
+
+  it("tolerates a present optional header (e.g. Condition) without flagging it as unsupported", () => {
+    const result = validateHeaders([...PULSE_EXPECTED_HEADERS, ...PULSE_OPTIONAL_HEADERS])
+    expect(result.ok).toBe(true)
+    expect(result.unsupported).toEqual([])
+  })
+
+  it("does not require an optional header to be present", () => {
+    const result = validateHeaders([...PULSE_EXPECTED_HEADERS])
+    expect(result.ok).toBe(true)
+    expect(result.missing).toEqual([])
   })
 })

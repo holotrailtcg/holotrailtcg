@@ -2,7 +2,7 @@
  * @jest-environment jsdom
  */
 import "@testing-library/jest-dom"
-import { render, screen, waitFor, within } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
@@ -156,6 +156,35 @@ describe("ImportsSnapshotDetailPage", () => {
     }
     renderPage({}, { proposals: [proposal] })
     await screen.findByText("import.csv")
+
+    await user.click(await screen.findByRole("button", { name: "card:sv1|066/196|holo|nm" }))
+    expect(await screen.findByRole("heading", { name: "Create card" })).toBeInTheDocument()
+  })
+
+  it("opens Create card (not the pending-review checkbox) for a row whose candidate was accepted but the card was skipped", async () => {
+    const user = userEvent.setup()
+    const candidateEntries = {
+      entries: [{
+        ...BASE_ENTRIES.entries[0],
+        tcgdexCandidate: {
+          id: "tclookup_1", name: "Gengar", setName: "Ascended Heroes", seriesName: "Mega Evolution",
+          referenceArtworkUrl: "https://assets.example/gengar.png", providerRarity: "Rare",
+        },
+      }],
+      count: 1, limit: 20, offset: 0,
+    }
+    const proposal = {
+      id: "tciprop_1", inventorySourceId: "tcisrc_1", inventorySnapshotId: "tcisnap_1", tradingCardVariantId: null,
+      card: null, cardIdentityHint: "SV1 066/196", providerReference: "card:sv1|066/196|holo|nm",
+      previousQuantity: null, proposedQuantity: null, quantityDelta: null, changeKind: "UNRESOLVED_VARIANT",
+      reviewStatus: "PENDING", resolvedBy: null, resolvedAt: null, reviewNote: null, appliedAt: null,
+      appliedTransactionId: null, medusaSyncStatus: "NOT_APPLICABLE", medusaInventoryItemId: null,
+      medusaStockLocationId: null, medusaSyncRetryCount: 0, medusaSyncLastError: null, createdAt: "2024-01-01T00:00:00.000Z",
+    }
+    renderPage({}, { entries: candidateEntries, proposals: [proposal] })
+    await screen.findByText("import.csv")
+
+    expect(screen.queryByRole("checkbox", { name: "Select Gengar" })).not.toBeInTheDocument()
 
     await user.click(await screen.findByRole("button", { name: "card:sv1|066/196|holo|nm" }))
     expect(await screen.findByRole("heading", { name: "Create card" })).toBeInTheDocument()
@@ -438,6 +467,31 @@ describe("ImportsSnapshotDetailPage", () => {
       expect.objectContaining({ method: "POST", body: JSON.stringify({ candidateIds: ["tclookup_1"], action: "ACCEPT" }) })
     )
     expect(screen.queryByText("1 selected")).not.toBeInTheDocument()
+  })
+
+  it("selects a range of rows with shift-click", async () => {
+    const user = userEvent.setup()
+    const makeCandidate = (id: string, name: string) => ({
+      id, name, setName: "Ascended Heroes", seriesName: "Mega Evolution", referenceArtworkUrl: null, providerRarity: "Rare",
+    })
+    const candidateEntries = {
+      entries: [
+        { ...BASE_ENTRIES.entries[0], id: "tcisentry_1", providerReference: "card:sv1|001/196|holo|nm", tcgdexCandidate: makeCandidate("tclookup_1", "Gengar") },
+        { ...BASE_ENTRIES.entries[0], id: "tcisentry_2", providerReference: "card:sv1|002/196|holo|nm", tcgdexCandidate: makeCandidate("tclookup_2", "Hypno") },
+        { ...BASE_ENTRIES.entries[0], id: "tcisentry_3", providerReference: "card:sv1|003/196|holo|nm", tcgdexCandidate: makeCandidate("tclookup_3", "Absol") },
+      ],
+      count: 3, limit: 20, offset: 0,
+    }
+    renderPage({}, { entries: candidateEntries })
+    await screen.findByText("import.csv")
+
+    await user.click(screen.getByRole("checkbox", { name: "Select Gengar" }))
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select Absol" }), { shiftKey: true })
+
+    expect(screen.getByRole("checkbox", { name: "Select Gengar" })).toBeChecked()
+    expect(screen.getByRole("checkbox", { name: "Select Hypno" })).toBeChecked()
+    expect(screen.getByRole("checkbox", { name: "Select Absol" })).toBeChecked()
+    expect(screen.getByText("3 selected")).toBeInTheDocument()
   })
 
   it("selects and deselects all visible canonical TCGdex matches from the table header", async () => {

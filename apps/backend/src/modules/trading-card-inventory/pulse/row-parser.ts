@@ -69,13 +69,18 @@ export function parsePulseRow(record: PulseCsvRecord, rowNumber: number, sourceL
   }
   const anyMoneyPresent = [avgCost, marketPrice, stickerPrice].some((parsed) => parsed.status === "value" || parsed.status === "zero")
 
-  // A cleanly-absent condition token is standard for this provider's export
-  // format (it defaults to Near Mint, changeable later by the reviewer) and is
-  // deliberately not surfaced as a diagnostic — only a genuinely unrecognised
-  // token is a true anomaly worth flagging.
-  const condition = resolveCondition(productId.conditionCandidate)
-  if (productId.conditionCandidate && condition.unknownToken) {
-    addDiagnostic("UNKNOWN_CONDITION_TOKEN", "WARNING", `Condition token "${condition.unknownToken}" is not recognised; defaulted to Near Mint pending review.`, "Product ID")
+  // Pulse's dedicated `Condition` column (optional — see PULSE_OPTIONAL_HEADERS)
+  // is the direct, authoritative source when present; the token embedded in
+  // `Product ID` is only a fallback for older exports that predate that
+  // column. A cleanly-absent condition token is standard for this provider's
+  // export format (it defaults to Near Mint, changeable later by the
+  // reviewer) and is deliberately not surfaced as a diagnostic — only a
+  // genuinely unrecognised token is a true anomaly worth flagging.
+  const conditionColumnValue = bounded(record["Condition"])
+  const conditionFieldRef = conditionColumnValue ? "Condition" : "Product ID"
+  const condition = resolveCondition(conditionColumnValue ?? productId.conditionCandidate)
+  if ((conditionColumnValue || productId.conditionCandidate) && condition.unknownToken) {
+    addDiagnostic("UNKNOWN_CONDITION_TOKEN", "WARNING", `Condition token "${condition.unknownToken}" is not recognised; defaulted to Near Mint pending review.`, conditionFieldRef)
   }
 
   const languageHint = inferProviderLanguageHint(productId.setCodeCandidate)

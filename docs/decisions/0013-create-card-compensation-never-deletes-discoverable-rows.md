@@ -82,6 +82,19 @@ idempotent questions:
    product, so a losing "create" race is resolved by re-reading and reusing
    the winner's variant, never by deleting anything.
 
+   > **Correction (ADR 0017):** this "Medusa itself enforces" claim is false
+   > once a product has more than one option — confirmed by a real
+   > integration-test failure when Condition/Finish/Special Treatment became
+   > three separate options instead of one combined `"Card Variant"` option.
+   > Two concurrent `createProductVariants` calls for the identical
+   > multi-option combination can both succeed, neither throwing. The
+   > "attempt the insert, catch and re-read" race-recovery pattern described
+   > here no longer applies to `ensureProductVariantForDimensions` — it now
+   > holds a PostgreSQL advisory lock (via the Locking Module, the same
+   > mechanism `ensureSingleInventoryItemForProductVariant` already used) for
+   > its whole check-then-act sequence instead. See ADR 0017 for the full
+   > story.
+
 ### What repair actually recovers
 
 - **A ProductVariant unlinked from its TradingCardVariant** (whether by a

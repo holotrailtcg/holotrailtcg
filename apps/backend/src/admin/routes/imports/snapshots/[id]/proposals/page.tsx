@@ -2,6 +2,7 @@ import { Badge, Button, Container, Heading, Text, Textarea, toast, usePrompt } f
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useEffect, useState, type MouseEvent } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
+import CategoryAssignmentDialog from "../../../../../components/imports/category-assignment-dialog"
 import CreateCardDialog from "../../../../../components/imports/create-card-dialog"
 import CardImageThumbnail from "../../../../../components/imports/card-image-thumbnail"
 import EntryDetailDrawer from "../../../../../components/imports/entry-detail-drawer"
@@ -32,6 +33,15 @@ const CHANGE_KIND_LABEL: Record<string, string> = {
   UNRESOLVED_VARIANT: "Needs a card",
 }
 
+// A NEW_HOLDING proposal is the first Medusa-facing appearance of this
+// card's stock — the backend refuses to Apply it without a reviewer-
+// confirmed eBay Store category (see `applyInventoryProposal`'s NEW_HOLDING
+// gate). QUANTITY_CHANGE rows never need this: the card was already
+// categorised the first time it reached NEW_HOLDING.
+function needsCategoryConfirmation(row: InventoryProposalListItem): boolean {
+  return row.changeKind === "NEW_HOLDING" && !row.confirmedEbayStoreCategoryId
+}
+
 function selectionKind(row: InventoryProposalListItem): "REVIEW" | "APPLY" | null {
   // A row still without a matched card isn't eligible for review/bulk-approve
   // yet — it needs "Create card" first, which is what resolves it to a real
@@ -39,7 +49,7 @@ function selectionKind(row: InventoryProposalListItem): "REVIEW" | "APPLY" | nul
   // it into an APPROVED-but-never-appliable dead end.
   if (row.reviewStatus === "PENDING" && row.card !== null) return "REVIEW"
   if (row.reviewStatus === "APPROVED" && row.tradingCardVariantId && row.proposedQuantity !== null &&
-    APPLICABLE_CHANGE_KINDS.has(row.changeKind)) return "APPLY"
+    APPLICABLE_CHANGE_KINDS.has(row.changeKind) && !needsCategoryConfirmation(row)) return "APPLY"
   return null
 }
 
@@ -68,6 +78,7 @@ const InventoryProposalsPage = () => {
   const [rejectReason, setRejectReason] = useState("")
   const [createCardRow, setCreateCardRow] = useState<InventoryProposalListItem | null>(null)
   const [selectedProposal, setSelectedProposal] = useState<InventoryProposalListItem | null>(null)
+  const [categoryProposalId, setCategoryProposalId] = useState<string | null>(null)
 
   const summaryQuery = useQuery({
     queryKey: summaryQueryKey(snapshotId),
@@ -202,6 +213,10 @@ const InventoryProposalsPage = () => {
 
   const progress = summaryQuery.data?.progress
   const visibleRows = proposalsQuery.data?.proposals ?? []
+  const categoryProposalIndex = categoryProposalId ? visibleRows.findIndex((row) => row.id === categoryProposalId) : -1
+  const nextCategoryProposalId = categoryProposalIndex >= 0
+    ? visibleRows.slice(categoryProposalIndex + 1).find(needsCategoryConfirmation)?.id ?? null
+    : null
   const visibleVariantIds = [...new Set(
     visibleRows.map((row) => row.tradingCardVariantId).filter((id): id is string => Boolean(id)),
   )]
@@ -315,6 +330,31 @@ const InventoryProposalsPage = () => {
     { header: "Quantity", cell: (row) => `${row.previousQuantity ?? 0} → ${row.proposedQuantity ?? 0}` },
     { header: "Status", cell: (row) => <InventoryProposalStatusBadge reviewStatus={row.reviewStatus} medusaSyncStatus={row.medusaSyncStatus} /> },
     {
+      header: "eBay category",
+      cell: (row) => {
+        if (row.changeKind !== "NEW_HOLDING") return <Text size="small" className="text-ui-fg-subtle">—</Text>
+        if (row.confirmedEbayStoreCategoryId) return <Badge size="2xsmall" color="green">Confirmed</Badge>
+        if (row.proposedEbayStoreCategoryId) {
+          return (
+            <div className="flex flex-col items-start" onClick={(event) => event.stopPropagation()}>
+              <Badge size="2xsmall" color="orange">Needs confirmation</Badge>
+              <button type="button" className="text-ui-fg-interactive text-xs" onClick={() => setCategoryProposalId(row.id)}>
+                Review proposed category
+              </button>
+            </div>
+          )
+        }
+        return (
+          <div className="flex flex-col items-start" onClick={(event) => event.stopPropagation()}>
+            <Badge size="2xsmall" color="red">No category proposed</Badge>
+            <button type="button" className="text-ui-fg-interactive text-xs" onClick={() => setCategoryProposalId(row.id)}>
+              Choose a category
+            </button>
+          </div>
+        )
+      },
+    },
+    {
       header: "Actions",
       cell: (row) => (
         <div className="flex flex-wrap items-center gap-2" onClick={(event) => event.stopPropagation()}>
@@ -341,6 +381,9 @@ const InventoryProposalsPage = () => {
             <Button size="small" variant="primary" isLoading={applyOneMutation.isPending} onClick={() => applyOneMutation.mutate(row.id)}>
               Apply
             </Button>
+          )}
+          {row.reviewStatus === "APPROVED" && needsCategoryConfirmation(row) && (
+            <Text size="xsmall" className="text-ui-fg-subtle">Confirm the eBay category before this can be applied</Text>
           )}
           {row.reviewStatus === "APPLIED" && row.medusaSyncStatus === "FAILED" && (
             <Button size="small" variant="secondary" isLoading={retrySyncMutation.isPending} onClick={() => retrySyncMutation.mutate(row.id)}>
@@ -393,10 +436,10 @@ const InventoryProposalsPage = () => {
       {progress?.fullyComplete && (
         <Container className="flex flex-col gap-3 p-6">
           <Text size="small" className="text-ui-fg-subtle">
-            All applicable proposals have been applied and synchronised to Medusa.
+            All applicable proposals have been applied and synchronised to Medusa. This import is complete.
           </Text>
-          <Button onClick={() => navigate(`/imports/images?snapshotId=${encodeURIComponent(snapshotId)}`)}>
-            Next: Assign card images →
+          <Button onClick={() => navigate("/inventory")}>
+            View in Inventory →
           </Button>
         </Container>
       )}
@@ -495,6 +538,17 @@ const InventoryProposalsPage = () => {
           row={createCardRow}
           onClose={() => setCreateCardRow(null)}
           onCreated={refreshAfterAction}
+        />
+      )}
+
+      {categoryProposalId && (
+        <CategoryAssignmentDialog
+          key={categoryProposalId}
+          proposalId={categoryProposalId}
+          onClose={() => setCategoryProposalId(null)}
+          onConfirmed={refreshAfterAction}
+          showNext={Boolean(nextCategoryProposalId)}
+          onNext={nextCategoryProposalId ? () => setCategoryProposalId(nextCategoryProposalId) : undefined}
         />
       )}
 

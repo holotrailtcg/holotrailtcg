@@ -1,13 +1,34 @@
 import { createStep, createWorkflow, StepResponse, WorkflowResponse } from "@medusajs/framework/workflows-sdk"
-import { CatalogueIntegrityError, createCardFromInventoryRowWorkflow } from "../trading-cards/create-card-from-inventory-row"
+import { createCardFromInventoryRowWorkflow } from "../trading-cards/create-card-from-inventory-row"
 import { TRADING_CARD_INVENTORY_MODULE } from "../../modules/trading-card-inventory"
 import { parseProductId } from "../../modules/trading-card-inventory/pulse/product-id"
 import type TradingCardInventoryModuleService from "../../modules/trading-card-inventory/service"
 import { TRADING_CARDS_MODULE } from "../../modules/trading-cards"
 import type TradingCardsModuleService from "../../modules/trading-cards/service"
 import type { CardEnrichmentData } from "../../modules/trading-cards/tcgdex/matching-types"
-import { CARD_GAME, EXTERNAL_PROVIDER, type CardLanguage } from "../../modules/trading-cards/types"
+import { CARD_FINISH, CARD_GAME, EXTERNAL_PROVIDER, SPECIAL_TREATMENT, type CardLanguage } from "../../modules/trading-cards/types"
 import { retryPulseSnapshotMatching } from "./pulse-import-shared"
+
+/**
+ * Fallback for the common case where Pulse's `Material` column is blank
+ * (e.g. most Illustration Rares) so no finish was recognised from the CSV
+ * row. TCGdex's `variants` flags say which finishes a card was ever printed
+ * in — confirmed against a real card (Dottler, sv04-184, Illustration
+ * Rare): TCGdex reports `{ normal: false, reverse: false, holo: true }`,
+ * i.e. exactly one flag true. Only ever resolved when exactly one of
+ * normal/holo/reverse is true; if a card legitimately exists in more than
+ * one finish (or TCGdex reports none), this still can't guess and the row
+ * stays unresolved for manual "Create card", same as before.
+ */
+function finishFromTcgdexVariants(variants: CardEnrichmentData["variants"] | undefined): string | null {
+  if (!variants) return null
+  const trueFinishes: string[] = [
+    ...(variants.normal ? [CARD_FINISH.NORMAL] : []),
+    ...(variants.holo ? [CARD_FINISH.HOLO] : []),
+    ...(variants.reverse ? [CARD_FINISH.REVERSE_HOLO] : []),
+  ]
+  return trueFinishes.length === 1 ? trueFinishes[0] : null
+}
 
 export interface BulkReviewTcgdexCandidatesInput {
   actor: string
@@ -90,9 +111,16 @@ const bulkReviewTcgdexCandidatesStep = createStep(
         })
         if (!mapping || mapping.tcgdex_set_id !== candidate.tcgdex_set_id) continue
 
-        const finish = entry.finish_candidate as string | null
-        const specialTreatment = entry.special_treatment_candidate as string | null
+        const pulseFinish = entry.finish_candidate as string | null
+        const pulseSpecialTreatment = entry.special_treatment_candidate as string | null
         const condition = entry.condition_candidate as string | null
+
+        // Pulse left Material blank (common for Illustration Rares) — fall back to
+        // TCGdex's variants flags rather than leaving this unresolved outright.
+        const tcgdexFallbackFinish = !pulseFinish ? finishFromTcgdexVariants(enrichment.variants) : null
+        const finish = pulseFinish ?? tcgdexFallbackFinish
+        const specialTreatment = pulseFinish ? pulseSpecialTreatment : (tcgdexFallbackFinish ? SPECIAL_TREATMENT.NONE : pulseSpecialTreatment)
+
         if (!finish || !specialTreatment || !condition) {
           skippedRowCount += 1
           continue
@@ -141,8 +169,20 @@ const bulkReviewTcgdexCandidatesStep = createStep(
           })
           createdVariantCount += 1
         } catch (error) {
-          if (CatalogueIntegrityError.isCatalogueIntegrityError(error)) errors.push(`${reference}: ${(error as Error).message}`)
-          else errors.push(`${reference}: could not be created`)
+          // Admin-only diagnostic surface — no reason to hide the real
+          // message from the reviewer behind a generic "could not be
+          // created", which made this failure mode undiagnosable from the
+          // toast alone. `instanceof Error` cannot be trusted here: the
+          // workflow engine's transaction orchestrator round-trips a failed
+          // step's error through its own checkpoint state before `.run()`
+          // rethrows it, which does not preserve the original error's
+          // prototype chain (see `CatalogueIntegrityError`'s own doc
+          // comment for the same issue) — a duck-typed `.message` read
+          // survives that round-trip even when `instanceof` does not.
+          const message = (error && typeof error === "object" && "message" in error)
+            ? String((error as { message: unknown }).message)
+            : String(error)
+          errors.push(`${reference}: ${message}`)
         }
       }
 

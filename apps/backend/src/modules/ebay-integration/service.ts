@@ -1565,7 +1565,7 @@ class EbayIntegrationModuleService extends MedusaService({
           input.attemptId,
           input.stateHash,
           input.actorId,
-          "/app/settings/ebay",
+          "/app/settings/ebay-connections",
           input.expiresAt,
         ],
       );

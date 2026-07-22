@@ -14,7 +14,9 @@ import MatchingStatusBadge from "../../../../components/imports/matching-status-
 import PaginationBar from "../../../../components/imports/pagination-bar"
 import ReplaceCardImageDialog from "../../../../components/imports/replace-card-image-dialog"
 import ReviewTable, { type ReviewTableColumn } from "../../../../components/imports/review-table"
+import SelectAllCheckbox from "../../../../components/imports/select-all-checkbox"
 import SetMappingBanner from "../../../../components/imports/set-mapping-banner"
+import { useRangeSelection } from "../../../../components/imports/use-range-selection"
 import { formatEnumLabel } from "../../../../components/imports/format-enum-label"
 import type { VariantThumbnailsResponse } from "../../../../components/imports/image-types"
 import type {
@@ -70,7 +72,6 @@ const ImportsSnapshotDetailPage = () => {
   const [previewImage, setPreviewImage] = useState<{
     imageUrl: string; alt: string; target: { tradingCardId: string; tradingCardVariantId: string }
   } | null>(null)
-  const [selectedCandidateIds, setSelectedCandidateIds] = useState<Set<string>>(new Set())
   const [entrySort, setEntrySort] = useState<{ key: EntrySortKey; direction: SortDirection }>({
     key: "cardName",
     direction: "asc",
@@ -145,6 +146,18 @@ const ImportsSnapshotDetailPage = () => {
       .map((proposal) => [proposal.providerReference as string, proposal]),
   )
 
+  // A row is only selectable while it's still a plain pending TCGdex match —
+  // once it has a real card, or its candidate is already ACCEPTED (including
+  // an accepted-but-skipped row waiting on "Create card" instead), it drops
+  // out of the bulk accept/reject flow. Almost every not-yet-created row has
+  // an unresolved proposal — that alone isn't the right signal.
+  const isCandidateSelectable = (row: SnapshotEntryListItem) =>
+    Boolean(row.tcgdexCandidate) && !row.tradingCardVariantId && row.tcgdexCandidate!.reviewStatus !== "ACCEPTED"
+  const selection = useRangeSelection<SnapshotEntryListItem>(
+    (row) => row.tcgdexCandidate!.id,
+    isCandidateSelectable,
+  )
+
   const refreshAfterAction = () => {
     queryClient.invalidateQueries({ queryKey: ["pulse-import-summary", snapshotId] })
     queryClient.invalidateQueries({ queryKey: ["pulse-import-entries", snapshotId] })
@@ -177,10 +190,17 @@ const ImportsSnapshotDetailPage = () => {
         const parts = [`${created} card variant${created === 1 ? "" : "s"} created`]
         if (skipped > 0) parts.push(`${skipped} row${skipped === 1 ? "" : "s"} skipped (finish/variant unclear)`)
         if (failed.length > 0) parts.push(`${failed.length} match${failed.length === 1 ? "" : "es"} had errors`)
-        if (failed.length > 0) toast.error(parts.join(", "))
-        else toast.success(parts.join(", "))
+        if (failed.length > 0) {
+          // The count alone hides the actual cause — surface the real
+          // per-row error strings the workflow recorded so this is
+          // diagnosable without reading server logs.
+          const detail = failed.flatMap((r) => r.errors).join(" | ")
+          toast.error(parts.join(", "), { description: detail })
+        } else {
+          toast.success(parts.join(", "))
+        }
       }
-      setSelectedCandidateIds(new Set())
+      selection.clear()
       refreshAfterAction()
     },
     onError: () => toast.error("This action could not be completed. Please try again."),
@@ -190,34 +210,6 @@ const ImportsSnapshotDetailPage = () => {
   const progress = summaryQuery.data?.progress
   const imageReadiness = summaryQuery.data?.imageReadiness
   const canReconcile = summary?.status === "VALIDATED"
-
-  const toggleCandidateSelection = (candidateId: string) => {
-    setSelectedCandidateIds((prev) => {
-      const next = new Set(prev)
-      if (next.has(candidateId)) next.delete(candidateId)
-      else next.add(candidateId)
-      return next
-    })
-  }
-
-  const visibleCandidateIds = [
-    ...new Set((entriesQuery.data?.entries ?? []).flatMap((entry) =>
-      !entry.tradingCardVariantId && entry.tcgdexCandidate?.reviewStatus !== "ACCEPTED" && entry.tcgdexCandidate
-        ? [entry.tcgdexCandidate.id]
-        : [])),
-  ]
-  const allVisibleCandidatesSelected = visibleCandidateIds.length > 0
-    && visibleCandidateIds.every((candidateId) => selectedCandidateIds.has(candidateId))
-  const someVisibleCandidatesSelected = visibleCandidateIds.some((candidateId) => selectedCandidateIds.has(candidateId))
-
-  const toggleAllVisibleCandidates = () => {
-    setSelectedCandidateIds((previous) => {
-      const next = new Set(previous)
-      if (allVisibleCandidatesSelected) visibleCandidateIds.forEach((candidateId) => next.delete(candidateId))
-      else visibleCandidateIds.forEach((candidateId) => next.add(candidateId))
-      return next
-    })
-  }
 
   const sortableHeader = (label: string, key: EntrySortKey) => {
     const isActive = entrySort.key === key
@@ -245,22 +237,32 @@ const ImportsSnapshotDetailPage = () => {
 
   const entryColumns: ReviewTableColumn<SnapshotEntryListItem>[] = [
     {
-      header: "Card",
+      header: "Select",
       headerCell: (
-        <div className="flex items-center gap-2">
+        <SelectAllCheckbox
+          state={selection.headerState(sortedEntries)}
+          onToggle={() => selection.toggleAllVisible(sortedEntries)}
+          ariaLabel="Select all TCGdex matches on this page"
+        />
+      ),
+      cell: (row) => {
+        if (!isCandidateSelectable(row)) return null
+        return (
           <input
             type="checkbox"
-            aria-label="Select all TCGdex matches on this page"
-            checked={allVisibleCandidatesSelected}
-            disabled={visibleCandidateIds.length === 0}
-            ref={(element) => {
-              if (element) element.indeterminate = someVisibleCandidatesSelected && !allVisibleCandidatesSelected
+            aria-label={`Select ${row.tcgdexCandidate!.name}`}
+            checked={selection.selected.has(row.tcgdexCandidate!.id)}
+            onChange={() => {}}
+            onClick={(event) => {
+              event.stopPropagation()
+              selection.handleRowClick(row, sortedEntries.filter(isCandidateSelectable), { shiftKey: event.shiftKey })
             }}
-            onChange={toggleAllVisibleCandidates}
           />
-          <span>Card</span>
-        </div>
-      ),
+        )
+      },
+    },
+    {
+      header: "Card",
       cell: (row) => {
         const thumbnail = row.tradingCardVariantId ? thumbnailsQuery.data?.thumbnails[row.tradingCardVariantId] : undefined
         if (row.tradingCardVariantId) {
@@ -285,19 +287,17 @@ const ImportsSnapshotDetailPage = () => {
             />
           )
         }
-        if (row.tcgdexCandidate) {
-          return (
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                aria-label={`Select ${row.tcgdexCandidate.name}`}
-                checked={selectedCandidateIds.has(row.tcgdexCandidate.id)}
-                onClick={(event) => event.stopPropagation()}
-                onChange={() => toggleCandidateSelection(row.tcgdexCandidate!.id)}
-              />
-              <CardImageThumbnail imageUrl={row.tcgdexCandidate.referenceArtworkUrl} alt={row.tcgdexCandidate.name} />
-            </div>
-          )
+        // A candidate can be ACCEPTED (Step 2's bulk Accept) while some of
+        // its rows still couldn't be created — finish/condition unresolved
+        // even after the TCGdex-variants fallback. That row's candidate is
+        // ACCEPTED despite still having no real card, so it must fall
+        // through to "Click to create this card" below rather than the
+        // pending-review thumbnail, which would otherwise leave it stuck
+        // with no way to finish creating it. A still-PENDING candidate (the
+        // common case — almost every unresolved row has a proposal, that
+        // alone isn't the signal) keeps showing the normal thumbnail.
+        if (row.tcgdexCandidate && row.tcgdexCandidate.reviewStatus !== "ACCEPTED") {
+          return <CardImageThumbnail imageUrl={row.tcgdexCandidate.referenceArtworkUrl} alt={row.tcgdexCandidate.name} />
         }
         const proposal = row.providerReference ? unresolvedProposalByReference.get(row.providerReference) : undefined
         return (
@@ -507,26 +507,26 @@ const ImportsSnapshotDetailPage = () => {
                 </select>
               </div>
               <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-                {selectedCandidateIds.size > 0 && (
+                {selection.selected.size > 0 && (
                   <Text size="small" className="text-ui-fg-subtle">
-                    {selectedCandidateIds.size} selected
+                    {selection.selected.size} selected
                   </Text>
                 )}
                 <Button
                   size="small"
                   variant="primary"
-                  disabled={selectedCandidateIds.size === 0}
+                  disabled={selection.selected.size === 0}
                   isLoading={reviewCandidatesMutation.isPending}
-                  onClick={() => reviewCandidatesMutation.mutate({ candidateIds: [...selectedCandidateIds], action: "ACCEPT" })}
+                  onClick={() => reviewCandidatesMutation.mutate({ candidateIds: [...selection.selected], action: "ACCEPT" })}
                 >
                   Approve selected
                 </Button>
                 <Button
                   size="small"
                   variant="secondary"
-                  disabled={selectedCandidateIds.size === 0}
+                  disabled={selection.selected.size === 0}
                   isLoading={reviewCandidatesMutation.isPending}
-                  onClick={() => reviewCandidatesMutation.mutate({ candidateIds: [...selectedCandidateIds], action: "REJECT" })}
+                  onClick={() => reviewCandidatesMutation.mutate({ candidateIds: [...selection.selected], action: "REJECT" })}
                 >
                   Reject
                 </Button>

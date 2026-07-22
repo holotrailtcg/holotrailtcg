@@ -23,7 +23,14 @@ const CardImageThumbnail = ({ imageUrl, alt, onClick, title }: CardImageThumbnai
   )
 
   if (!onClick) {
-    return <div className={className} title={title}>{content}</div>
+    // Even with nothing to do here, the click must not silently bubble up
+    // to an ancestor's row-click handler (e.g. a review table opening its
+    // detail drawer instead of this being a no-op).
+    return (
+      <div className={className} title={title} onClick={(event) => event.stopPropagation()}>
+        {content}
+      </div>
+    )
   }
 
   return (

@@ -1034,8 +1034,8 @@ describe("createCardFromInventoryRowWorkflow — same-step link failures never d
         const product = await products.retrieveProduct(resultB.productId, { relations: ["variants"] })
         // The seed variant plus exactly one variant for this dimension —
         // A's own orphaned ProductVariant attempt was never linked to the
-        // product's "Card Variant" option combination search path, but did
-        // still add a real ProductVariant row (never deleted).
+        // product's Condition/Finish/Special Treatment combination search
+        // path, but did still add a real ProductVariant row (never deleted).
         expect(product.variants?.length).toBeGreaterThanOrEqual(2)
 
         const refreshedB = await inventory.retrieveInventoryProposal(proposalB.id)
@@ -1297,18 +1297,23 @@ describe("createCardFromInventoryRowWorkflow — PostgreSQL-locked InventoryItem
    * — isolating the InventoryItem-repair race from everything upstream of
    * it (CardSet/TradingCard/TradingCardVariant/ProductVariant identity
    * resolution, already covered by the third-pass describe block above).
+   * Always Lightly Played/Holo/None — distinct from `seedCard`'s own
+   * Near Mint/Normal/None variant on the same product, so no option-value
+   * collision to avoid.
    */
   async function createBareIncompleteVariant(
-    seedResult: { tradingCardId: string; productId: string }, conditionSuffix: string,
+    seedResult: { tradingCardId: string; productId: string },
   ): Promise<{ productVariantId: string; tradingCardVariantId: string }> {
     const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
-    const optionValue = `LIGHTLY PLAYED · HOLO · ${conditionSuffix}`
+    const optionValues = { Condition: "Lightly Played", Finish: "Holo", "Special Treatment": "None" }
     const product = await products.retrieveProduct(seedResult.productId, { relations: ["options", "options.values"] })
-    const option = product.options?.find((o) => o.title === "Card Variant")
-    if (!option) throw new Error("Expected seed product to have a Card Variant option")
-    await products.updateProductOptionValuesOnProduct({ product_id: seedResult.productId, product_option_id: option.id, add: [{ value: optionValue }] })
+    for (const [title, value] of Object.entries(optionValues)) {
+      const option = product.options?.find((o) => o.title === title)
+      if (!option) throw new Error(`Expected seed product to have a "${title}" option`)
+      await products.updateProductOptionValuesOnProduct({ product_id: seedResult.productId, product_option_id: option.id, add: [{ value }] })
+    }
     const productVariant = await products.createProductVariants({
-      product_id: seedResult.productId, title: optionValue, sku: `SKU-BARE-${suffix().toUpperCase()}`, manage_inventory: true, options: { "Card Variant": optionValue },
+      product_id: seedResult.productId, title: "Lightly Played · Holo", sku: `SKU-BARE-${suffix().toUpperCase()}`, manage_inventory: true, options: optionValues,
     })
     const tradingCardVariant = await cards.createTradingCardVariants({
       trading_card_id: seedResult.tradingCardId, condition: "LIGHTLY_PLAYED", condition_source: "EXPLICIT",
@@ -1348,7 +1353,7 @@ describe("createCardFromInventoryRowWorkflow — PostgreSQL-locked InventoryItem
         const setCode = `set_lockrace_${suffix()}`
         const cardNumber = numericSuffix()
         const seedResult = await seedCard(setCode, cardNumber, source)
-        const bare = await createBareIncompleteVariant(seedResult, suffix())
+        const bare = await createBareIncompleteVariant(seedResult)
         const lockKey = `trading-card-inventory-repair:${bare.productVariantId}`
 
         // This suite never invents its own in-memory locking: the only
@@ -1467,7 +1472,7 @@ describe("createCardFromInventoryRowWorkflow — PostgreSQL-locked InventoryItem
         const setCode = `set_lockthrow_${suffix()}`
         const cardNumber = numericSuffix()
         const seedResult = await seedCard(setCode, cardNumber, source)
-        const bare = await createBareIncompleteVariant(seedResult, suffix())
+        const bare = await createBareIncompleteVariant(seedResult)
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         linkSpy.mockImplementation(async (payload: any) => {
@@ -1526,7 +1531,7 @@ describe("createCardFromInventoryRowWorkflow — PostgreSQL-locked InventoryItem
         const setCode = `set_lockambiguous_${suffix()}`
         const cardNumber = numericSuffix()
         const seedResult = await seedCard(setCode, cardNumber, source)
-        const bare = await createBareIncompleteVariant(seedResult, suffix())
+        const bare = await createBareIncompleteVariant(seedResult)
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         linkSpy.mockImplementation(async (payload: any) => {
@@ -1572,7 +1577,7 @@ describe("createCardFromInventoryRowWorkflow — PostgreSQL-locked InventoryItem
         const setCode = `set_lockduplicate_${suffix()}`
         const cardNumber = numericSuffix()
         const seedResult = await seedCard(setCode, cardNumber, source)
-        const bare = await createBareIncompleteVariant(seedResult, suffix())
+        const bare = await createBareIncompleteVariant(seedResult)
 
         // Directly create two InventoryItems and link both — simulating a
         // pre-existing catalogue anomaly (e.g. a legacy import), not
@@ -1786,10 +1791,18 @@ describe("Phase 8B: reuse of a card migrated from the pre-normalisation-policy a
           // A pre-existing variant under a *different* commercial combination
           // than the one this test will request, so the reuse path below is
           // forced to add a genuinely new variant to this existing product —
-          // matching the real "Card Variant" option shape the create-workflow
-          // itself always sets up (see `variantOptionValue`/`addCardVariantOptionValue`).
-          options: [{ title: "Card Variant", values: ["LIGHTLY PLAYED · HOLO"] }],
-          variants: [{ title: "LIGHTLY PLAYED · HOLO", sku: `PV-LEGACY-${id}`, manage_inventory: true, options: { "Card Variant": "LIGHTLY PLAYED · HOLO" } }],
+          // matching the real Condition/Finish/Special Treatment option
+          // shape the create-workflow itself always sets up (see
+          // `variantOptionValues`/`ensureOptionValue`).
+          options: [
+            { title: "Condition", values: ["Lightly Played"] },
+            { title: "Finish", values: ["Holo"] },
+            { title: "Special Treatment", values: ["None"] },
+          ],
+          variants: [{
+            title: "Lightly Played · Holo", sku: `PV-LEGACY-${id}`, manage_inventory: true,
+            options: { Condition: "Lightly Played", Finish: "Holo", "Special Treatment": "None" },
+          }],
         })
         const link = medusaApp.link
         if (!link) throw new Error("Expected Medusa link container")
