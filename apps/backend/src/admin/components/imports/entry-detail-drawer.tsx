@@ -45,10 +45,12 @@ interface EntryDetailDrawerProps {
   onClose: () => void
   onPrevious?: () => void
   onNext?: () => void
+  /** Stage 1: opens the alternative-TCGdex-match dialog for this row. Omitted where rematching doesn't make sense (e.g. no snapshot entry id available). */
+  onFindAlternativeMatch?: () => void
 }
 
 /** Full detail for one import row, opened by clicking its table row. */
-const EntryDetailDrawer = ({ snapshotId, row, thumbnail, onClose, onPrevious, onNext }: EntryDetailDrawerProps) => {
+const EntryDetailDrawer = ({ snapshotId, row, thumbnail, onClose, onPrevious, onNext, onFindAlternativeMatch }: EntryDetailDrawerProps) => {
   const [selectedImageIndex, setSelectedImageIndex] = useState(0)
   const { cardNumber, totalNumber } = parseCardNumber(row.providerReference)
   const displayCardNumber = cardNumber ?? row.card?.cardNumber ?? "—"
@@ -213,6 +215,14 @@ const EntryDetailDrawer = ({ snapshotId, row, thumbnail, onClose, onPrevious, on
               </ul>
             )}
           </div>
+
+          {onFindAlternativeMatch && (
+            <div className="border-t pt-4">
+              <Button type="button" variant="secondary" onClick={onFindAlternativeMatch}>
+                Find alternative TCGdex match
+              </Button>
+            </div>
+          )}
 
           <div className="mt-auto flex items-center justify-between border-t pt-4">
             <Button type="button" variant="secondary" disabled={!onPrevious} onClick={onPrevious}>

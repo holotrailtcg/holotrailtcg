@@ -57,6 +57,8 @@ const CreateCardDialog = ({ row, onClose, onCreated }: CreateCardDialogProps) =>
   const [finishConfirmed, setFinishConfirmed] = useState(false)
   const [specialTreatment, setSpecialTreatment] = useState("")
   const [specialTreatmentConfirmed, setSpecialTreatmentConfirmed] = useState(false)
+  const [illustrator, setIllustrator] = useState("")
+  const [illustratorTouched, setIllustratorTouched] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [created, setCreated] = useState<CreateCardResult | null>(null)
 
@@ -94,6 +96,9 @@ const CreateCardDialog = ({ row, onClose, onCreated }: CreateCardDialogProps) =>
     if (entry.tcgdexCandidate) {
       setName((current) => current || entry.tcgdexCandidate!.name)
       setCardSetDisplayName((current) => current || entry.tcgdexCandidate!.setName)
+      if (entry.tcgdexCandidate.illustrator) {
+        setIllustrator((current) => (illustratorTouched || current ? current : entry.tcgdexCandidate!.illustrator!))
+      }
     }
     const parsedCardNumber = (entry.providerReference.split("|")[1] ?? "").trim()
     if (parsedCardNumber) setCardNumber((current) => current || parsedCardNumber)
@@ -125,6 +130,8 @@ const CreateCardDialog = ({ row, onClose, onCreated }: CreateCardDialogProps) =>
         cardNumber: cardNumber.trim(),
         rarityRaw: rarityRaw.trim() || null,
         condition, finish, specialTreatment, finishConfirmed, specialTreatmentConfirmed,
+        illustrator: illustrator.trim() || null,
+        illustratorConfirmed: illustratorTouched && Boolean(illustrator.trim()),
       })
       if (status === 409) {
         setSubmitError("This row is already being created by another request. Please wait a moment and try again.")
@@ -217,6 +224,20 @@ const CreateCardDialog = ({ row, onClose, onCreated }: CreateCardDialogProps) =>
               <div className="flex flex-col gap-1">
                 <Label htmlFor="cc-rarity">Rarity (optional)</Label>
                 <Input id="cc-rarity" value={rarityRaw} onChange={(event) => setRarityRaw(event.target.value)} />
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <Label htmlFor="cc-illustrator">Illustrator (optional)</Label>
+                <Input
+                  id="cc-illustrator"
+                  value={illustrator}
+                  onChange={(event) => { setIllustrator(event.target.value); setIllustratorTouched(true) }}
+                  placeholder="e.g. Mitsuhiro Arita"
+                />
+                <Text size="xsmall" className="text-ui-fg-subtle">
+                  Never affects which listings this card groups with. Suggested from TCGdex when
+                  available — editing it here counts as your confirmed correction.
+                </Text>
               </div>
 
               <div className="flex flex-col gap-1">

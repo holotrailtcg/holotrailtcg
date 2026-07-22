@@ -92,7 +92,7 @@ export interface SnapshotEntryListItem {
   cardIdentityHint: string | null
   tcgdexCandidate: {
     id: string; reviewStatus: "PENDING" | "ACCEPTED"; name: string; setName: string; seriesName: string | null
-    referenceArtworkUrl: string | null; providerRarity: string | null
+    referenceArtworkUrl: string | null; providerRarity: string | null; illustrator: string | null
   } | null
 }
 

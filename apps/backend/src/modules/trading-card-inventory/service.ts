@@ -1997,6 +1997,52 @@ class TradingCardInventoryModuleService extends MedusaService({
   }
 
   /**
+   * Stage 1 Admin UX: the physical source rows currently composing one
+   * proposal's group — what the split dialog and the separate-listing
+   * override dialog let a reviewer choose from. Read-only; uses the exact
+   * same groupKey-filter logic `splitInventoryProposal` uses to determine
+   * "the group" so the two never disagree about membership.
+   */
+  async listCurrentGroupEntries(proposalId: string): Promise<Record<string, unknown>[]> {
+    idSchema.parse(proposalId)
+    const [proposal] = await this.manager_.execute<Record<string, unknown>>(
+      `select id, inventory_snapshot_id, reconciliation_key from trading_card_inventory_proposal where id = ? and deleted_at is null`,
+      [proposalId],
+    )
+    if (!proposal) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory proposal not found")
+    const snapshotId = proposal.inventory_snapshot_id as string | null
+    const reconciliationKey = proposal.reconciliation_key as string | null
+    if (!snapshotId || !reconciliationKey) return []
+    const rows = await this.manager_.execute<Record<string, unknown>>(
+      `select e.*, coalesce(m.trading_card_variant_id, e.trading_card_variant_id) as effective_trading_card_variant_id,
+              o.split_group_key as override_split_group_key, o.requires_separate_listing_override
+       from trading_card_inventory_snapshot_entry e
+       left join trading_card_inventory_snapshot_entry_match m on m.snapshot_entry_id = e.id and m.deleted_at is null
+       left join trading_card_inventory_snapshot_entry_override o on o.snapshot_entry_id = e.id and o.deleted_at is null
+       where e.inventory_snapshot_id = ? and e.deleted_at is null
+         and (e.outcome is null or e.outcome not in ('INVALID', 'SKIPPED'))
+       order by e.row_number`,
+      [snapshotId],
+    )
+    const mapRow = (row: Record<string, unknown>): SnapshotEntryInput & { id: string } => ({
+      id: row.id as string,
+      providerReference: row.provider_reference as string,
+      providerReferenceType: row.provider_reference_type as string,
+      tradingCardVariantId: (row.effective_trading_card_variant_id ?? row.trading_card_variant_id) as string | null,
+      quantity: Number(row.quantity),
+      currencyCode: row.currency_code as string | null,
+      unitAcquisitionCost: null, unitMarketPrice: null, unitSellingPrice: null,
+      conditionCandidate: row.condition_candidate as string | null,
+      finishCandidate: row.finish_candidate as string | null,
+      specialTreatmentCandidate: row.special_treatment_candidate as string | null,
+      requiresSeparateListing: row.requires_separate_listing_override !== null && row.requires_separate_listing_override !== undefined
+        ? Boolean(row.requires_separate_listing_override) : Boolean(row.requires_separate_listing),
+      splitGroupKey: (row.override_split_group_key as string | null) ?? null,
+    })
+    return rows.filter((row) => groupKey(mapRow(row)) === reconciliationKey)
+  }
+
+  /**
    * Stage 1: reviewer override for "does this card require a separate
    * listing?" — applied to either every currently-grouped row in a PENDING
    * proposal (`sourceEntryIds` omitted) or a specific subset of them.

@@ -5,7 +5,10 @@ import { Link, useNavigate, useParams } from "react-router-dom"
 import CategoryAssignmentDialog from "../../../../../components/imports/category-assignment-dialog"
 import CreateCardDialog from "../../../../../components/imports/create-card-dialog"
 import CardImageThumbnail from "../../../../../components/imports/card-image-thumbnail"
+import AlternativeMatchDialog from "../../../../../components/imports/alternative-match-dialog"
 import EntryDetailDrawer from "../../../../../components/imports/entry-detail-drawer"
+import FailedLookupsPanel from "../../../../../components/imports/failed-lookups-panel"
+import ManageGroupDialog from "../../../../../components/imports/manage-group-dialog"
 import { fetchJson, postAction } from "../../../../../components/imports/fetch-json"
 import ImportStepper from "../../../../../components/imports/import-stepper"
 import InventoryProposalStatusBadge from "../../../../../components/imports/inventory-proposal-status-badge"
@@ -79,6 +82,8 @@ const InventoryProposalsPage = () => {
   const [createCardRow, setCreateCardRow] = useState<InventoryProposalListItem | null>(null)
   const [selectedProposal, setSelectedProposal] = useState<InventoryProposalListItem | null>(null)
   const [categoryProposalId, setCategoryProposalId] = useState<string | null>(null)
+  const [manageGroupProposalId, setManageGroupProposalId] = useState<string | null>(null)
+  const [alternativeMatchEntryId, setAlternativeMatchEntryId] = useState<string | null>(null)
 
   const summaryQuery = useQuery({
     queryKey: summaryQueryKey(snapshotId),
@@ -393,6 +398,11 @@ const InventoryProposalsPage = () => {
           <Button size="small" variant="transparent" onClick={() => setExpandedId(expandedId === row.id ? null : row.id)}>
             {expandedId === row.id ? "Hide history" : "History"}
           </Button>
+          {row.reviewStatus === "PENDING" && (
+            <Button size="small" variant="transparent" onClick={() => setManageGroupProposalId(row.id)}>
+              Manage group
+            </Button>
+          )}
         </div>
       ),
     },
@@ -432,6 +442,8 @@ const InventoryProposalsPage = () => {
           {progress.fullyComplete && <Badge size="2xsmall" color="green">Snapshot fully applied</Badge>}
         </Container>
       )}
+
+      <FailedLookupsPanel snapshotId={snapshotId} onRetried={refreshAfterAction} />
 
       {progress?.fullyComplete && (
         <Container className="flex flex-col gap-3 p-6">
@@ -541,6 +553,25 @@ const InventoryProposalsPage = () => {
         />
       )}
 
+      {alternativeMatchEntryId && (
+        <AlternativeMatchDialog
+          key={alternativeMatchEntryId}
+          snapshotId={snapshotId}
+          entryId={alternativeMatchEntryId}
+          onClose={() => setAlternativeMatchEntryId(null)}
+          onMatched={refreshAfterAction}
+        />
+      )}
+
+      {manageGroupProposalId && (
+        <ManageGroupDialog
+          key={manageGroupProposalId}
+          proposalId={manageGroupProposalId}
+          onClose={() => setManageGroupProposalId(null)}
+          onChanged={refreshAfterAction}
+        />
+      )}
+
       {categoryProposalId && (
         <CategoryAssignmentDialog
           key={categoryProposalId}
@@ -568,6 +599,7 @@ const InventoryProposalsPage = () => {
             onNext={selectedIndex >= 0 && selectedIndex < visibleRows.length - 1
               ? () => setSelectedProposal(visibleRows[selectedIndex + 1])
               : undefined}
+            onFindAlternativeMatch={() => setAlternativeMatchEntryId(entry.id)}
           />
         )
       })()}

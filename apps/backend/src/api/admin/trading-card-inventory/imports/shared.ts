@@ -22,6 +22,7 @@ export interface SafeTcgdexCandidate {
   seriesName: string | null
   referenceArtworkUrl: string | null
   providerRarity: string | null
+  illustrator: string | null
 }
 
 /**
@@ -66,13 +67,14 @@ export async function attachTcgdexCandidates<T extends {
     let candidate = candidateCache.get(cacheKey)
     if (candidate === undefined) {
       const found = await cards.findTcgdexLookupCandidate({ provider: EXTERNAL_PROVIDER.PULSE, language, tcgdexSetId: setMapping.setId, cardNumber })
-      const enrichment = found?.enrichment as { name?: string; referenceArtworkUrl?: string; providerRarity?: string } | null
+      const enrichment = found?.enrichment as { name?: string; referenceArtworkUrl?: string; providerRarity?: string; illustrator?: string } | null
       candidate = found && found.match_outcome === "MATCHED"
         && (found.review_status === "PENDING" || found.review_status === "ACCEPTED") && enrichment?.name
         ? {
             id: found.id as string, reviewStatus: found.review_status, name: enrichment.name,
             setName: setMapping.setName, seriesName: setMapping.seriesName,
             referenceArtworkUrl: enrichment.referenceArtworkUrl ?? null, providerRarity: enrichment.providerRarity ?? null,
+            illustrator: enrichment.illustrator ?? null,
           }
         : null
       candidateCache.set(cacheKey, candidate)
