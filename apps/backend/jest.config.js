@@ -77,6 +77,7 @@ const TRADING_CARDS_MEDUSA_APP_SPEC_PATTERNS = [
   "src/modules/trading-cards/__tests__/trading-card-image-focal-point\\.spec\\.ts$",
   "src/modules/trading-cards/__tests__/trading-card-image-expiry-sweep\\.spec\\.ts$",
   "src/modules/trading-cards/__tests__/trading-card-image-orphan-reconciliation\\.spec\\.ts$",
+  "src/modules/trading-cards/__tests__/trading-card-product-media-reconcile\\.integration\\.spec\\.ts$",
 ];
 
 // Stage 5B.1 Slice 2: the same `MedusaApp`-loader-registry conflict
