@@ -23,6 +23,8 @@ interface CreateCardDialogProps {
 
 type Phase = "form" | "submitting" | "image"
 
+const selectClassName = "w-full rounded-md border border-ui-border-base bg-ui-bg-field px-3 py-2 text-sm text-ui-fg-base focus:border-ui-border-interactive focus:outline-none"
+
 async function postCreateCard(body: Record<string, unknown>): Promise<{ status: number; result?: CreateCardResult }> {
   const response = await fetch("/admin/trading-cards/create-from-inventory-row", {
     method: "POST",
@@ -75,6 +77,13 @@ const CreateCardDialog = ({ row, onClose, onCreated }: CreateCardDialogProps) =>
   // CSV explicitly stated otherwise, exactly as already applied when
   // matching against existing cards — pre-filling it here just extends that
   // same default to card creation instead of leaving it blank.
+  //
+  // A row that reached this dialog because TCGdex already matched it (the
+  // candidate was accepted but couldn't fully create — e.g. finish/condition
+  // still unresolved) already has a real name/set from that match; only a
+  // genuinely unmatched row needs the reviewer to type these by hand. Card
+  // number isn't on the candidate DTO, so it's parsed from the same
+  // `SET|NUMBER|...` reference the rest of the import already relies on.
   useEffect(() => {
     const entry = entryQuery.data?.entries[0]
     if (!entry) return
@@ -82,6 +91,12 @@ const CreateCardDialog = ({ row, onClose, onCreated }: CreateCardDialogProps) =>
     if (entry.finishCandidate) setFinish(entry.finishCandidate)
     if (entry.specialTreatmentCandidate) setSpecialTreatment(entry.specialTreatmentCandidate)
     if (entry.rarityRaw) setRarityRaw(entry.rarityRaw)
+    if (entry.tcgdexCandidate) {
+      setName((current) => current || entry.tcgdexCandidate!.name)
+      setCardSetDisplayName((current) => current || entry.tcgdexCandidate!.setName)
+    }
+    const parsedCardNumber = (entry.providerReference.split("|")[1] ?? "").trim()
+    if (parsedCardNumber) setCardNumber((current) => current || parsedCardNumber)
   }, [entryQuery.data])
 
   const imagesQuery = useQuery({
@@ -172,7 +187,7 @@ const CreateCardDialog = ({ row, onClose, onCreated }: CreateCardDialogProps) =>
 
   return (
     <FocusModal open onOpenChange={(open) => { if (!open) handleClose() }}>
-      <FocusModal.Content>
+      <FocusModal.Content className="!bottom-auto !left-1/2 !right-auto !top-1/2 h-auto max-h-[calc(100vh-3rem)] w-[min(36rem,calc(100vw-3rem))] -translate-x-1/2 -translate-y-1/2">
         <FocusModal.Header>
           <Heading level="h2">{phase === "image" ? "Add a photograph" : "Create card"}</Heading>
         </FocusModal.Header>
@@ -208,7 +223,7 @@ const CreateCardDialog = ({ row, onClose, onCreated }: CreateCardDialogProps) =>
                 <Label htmlFor="cc-condition">Condition</Label>
                 <select
                   id="cc-condition"
-                  className="rounded-none border p-2 text-sm"
+                  className={selectClassName}
                   value={condition}
                   onChange={(event) => setCondition(event.target.value)}
                 >
@@ -223,7 +238,7 @@ const CreateCardDialog = ({ row, onClose, onCreated }: CreateCardDialogProps) =>
                 <Label htmlFor="cc-finish">Finish</Label>
                 <select
                   id="cc-finish"
-                  className="rounded-none border p-2 text-sm"
+                  className={selectClassName}
                   value={finish}
                   onChange={(event) => { setFinish(event.target.value); setFinishConfirmed(false) }}
                 >
@@ -251,7 +266,7 @@ const CreateCardDialog = ({ row, onClose, onCreated }: CreateCardDialogProps) =>
                 <Label htmlFor="cc-special">Special treatment</Label>
                 <select
                   id="cc-special"
-                  className="rounded-none border p-2 text-sm"
+                  className={selectClassName}
                   value={specialTreatment}
                   onChange={(event) => { setSpecialTreatment(event.target.value); setSpecialTreatmentConfirmed(false) }}
                 >

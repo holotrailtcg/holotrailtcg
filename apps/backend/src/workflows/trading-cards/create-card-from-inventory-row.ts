@@ -9,7 +9,8 @@ import { rarityComparisonForm } from "../../modules/trading-cards/rarity/normali
 import { generateSku } from "../../modules/trading-cards/sku/generate-sku"
 import { machineSegment } from "../../modules/trading-cards/sku/slugify"
 import {
-  CARD_GAME, RECORD_ORIGIN, type CardCondition, type CardFinish, type CardLanguage, type SpecialTreatment,
+  CARD_CONDITION_LABELS, CARD_FINISH_LABELS, CARD_GAME, RECORD_ORIGIN, SPECIAL_TREATMENT,
+  SPECIAL_TREATMENT_LABELS, type CardCondition, type CardFinish, type CardLanguage, type SpecialTreatment,
 } from "../../modules/trading-cards/types"
 import { TRADING_CARD_INVENTORY_MODULE } from "../../modules/trading-card-inventory"
 import type TradingCardInventoryModuleService from "../../modules/trading-card-inventory/service"
@@ -79,17 +80,29 @@ function sameVariantDimensions(a: VariantDimensions, b: VariantDimensions): bool
   return a.condition === b.condition && a.finish === b.finish && a.specialTreatment === b.specialTreatment
 }
 
+/** The three Medusa product options every trading-card Product has, in the order they're created and looked up. */
+const VARIANT_OPTION_TITLES = ["Condition", "Finish", "Special Treatment"] as const
+type VariantOptionTitle = (typeof VARIANT_OPTION_TITLES)[number]
+
 /**
- * Medusa requires every variant on one product to have a distinct value for
- * a shared option — a constant value (e.g. "Standard") for every variant
- * would collide as soon as a second condition/finish/treatment is added to
- * an existing card. This derives a human-readable, unique-per-dimension
- * option value instead.
+ * Maps a dimension combination to its three separate Medusa product option
+ * values — one each for Condition, Finish and Special Treatment. Special
+ * Treatment's "None" is never omitted: Medusa requires every variant on a
+ * product to carry a value for every option the product defines.
  */
-function variantOptionValue(dimensions: VariantDimensions): string {
-  const parts: string[] = [dimensions.condition, dimensions.finish]
-  if (dimensions.specialTreatment !== "NONE") parts.push(dimensions.specialTreatment)
-  return parts.map((part) => part.replace(/_/g, " ")).join(" · ")
+function variantOptionValues(dimensions: VariantDimensions): Record<VariantOptionTitle, string> {
+  return {
+    Condition: CARD_CONDITION_LABELS[dimensions.condition],
+    Finish: CARD_FINISH_LABELS[dimensions.finish],
+    "Special Treatment": SPECIAL_TREATMENT_LABELS[dimensions.specialTreatment],
+  }
+}
+
+/** A cosmetic, human-readable label for the variant's `title` field only — never used for identity/matching (see `variantOptionValues`/`findProductVariantByDimensions`). Drops "None" special treatment since it adds no information. */
+function variantDisplayTitle(dimensions: VariantDimensions): string {
+  const parts = [CARD_CONDITION_LABELS[dimensions.condition], CARD_FINISH_LABELS[dimensions.finish]]
+  if (dimensions.specialTreatment !== SPECIAL_TREATMENT.NONE) parts.push(SPECIAL_TREATMENT_LABELS[dimensions.specialTreatment])
+  return parts.join(" · ")
 }
 
 function shortId(): string {
@@ -158,8 +171,9 @@ function delay(ms: number): Promise<void> {
  * this repair logic cannot safely reconcile on its own (e.g. a
  * ProductVariant that legitimately belongs to a different Product than its
  * TradingCard — see `assertVariantProductHierarchy`, or a Product missing
- * the "Card Variant" option entirely — see `addCardVariantOptionValue`),
- * not for an ordinary missing link, which this file now repairs instead.
+ * one of its Condition/Finish/Special Treatment options entirely — see
+ * `ensureOptionValue`), not for an ordinary missing link, which this file
+ * now repairs instead.
  *
  * The only accepted residual: a same-invocation retry can leave behind a
  * harmless, unlinked orphan (e.g. an InventoryItem whose level/link call
@@ -414,17 +428,27 @@ async function ensureProductChainForTradingCard(
   const existingProductId = await retryUntilDefined(() => readTradingCardProductId(container, tradingCardId))
   if (existingProductId) return { productId: existingProductId, freshProductVariant: null }
 
+  // Checked before the Product is created, not after — a missing stock
+  // location is a foreseeable, config-level failure, not a mid-flight
+  // crash, so there's no reason to let it produce the same orphaned Product
+  // this file's no-delete invariant otherwise accepts as an inherent risk
+  // (see the invariant note above `delay()`).
+  const locationResolution = await resolveMedusaStockLocationId(container)
+  if (locationResolution.outcome === "FAILED") {
+    throw new MedusaError(MedusaError.Types.NOT_ALLOWED, `Could not resolve a Medusa stock location for the new card (${locationResolution.category}): ${locationResolution.message}`)
+  }
+
   const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
   const numberForms = cardNumberForms(input.cardNumber)
   const handle = `${handleSegment(input.cardSetProviderSetCode)}-${handleSegment(numberForms.normalised)}-${shortId().toLowerCase()}`
   const variantSku = `HT-PULSE-${shortId()}`
   const dimensions: VariantDimensions = { condition: input.condition, finish: input.finish, specialTreatment: input.specialTreatment }
-  const optionValue = variantOptionValue(dimensions)
+  const optionValues = variantOptionValues(dimensions)
 
   const product = await products.createProducts({
     title: input.name, handle, status: "draft",
-    options: [{ title: "Card Variant", values: [optionValue] }],
-    variants: [{ title: optionValue, sku: variantSku, manage_inventory: true, options: { "Card Variant": optionValue } }],
+    options: VARIANT_OPTION_TITLES.map((title) => ({ title, values: [optionValues[title]] })),
+    variants: [{ title: variantDisplayTitle(dimensions), sku: variantSku, manage_inventory: true, options: optionValues }],
     ...(input.categoryId ? { category_ids: [input.categoryId] } : {}),
   })
   const productVariantId = product.variants?.[0]?.id
@@ -511,108 +535,125 @@ async function readVariantProductVariantId(
   return (data[0]?.product_variant as { id?: string } | null)?.id
 }
 
-/** Finds an existing ProductVariant on `productId` whose "Card Variant" option value matches `optionValue`, if any. */
-async function findProductVariantByOptionValue(
-  container: MedusaContainer, productId: string, optionValue: string,
+/** Finds an existing ProductVariant on `productId` whose Condition/Finish/Special Treatment option values all match `optionValues`, if any — the full combination must match, not just one of the three. */
+async function findProductVariantByDimensions(
+  container: MedusaContainer, productId: string, optionValues: Record<VariantOptionTitle, string>,
 ): Promise<string | undefined> {
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
   const { data } = await query.graph({
-    entity: "product_variant", fields: ["id", "options.value"], filters: { product_id: productId },
+    entity: "product_variant", fields: ["id", "options.value", "options.option.title"], filters: { product_id: productId },
   })
-  const match = (data as Array<{ id: string; options?: Array<{ value?: string }> | null }>).find(
-    (variant) => variant.options?.some((option) => option.value === optionValue),
-  )
+  type CandidateOption = { value?: string; option?: { title?: string } | null }
+  const match = (data as Array<{ id: string; options?: CandidateOption[] | null }>).find((variant) => {
+    const valueByTitle = new Map((variant.options ?? []).map((option) => [option.option?.title, option.value]))
+    return VARIANT_OPTION_TITLES.every((title) => valueByTitle.get(title) === optionValues[title])
+  })
   return match?.id
 }
 
 /**
- * Adds a new value to the product's "Card Variant" option, reusing the
- * official Medusa module-service APIs (`updateProductOptionValuesOnProduct`
- * / `updateProducts`) rather than raw SQL. Verified against this Medusa
- * version's own source (`product-module-service.js`): both calls run
- * through the module's own transactionManager/event pipeline, correctly
- * populate the `product_product_option` / `product_product_option_value`
- * pivot rows (Medusa 2.16+ shared-option-entity schema), and are idempotent
- * — `updateProductOptionValuesOnProduct` skips creating a value whose name
+ * Adds a new value to one of the product's Condition/Finish/Special
+ * Treatment options, reusing the official Medusa module-service APIs
+ * (`updateProductOptionValuesOnProduct` / `updateProducts`) rather than raw
+ * SQL. Verified against this Medusa version's own source
+ * (`product-module-service.js`): both calls run through the module's own
+ * transactionManager/event pipeline, correctly populate the
+ * `product_product_option` / `product_product_option_value` pivot rows
+ * (Medusa 2.16+ shared-option-entity schema), and are idempotent —
+ * `updateProductOptionValuesOnProduct` skips creating a value whose name
  * already exists on the option, and skips re-linking a pivot that already
  * exists. Returns the created value's id, or `null` if it already existed.
  */
-async function addCardVariantOptionValue(
-  products: IProductModuleService, productId: string, optionValue: string,
+async function ensureOptionValue(
+  products: IProductModuleService, productId: string, optionTitle: VariantOptionTitle, value: string,
 ): Promise<{ optionId: string; createdValueId: string | null }> {
   const productWithOptions = await products.retrieveProduct(productId, { relations: ["options", "options.values"] })
-  const cardVariantOption = productWithOptions.options?.find((option) => option.title === "Card Variant")
+  const targetOption = productWithOptions.options?.find((option) => option.title === optionTitle)
 
-  // Every product this workflow creates already has a "Card Variant" option
+  // Every product this workflow creates already has all three options
   // (§ step 2) — this can only be missing on a legacy/manually-repaired
   // product. Fail clearly rather than fabricating a new option under a
   // different id, which would produce an ambiguous second option on the
   // product (see CatalogueIntegrityError usage elsewhere in this file).
-  if (!cardVariantOption) {
+  if (!targetOption) {
     throw new CatalogueIntegrityError(
-      `Product ${productId} has no "Card Variant" option — its catalogue linkage is damaged and needs manual repair before another variant can be added.`,
+      `Product ${productId} has no "${optionTitle}" option — its catalogue linkage is damaged and needs manual repair before another variant can be added.`,
     )
   }
 
-  const alreadyPresent = cardVariantOption.values?.some((value) => value.value === optionValue)
+  const alreadyPresent = targetOption.values?.some((existingValue) => existingValue.value === value)
   if (!alreadyPresent) {
     await products.updateProductOptionValuesOnProduct({
-      product_id: productId, product_option_id: cardVariantOption.id, add: [{ value: optionValue }],
+      product_id: productId, product_option_id: targetOption.id, add: [{ value }],
     })
   }
   const refreshed = await products.retrieveProduct(productId, { relations: ["options", "options.values"] })
-  const refreshedOption = refreshed.options?.find((option) => option.id === cardVariantOption.id)
-  const valueRow = refreshedOption?.values?.find((value) => value.value === optionValue)
-  return { optionId: cardVariantOption.id, createdValueId: alreadyPresent ? null : (valueRow?.id ?? null) }
+  const refreshedOption = refreshed.options?.find((option) => option.id === targetOption.id)
+  const valueRow = refreshedOption?.values?.find((existingValue) => existingValue.value === value)
+  return { optionId: targetOption.id, createdValueId: alreadyPresent ? null : (valueRow?.id ?? null) }
+}
+
+/** Ensures all three Condition/Finish/Special Treatment option values exist on the product, one `ensureOptionValue` call per dimension. */
+async function ensureOptionValues(
+  products: IProductModuleService, productId: string, optionValues: Record<VariantOptionTitle, string>,
+): Promise<void> {
+  for (const title of VARIANT_OPTION_TITLES) {
+    await ensureOptionValue(products, productId, title, optionValues[title])
+  }
 }
 
 /**
  * Ensures a ProductVariant exists on `productId` for this exact
  * `dimensions` combination, never deleting anything. Medusa itself enforces
- * at most one variant per distinct option-value combination on one
- * product, so — exactly like the TradingCard/TradingCardVariant identity
- * rows elsewhere in this file — "attempt the insert, and on failure re-read
- * who actually holds this combination now" is race-safe without a
- * cross-step transaction.
+ * at most one variant per distinct option-value combination on one product
+ * — confirmed false once there is more than one option: with three separate
+ * options, two concurrent callers can both pass the pre-create existence
+ * check and both successfully call `createProductVariants` for the exact
+ * same three-value combination, producing two duplicate variants with
+ * neither call ever throwing (observed directly — see the integration test
+ * this fixed). Medusa's uniqueness guarantee, whatever it is, does not cover
+ * this case. Real serialization is required, so — exactly like
+ * `ensureSingleInventoryItemForProductVariant`'s InventoryItem repair above
+ * — the whole check-then-act sequence runs inside a PostgreSQL advisory
+ * lock keyed per product, closing the race outright rather than trying to
+ * detect it after the fact.
  */
 async function ensureProductVariantForDimensions(
   container: MedusaContainer, productId: string, dimensions: VariantDimensions,
 ): Promise<string> {
   const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
-  const optionValue = variantOptionValue(dimensions)
+  const locking = container.resolve<ILockingModule>(Modules.LOCKING)
+  const optionValues = variantOptionValues(dimensions)
+  const lockKey = `trading-card-product-variant-create:${productId}`
 
-  const existing = await findProductVariantByOptionValue(container, productId, optionValue)
-  if (existing) return existing
+  return locking.execute(lockKey, async () => {
+    const existing = await findProductVariantByDimensions(container, productId, optionValues)
+    if (existing) return existing
 
-  await addCardVariantOptionValue(products, productId, optionValue)
+    await ensureOptionValues(products, productId, optionValues)
 
-  const variantSku = `HT-PULSE-${shortId()}`
-  let attempt = 0
-  for (;;) {
-    try {
-      const productVariant = await products.createProductVariants({
-        product_id: productId, title: optionValue, sku: variantSku, manage_inventory: true, options: { "Card Variant": optionValue },
-      })
-      return productVariant.id
-    } catch (variantError) {
-      // Two distinct, both-recoverable causes share this catch: (a) the
-      // option value just added is not yet visible to
-      // `createProductVariants`'s own re-resolution of the product's
-      // options ("does not exist") — re-confirm and retry a bounded number
-      // of times; (b) a concurrent caller already created a variant for
-      // this exact option combination — Medusa's own uniqueness rejects
-      // ours, which is the signal to re-read and reuse rather than a
-      // genuine failure. Re-read for (b) on every attempt, since it can
-      // happen on the very first try.
-      const afterRace = await findProductVariantByOptionValue(container, productId, optionValue)
-      if (afterRace) return afterRace
-      attempt += 1
-      const message = variantError instanceof Error ? variantError.message : String(variantError)
-      if (attempt >= 5 || !/does not exist/i.test(message)) throw variantError
-      await delay(60)
-      await addCardVariantOptionValue(products, productId, optionValue)
+    const variantSku = `HT-PULSE-${shortId()}`
+    let attempt = 0
+    for (;;) {
+      try {
+        const productVariant = await products.createProductVariants({
+          product_id: productId, title: variantDisplayTitle(dimensions), sku: variantSku, manage_inventory: true, options: optionValues,
+        })
+        return productVariant.id
+      } catch (variantError) {
+        // Held lock rules out a concurrent duplicate combination here — the
+        // only remaining recoverable cause is an option value just added
+        // not yet being visible to `createProductVariants`'s own
+        // re-resolution of the product's options ("does not exist").
+        // Re-confirm and retry a bounded number of times.
+        attempt += 1
+        const message = variantError instanceof Error ? variantError.message : String(variantError)
+        if (attempt >= 5 || !/does not exist/i.test(message)) throw variantError
+        await delay(60)
+        await ensureOptionValues(products, productId, optionValues)
+      }
     }
-  }
+  })
 }
 
 /**

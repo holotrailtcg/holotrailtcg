@@ -2,19 +2,21 @@ import { INVENTORY_CARD_CONDITION as CARD_CONDITION, INVENTORY_CONDITION_SOURCE 
 import type { ConditionResolution } from "./types"
 
 /**
- * Maps a trusted Product-ID condition token to Stage 3's `CardCondition`
- * enum. Stage 3 has no "Mint" value (only Near Mint and below), so a
- * literal "mint" token is deliberately treated as unrecognised rather than
- * silently folded into Near Mint — never inventing a mapping the domain
- * doesn't support.
+ * Maps a trusted Pulse condition token (from the `Condition` column, or the
+ * `Product ID` field for older exports without it — see row-parser.ts) to
+ * Stage 3's `CardCondition` enum. Only the four tokens Pulse actually emits
+ * are recognised — no "dmg"/"dm" token exists in Pulse's export, so it is
+ * not mapped here; "Damaged" remains a valid condition elsewhere in the
+ * domain, it just never arrives via Pulse. Stage 3 has no "Mint" value
+ * (only Near Mint and below), so a literal "mint" token is deliberately
+ * treated as unrecognised rather than silently folded into Near Mint —
+ * never inventing a mapping the domain doesn't support.
  */
 const CONDITION_TOKEN_MAP: Record<string, string> = {
   nm: CARD_CONDITION.NEAR_MINT,
   lp: CARD_CONDITION.LIGHTLY_PLAYED,
   mp: CARD_CONDITION.MODERATELY_PLAYED,
   hp: CARD_CONDITION.HEAVILY_PLAYED,
-  dmg: CARD_CONDITION.DAMAGED,
-  dm: CARD_CONDITION.DAMAGED,
 }
 
 export function resolveCondition(conditionToken: string | null): ConditionResolution {

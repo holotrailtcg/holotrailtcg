@@ -134,6 +134,10 @@ export const suggestSetMappingQuerySchema = z.object({
   language: z.enum(Object.values(CARD_LANGUAGE) as [string, ...string[]]),
 }).strict()
 
+export const cardSetsQuerySchema = z.object({
+  language: z.enum(Object.values(CARD_LANGUAGE) as [string, ...string[]]).optional(),
+}).strict()
+
 export const createProviderSetMappingBodySchema = z.object({
   provider: z.enum(Object.values(EXTERNAL_PROVIDER) as [string, ...string[]]),
   game: z.enum(Object.values(CARD_GAME) as [string, ...string[]]),

@@ -14,11 +14,12 @@ import {
   usePrompt,
 } from "@medusajs/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   fetchJson,
   postAction,
 } from "../../../components/imports/fetch-json";
+import { buildCategoryTree, type CategoryTreeNode } from "../../../components/ebay/category-tree";
 
 type Category = {
   id: string;
@@ -60,11 +61,187 @@ type Audit = {
   createdAt: string;
 };
 type AuditHistory = { accountId: string; audits: Audit[] };
+type CategoryNode = CategoryTreeNode<Category>;
+
+function formatAuditValue(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function AuditDetails({ details }: { details: Record<string, unknown> }) {
+  const before = details.before;
+  const after = details.after;
+  if (
+    before &&
+    after &&
+    typeof before === "object" &&
+    typeof after === "object" &&
+    !Array.isArray(before) &&
+    !Array.isArray(after)
+  ) {
+    const beforeObject = before as Record<string, unknown>;
+    const afterObject = after as Record<string, unknown>;
+    const keys = Array.from(
+      new Set([...Object.keys(beforeObject), ...Object.keys(afterObject)]),
+    ).filter(
+      (key) =>
+        formatAuditValue(beforeObject[key]) !== formatAuditValue(afterObject[key]),
+    );
+    if (keys.length === 0) return null;
+    return (
+      <ul className="flex flex-col gap-1">
+        {keys.map((key) => (
+          <li key={key}>
+            <Text size="small">
+              <span className="font-medium">{key}</span>:{" "}
+              {formatAuditValue(beforeObject[key])} →{" "}
+              {formatAuditValue(afterObject[key])}
+            </Text>
+          </li>
+        ))}
+      </ul>
+    );
+  }
+  const entries = Object.entries(details);
+  if (entries.length === 0) return null;
+  return (
+    <ul className="flex flex-col gap-1">
+      {entries.map(([key, value]) => (
+        <li key={key}>
+          <Text size="small">
+            <span className="font-medium">{key}</span>: {formatAuditValue(value)}
+          </Text>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function formatUpdatedAt(value: string | Date): string {
+  const date = new Date(value);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const day = pad(date.getDate());
+  const month = pad(date.getMonth() + 1);
+  const year = date.getFullYear();
+  const hours = pad(date.getHours());
+  const minutes = pad(date.getMinutes());
+  return `${day}-${month}-${year}, ${hours}:${minutes}`;
+}
+
 const emptyForm = {
   externalId: "",
   name: "",
   parentExternalId: "",
   siblingOrder: "0",
+};
+
+const CategoryTreeRows = ({
+  node,
+  depth,
+  collapsedIds,
+  onToggleCollapsed,
+  idFieldResetVersion,
+  onRenameId,
+  onEdit,
+  onRemove,
+}: {
+  node: CategoryNode;
+  depth: number;
+  collapsedIds: Set<string>;
+  onToggleCollapsed: (id: string) => void;
+  idFieldResetVersion: Record<string, number>;
+  onRenameId: (row: Category, externalId: string) => void;
+  onEdit: (row: Category) => void;
+  onRemove: (row: Category) => void;
+}) => {
+  const hasChildren = node.children.length > 0;
+  const isCollapsed = collapsedIds.has(node.id);
+  return (
+    <>
+      <tr className={node.status === "REMOVED" ? "text-ui-fg-muted" : ""}>
+        <td>
+          <div
+            className="flex items-center gap-1"
+            style={{ paddingLeft: depth * 20 }}
+          >
+            {hasChildren ? (
+              <button
+                type="button"
+                aria-label={
+                  isCollapsed ? `Expand ${node.name}` : `Collapse ${node.name}`
+                }
+                onClick={() => onToggleCollapsed(node.id)}
+                className="flex h-5 w-5 items-center justify-center text-ui-fg-subtle"
+              >
+                {isCollapsed ? "▸" : "▾"}
+              </button>
+            ) : (
+              <span className="inline-block h-5 w-5" />
+            )}
+            <Text title={node.path}>{node.name}</Text>
+          </div>
+        </td>
+        <td className="w-40">
+          {node.status === "ACTIVE" ? (
+            <Input
+              key={`${node.id}-${idFieldResetVersion[node.id] ?? 0}`}
+              aria-label={`Store category ID for ${node.path}`}
+              defaultValue={node.externalId}
+              onBlur={(event) => {
+                const nextExternalId = event.target.value.trim();
+                if (!nextExternalId || nextExternalId === node.externalId) {
+                  event.target.value = node.externalId;
+                  return;
+                }
+                onRenameId(node, nextExternalId);
+              }}
+            />
+          ) : (
+            <code>{node.externalId}</code>
+          )}
+        </td>
+        <td className="text-center">{node.displayOrder}</td>
+        <td>{node.source}</td>
+        <td className="text-center">
+          <Badge color={node.status === "ACTIVE" ? "green" : "grey"}>
+            {node.status}
+          </Badge>
+        </td>
+        <td>{formatUpdatedAt(node.updatedAt)}</td>
+        <td>
+          {node.status === "ACTIVE" && (
+            <div className="flex items-center gap-2">
+              <Button size="small" onClick={() => onEdit(node)}>
+                Edit
+              </Button>
+              <Button
+                size="small"
+                variant="danger"
+                onClick={() => onRemove(node)}
+              >
+                Remove locally
+              </Button>
+            </div>
+          )}
+        </td>
+      </tr>
+      {!isCollapsed &&
+        node.children.map((child) => (
+          <CategoryTreeRows
+            key={child.id}
+            node={child}
+            depth={depth + 1}
+            collapsedIds={collapsedIds}
+            onToggleCollapsed={onToggleCollapsed}
+            idFieldResetVersion={idFieldResetVersion}
+            onRenameId={onRenameId}
+            onEdit={onEdit}
+            onRemove={onRemove}
+          />
+        ))}
+    </>
+  );
 };
 
 const EbayStoreCategoriesPage = () => {
@@ -81,6 +258,8 @@ const EbayStoreCategoriesPage = () => {
   const [idFieldResetVersion, setIdFieldResetVersion] = useState<
     Record<string, number>
   >({});
+  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
+  const [auditExpanded, setAuditExpanded] = useState(false);
   const catalogue = useQuery({
     queryKey: ["ebay-store-categories", environment],
     queryFn: () =>
@@ -97,6 +276,27 @@ const EbayStoreCategoriesPage = () => {
       ),
     retry: false,
   });
+  const tree = useMemo(
+    () => buildCategoryTree(catalogue.data?.categories ?? []),
+    [catalogue.data],
+  );
+  const summary = useMemo(() => {
+    const categories = catalogue.data?.categories ?? [];
+    return {
+      total: categories.length,
+      active: categories.filter((category) => category.status === "ACTIVE").length,
+      removed: categories.filter((category) => category.status === "REMOVED").length,
+      maxLevel: categories.reduce((max, category) => Math.max(max, category.level), 0),
+    };
+  }, [catalogue.data]);
+  const toggleCollapsed = (id: string) => {
+    setCollapsedIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
   const refresh = () => {
     client.invalidateQueries({
       queryKey: ["ebay-store-categories", environment],
@@ -242,10 +442,13 @@ const EbayStoreCategoriesPage = () => {
         </Text>
         <select
           aria-label="Environment"
+          className="w-fit rounded-md border border-ui-border-base px-4 py-2.5 text-ui-fg-base"
           value={environment}
           onChange={(event) => {
             setEnvironment(event.target.value);
             setPreview(null);
+            setCollapsedIds(new Set());
+            setAuditExpanded(false);
           }}
         >
           <option value="SANDBOX">Sandbox</option>
@@ -259,24 +462,38 @@ const EbayStoreCategoriesPage = () => {
           >
             Sync categories to Medusa
           </Button>
-          <a href="/app/settings/ebay/category-rules">Manage assignment rules</a>
+          <a href="/app/settings/ebay-category-rules">Manage assignment rules</a>
         </div>
-        {syncMedusa.data && (
-          <Text size="small">
-            Scanned {syncMedusa.data.summary.scanned} · created{" "}
-            {syncMedusa.data.summary.created} · updated{" "}
-            {syncMedusa.data.summary.updated} · unchanged{" "}
-            {syncMedusa.data.summary.unchanged} · failed{" "}
-            {syncMedusa.data.summary.failed}
+        {syncMedusa.isPending && (
+          <div role="status" className="flex items-center gap-2">
+            <Text size="small" className="text-ui-fg-subtle">
+              Syncing local categories to Medusa — this can take a moment for a
+              large catalogue…
+            </Text>
+          </div>
+        )}
+        {syncMedusa.data && !syncMedusa.isPending && (
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge color="grey">Scanned {syncMedusa.data.summary.scanned}</Badge>
+              <Badge color="green">Created {syncMedusa.data.summary.created}</Badge>
+              <Badge color="blue">Updated {syncMedusa.data.summary.updated}</Badge>
+              <Badge color="grey">Unchanged {syncMedusa.data.summary.unchanged}</Badge>
+              <Badge color={syncMedusa.data.summary.failed > 0 ? "red" : "grey"}>
+                Failed {syncMedusa.data.summary.failed}
+              </Badge>
+            </div>
             {syncMedusa.data.summary.failed > 0 && (
-              <>
-                {" "}
-                — {syncMedusa.data.summary.failures
-                  .map((failure: { externalId: string; message: string }) => `${failure.externalId}: ${failure.message}`)
+              <Text size="small" role="alert" className="text-ui-fg-error">
+                {syncMedusa.data.summary.failures
+                  .map(
+                    (failure: { externalId: string; message: string }) =>
+                      `${failure.externalId}: ${failure.message}`,
+                  )
                   .join("; ")}
-              </>
+              </Text>
             )}
-          </Text>
+          </div>
         )}
       </Container>
       {catalogue.isError && (
@@ -286,91 +503,85 @@ const EbayStoreCategoriesPage = () => {
       )}
       {catalogue.data && (
         <>
-          <Container className="p-6">
-            <Heading level="h2">
-              Local hierarchy · {catalogue.data.accountId}
-            </Heading>
-            <table className="w-full text-left">
+          <Container className="flex flex-col gap-4 p-6">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <Heading level="h2">
+                Local hierarchy · {catalogue.data.accountId}
+              </Heading>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="small"
+                  variant="secondary"
+                  onClick={() => setCollapsedIds(new Set())}
+                >
+                  Expand all
+                </Button>
+                <Button
+                  size="small"
+                  variant="secondary"
+                  onClick={() =>
+                    setCollapsedIds(
+                      new Set(
+                        catalogue.data.categories
+                          .filter((category) => category.level === 1)
+                          .map((category) => category.id),
+                      ),
+                    )
+                  }
+                >
+                  Collapse all
+                </Button>
+              </div>
+            </div>
+            <Text size="small" className="text-ui-fg-subtle">
+              {summary.total} categories · {summary.active} active ·{" "}
+              {summary.removed} removed · {summary.maxLevel} level
+              {summary.maxLevel === 1 ? "" : "s"} deep
+            </Text>
+            <table className="w-full table-fixed text-left">
+              <colgroup>
+                <col className="w-auto" />
+                <col className="w-40" />
+                <col className="w-16" />
+                <col className="w-24" />
+                <col className="w-24" />
+                <col className="w-40" />
+                <col className="w-44" />
+              </colgroup>
               <thead>
                 <tr>
-                  <th>Path</th>
+                  <th>Name</th>
                   <th>ID</th>
-                  <th>Level</th>
-                  <th>Order</th>
+                  <th className="text-center">Order</th>
                   <th>Source</th>
-                  <th>Status</th>
+                  <th className="text-center">Status</th>
                   <th>Updated</th>
                   <th />
                 </tr>
               </thead>
               <tbody>
-                {catalogue.data.categories.map((row) => (
-                  <tr
-                    key={row.id}
-                    className={
-                      row.status === "REMOVED" ? "text-ui-fg-muted" : ""
+                {tree.map((node) => (
+                  <CategoryTreeRows
+                    key={node.id}
+                    node={node}
+                    depth={0}
+                    collapsedIds={collapsedIds}
+                    onToggleCollapsed={toggleCollapsed}
+                    idFieldResetVersion={idFieldResetVersion}
+                    onRenameId={(row, externalId) =>
+                      renameId.mutate({ row, externalId })
                     }
-                  >
-                    <td>{row.path}</td>
-                    <td>
-                      {row.status === "ACTIVE" ? (
-                        <Input
-                          key={`${row.id}-${idFieldResetVersion[row.id] ?? 0}`}
-                          aria-label={`Store category ID for ${row.path}`}
-                          defaultValue={row.externalId}
-                          onBlur={(event) => {
-                            const nextExternalId = event.target.value.trim();
-                            if (
-                              !nextExternalId ||
-                              nextExternalId === row.externalId
-                            ) {
-                              event.target.value = row.externalId;
-                              return;
-                            }
-                            renameId.mutate({ row, externalId: nextExternalId });
-                          }}
-                        />
-                      ) : (
-                        <code>{row.externalId}</code>
-                      )}
-                    </td>
-                    <td>{row.level}</td>
-                    <td>{row.siblingOrder}</td>
-                    <td>{row.source}</td>
-                    <td>
-                      <Badge color={row.status === "ACTIVE" ? "green" : "grey"}>
-                        {row.status}
-                      </Badge>
-                    </td>
-                    <td>{new Date(row.updatedAt).toLocaleString("en-GB")}</td>
-                    <td>
-                      {row.status === "ACTIVE" && (
-                        <>
-                          <Button
-                            size="small"
-                            onClick={() => {
-                              setEditing(row);
-                              setForm({
-                                externalId: row.externalId,
-                                name: row.name,
-                                parentExternalId: row.parentExternalId ?? "",
-                                siblingOrder: String(row.siblingOrder),
-                              });
-                            }}
-                          >
-                            Edit
-                          </Button>
-                          <Button
-                            size="small"
-                            variant="danger"
-                            onClick={() => setRemoving(row)}
-                          >
-                            Remove locally
-                          </Button>
-                        </>
-                      )}
-                    </td>
-                  </tr>
+                    onEdit={(row) => {
+                      setEditing(row);
+                      setForm({
+                        externalId: row.externalId,
+                        name: row.name,
+                        parentExternalId: row.parentExternalId ?? "",
+                        siblingOrder: String(row.siblingOrder),
+                      });
+                    }}
+                    onRemove={(row) => setRemoving(row)}
+                  />
                 ))}
               </tbody>
             </table>
@@ -465,35 +676,54 @@ const EbayStoreCategoriesPage = () => {
             )}
           </Container>
           <Container className="flex flex-col gap-3 p-6">
-            <Heading level="h2">Audit history</Heading>
-            {auditHistory.isError && (
-              <Text role="alert">Audit history could not be loaded.</Text>
-            )}
-            {auditHistory.data?.audits.length === 0 && (
-              <Text>No audit history for this environment.</Text>
-            )}
-            {auditHistory.data?.audits.map((audit) => (
-              <div
-                key={audit.id}
-                className="border-b border-ui-border-base py-3"
+            <div className="flex items-center justify-between gap-3">
+              <Heading level="h2">Audit history</Heading>
+              <Button
+                size="small"
+                variant="secondary"
+                onClick={() => setAuditExpanded((expanded) => !expanded)}
               >
-                <Text weight="plus">{audit.action}</Text>
-                <Text>
-                  {audit.actorId} ·{" "}
-                  {new Date(audit.createdAt).toLocaleString("en-GB")}
-                </Text>
-                {audit.categoryId && (
-                  <Text>
-                    Category record: <code>{audit.categoryId}</code>
-                  </Text>
+                {auditExpanded
+                  ? "Hide audit history"
+                  : `Show audit history${
+                      auditHistory.data
+                        ? ` (${auditHistory.data.audits.length})`
+                        : ""
+                    }`}
+              </Button>
+            </div>
+            {auditExpanded && (
+              <>
+                {auditHistory.isError && (
+                  <Text role="alert">Audit history could not be loaded.</Text>
                 )}
-                {audit.details && (
-                  <pre className="whitespace-pre-wrap text-ui-fg-subtle">
-                    {JSON.stringify(audit.details, null, 2)}
-                  </pre>
+                {auditHistory.data?.audits.length === 0 && (
+                  <Text>No audit history for this environment.</Text>
                 )}
-              </div>
-            ))}
+                {auditHistory.data?.audits.map((audit) => (
+                  <div
+                    key={audit.id}
+                    className="border-b border-ui-border-base py-3"
+                  >
+                    <Text weight="plus">{audit.action}</Text>
+                    <Text size="small" className="text-ui-fg-subtle">
+                      {audit.actorId} ·{" "}
+                      {new Date(audit.createdAt).toLocaleString("en-GB")}
+                    </Text>
+                    {audit.categoryId && (
+                      <Text size="small" className="text-ui-fg-subtle">
+                        Category record: <code>{audit.categoryId}</code>
+                      </Text>
+                    )}
+                    {audit.details && (
+                      <div className="mt-1">
+                        <AuditDetails details={audit.details} />
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </>
+            )}
           </Container>
         </>
       )}

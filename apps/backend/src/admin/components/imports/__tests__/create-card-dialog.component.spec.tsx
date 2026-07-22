@@ -20,6 +20,8 @@ function baseRow(overrides: Partial<InventoryProposalListItem> = {}): InventoryP
     reviewStatus: "PENDING", resolvedBy: null, resolvedAt: null, reviewNote: null, appliedAt: null,
     appliedTransactionId: null, medusaSyncStatus: "NOT_APPLICABLE", medusaInventoryItemId: null,
     medusaStockLocationId: null, medusaSyncRetryCount: 0, medusaSyncLastError: null, createdAt: "2026-01-01T00:00:00.000Z",
+    proposedEbayStoreCategoryId: null, proposedCategoryReason: null, proposedCategoryRuleId: null,
+    confirmedEbayStoreCategoryId: null, categoryConfirmedAt: null, categoryConfirmedBy: null,
     ...overrides,
   }
 }

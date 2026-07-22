@@ -118,9 +118,8 @@ describe("eBay Store categories settings page", () => {
     expect(
       await screen.findByDisplayValue("24393782015"),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText("Black Star Promo Cards > Mega Evolution Promos"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("Black Star Promo Cards")).toBeInTheDocument();
+    expect(screen.getByText("Mega Evolution Promos")).toBeInTheDocument();
     expect(screen.getByText("ACTIVE")).toBeInTheDocument();
     expect(screen.getByText("REMOVED")).toBeInTheDocument();
     expect(screen.getByText("REMOVED").closest("tr")).toHaveClass(
@@ -134,7 +133,13 @@ describe("eBay Store categories settings page", () => {
         String(url).startsWith("/admin/ebay/store-categories"),
       ),
     ).toBe(true);
+    expect(screen.getByText("2 categories · 1 active · 1 removed · 2 levels deep")).toBeInTheDocument();
     expect(screen.getByText("Audit history")).toBeInTheDocument();
+    expect(screen.queryByText("MANUAL_EDITED")).not.toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(
+      screen.getByRole("button", { name: /show audit history/i }),
+    );
     expect(screen.getByText("MANUAL_EDITED")).toBeInTheDocument();
     expect(screen.getByText(/admin-user/)).toBeInTheDocument();
     expect(screen.getByText(/Old name/)).toBeInTheDocument();

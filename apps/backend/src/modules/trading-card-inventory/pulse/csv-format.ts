@@ -1,5 +1,5 @@
 import { MedusaError } from "@medusajs/framework/utils"
-import { PULSE_EXPECTED_HEADERS, PULSE_FILE_LIMITS } from "./types"
+import { PULSE_EXPECTED_HEADERS, PULSE_FILE_LIMITS, PULSE_OPTIONAL_HEADERS } from "./types"
 
 const BOM = "﻿"
 
@@ -35,11 +35,12 @@ export interface HeaderValidationResult {
  * constraint). Harmless surrounding whitespace on a header cell is trimmed
  * before comparison; the header *names* themselves are matched exactly
  * (case-sensitive) — no fuzzy/misspelling tolerance for the commercial
- * fields, per spec.
+ * fields, per spec. `PULSE_OPTIONAL_HEADERS` columns are tolerated if
+ * present but never required — see its doc comment for why.
  */
 export function validateHeaders(rawHeaders: string[]): HeaderValidationResult {
   const normalized = rawHeaders.map((header) => header.trim())
-  const expected = new Set<string>(PULSE_EXPECTED_HEADERS)
+  const expected = new Set<string>([...PULSE_EXPECTED_HEADERS, ...PULSE_OPTIONAL_HEADERS])
   const seen = new Map<string, number>()
   const duplicate: string[] = []
   for (const header of normalized) {
