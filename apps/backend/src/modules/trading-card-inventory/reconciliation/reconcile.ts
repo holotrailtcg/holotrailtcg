@@ -11,6 +11,20 @@ export interface SnapshotEntryInput {
   unitAcquisitionCost?: DecimalInput | null
   unitMarketPrice?: DecimalInput | null
   unitSellingPrice?: DecimalInput | null
+  /**
+   * Saleable-identity attributes. When `tradingCardVariantId` is resolved it
+   * already fully encodes canonical card + language + condition + finish +
+   * special treatment (a Medusa variant *is* that saleable identity), so it
+   * alone is sufficient there. These candidate fields matter most while a
+   * row is still unmatched — they stop rows that plainly differ by
+   * condition, finish or special treatment from being merged into one
+   * bucket before a variant has been resolved.
+   */
+  conditionCandidate?: string | null
+  finishCandidate?: string | null
+  specialTreatmentCandidate?: string | null
+  /** "Does this card require a separate listing?" — always part of grouping identity; true and false must never merge. */
+  requiresSeparateListing?: boolean
 }
 
 export interface GroupedSnapshotEntry {
@@ -24,6 +38,10 @@ export interface GroupedSnapshotEntry {
   unitSellingPrice: string | null
   duplicateRowCount: number
   unresolvedReason: string | null
+  conditionCandidate: string | null
+  finishCandidate: string | null
+  specialTreatmentCandidate: string | null
+  requiresSeparateListing: boolean
 }
 
 export interface ReconciliationProposal {
@@ -46,10 +64,25 @@ export interface ReconciliationProposal {
   changedFields: string[]
   duplicateRowCount: number
   sellingPriceLocked: boolean
+  requiresSeparateListing: boolean
 }
 
+/**
+ * The complete saleable-identity grouping key: canonical card + language +
+ * condition + finish + special treatment, plus separate-listing intent.
+ * Rows must never be grouped together solely because they share a raw Pulse
+ * Product ID — a resolved `tradingCardVariantId` (which already encodes the
+ * full canonical+language+condition+finish+treatment identity) is used when
+ * available; otherwise the parsed candidate attributes keep rows that
+ * plainly differ by condition/finish/treatment from merging even before a
+ * variant is resolved. Different `requiresSeparateListing` values never
+ * merge, regardless of variant resolution.
+ */
 function groupKey(entry: SnapshotEntryInput): string {
-  return `${entry.providerReferenceType}:${entry.providerReference}`
+  const identity = entry.tradingCardVariantId
+    ? `variant:${entry.tradingCardVariantId}`
+    : `unmatched:${entry.providerReferenceType}:${entry.providerReference}:${entry.conditionCandidate ?? ""}:${entry.finishCandidate ?? ""}:${entry.specialTreatmentCandidate ?? ""}`
+  return `${identity}|sep=${entry.requiresSeparateListing ? "1" : "0"}`
 }
 
 export function aggregateSnapshotEntries(entries: SnapshotEntryInput[]): Map<string, GroupedSnapshotEntry> {
@@ -64,7 +97,11 @@ export function aggregateSnapshotEntries(entries: SnapshotEntryInput[]): Map<str
     else buckets.set(key, [entry])
   }
 
-  return new Map([...buckets.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([key, rows]) => {
+  return new Map([...buckets.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([key, unsortedRows]) => {
+    // Representative fields (providerReference, condition/finish/treatment candidates) must be
+    // deterministic regardless of the input array's row order — never "whichever row was
+    // encountered first" — so sort by providerReference before picking rows[0].
+    const rows = [...unsortedRows].sort((a, b) => a.providerReference.localeCompare(b.providerReference))
     const variants = new Set(rows.map((row) => row.tradingCardVariantId).filter((id): id is string => Boolean(id)))
     const currencies = new Set(rows.map((row) => row.currencyCode).filter((code): code is string => Boolean(code)))
     const quantity = rows.reduce((sum, row) => sum + row.quantity, 0)
@@ -85,6 +122,10 @@ export function aggregateSnapshotEntries(entries: SnapshotEntryInput[]): Map<str
       unitSellingPrice: mixedCurrency ? null : maxDecimal(rows.map((row) => canonicalDecimal(row.unitSellingPrice))),
       duplicateRowCount: rows.length,
       unresolvedReason,
+      conditionCandidate: rows[0].conditionCandidate ?? null,
+      finishCandidate: rows[0].finishCandidate ?? null,
+      specialTreatmentCandidate: rows[0].specialTreatmentCandidate ?? null,
+      requiresSeparateListing: Boolean(rows[0].requiresSeparateListing),
     }
     return [key, grouped]
   }))
@@ -153,6 +194,7 @@ export function reconcileSnapshots(input: {
       changedFields: changes,
       duplicateRowCount: after?.duplicateRowCount ?? before?.duplicateRowCount ?? 1,
       sellingPriceLocked: locked,
+      requiresSeparateListing: Boolean(effective.requiresSeparateListing),
     }
   })
 }

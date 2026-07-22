@@ -153,6 +153,8 @@ export interface ImportedSnapshotEntryInput {
   rarityCandidate?: string | null
   rarityRaw?: string | null
   languageConflict: boolean
+  /** Stage 1: "Does this card require a separate listing?" — the upload-level default, prior to any row/group review override. */
+  requiresSeparateListing?: boolean
   rawFields?: Record<string, string | null>
   diagnostics: ImportedDiagnosticInput[]
 }
@@ -702,7 +704,7 @@ class TradingCardInventoryModuleService extends MedusaService({
         const chunk = input.rows.slice(offset, offset + 500)
         const chunkIds = chunk.map(() => generateEntityId(undefined, "tcisentry"))
         entryIds.push(...chunkIds)
-        const placeholders = chunk.map(() => `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)`).join(", ")
+        const placeholders = chunk.map(() => `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)`).join(", ")
         const params = chunk.flatMap((row, index) => {
           // A blank/malformed row may have no usable provider reference; a
           // synthetic bounded placeholder keeps the NOT-NULL/length
@@ -715,7 +717,7 @@ class TradingCardInventoryModuleService extends MedusaService({
             canonicalDecimal(row.unitAcquisitionCost ?? null), canonicalDecimal(row.unitMarketPrice ?? null),
             canonicalDecimal(row.unitSellingPrice ?? null), row.rowNumber, row.outcome, row.conditionSource ?? null,
             row.conditionCandidate ?? null, row.finishCandidate ?? null, row.specialTreatmentCandidate ?? null,
-            row.rarityCandidate ?? null, row.rarityRaw ?? null, row.languageConflict,
+            row.rarityCandidate ?? null, row.rarityRaw ?? null, row.languageConflict, Boolean(row.requiresSeparateListing),
             row.rawFields ? JSON.stringify(row.rawFields) : null,
           ]
         })
@@ -724,7 +726,7 @@ class TradingCardInventoryModuleService extends MedusaService({
            (id, inventory_snapshot_id, provider_reference, provider_reference_type, trading_card_variant_id, quantity,
             currency_code, unit_acquisition_cost, unit_market_price, unit_selling_price, row_number, outcome,
             condition_source, condition_candidate, finish_candidate, special_treatment_candidate, rarity_candidate, rarity_raw,
-            language_conflict, raw_fields) values ${placeholders}`,
+            language_conflict, requires_separate_listing, raw_fields) values ${placeholders}`,
           params,
         )
         const allDiagnostics = chunk.flatMap((row, index) => row.diagnostics.map((diagnostic) => ({ ...diagnostic, entryId: chunkIds[index] })))
@@ -1019,6 +1021,10 @@ class TradingCardInventoryModuleService extends MedusaService({
           unitAcquisitionCost: row.unit_acquisition_cost === null ? null : String(row.unit_acquisition_cost),
           unitMarketPrice: row.unit_market_price === null ? null : String(row.unit_market_price),
           unitSellingPrice: row.unit_selling_price === null ? null : String(row.unit_selling_price),
+          conditionCandidate: row.condition_candidate as string | null,
+          finishCandidate: row.finish_candidate as string | null,
+          specialTreatmentCandidate: row.special_treatment_candidate as string | null,
+          requiresSeparateListing: Boolean(row.requires_separate_listing),
         })
         const proposalsByKey = new Map(reconcileSnapshots({
           previous: previousRows.map(mapEntry),
@@ -1043,7 +1049,7 @@ class TradingCardInventoryModuleService extends MedusaService({
                  proposed_unit_acquisition_cost = ?, previous_unit_acquisition_cost = ?, proposed_unit_market_price = ?,
                  previous_unit_market_price = ?, proposed_unit_selling_price = ?, previous_unit_selling_price = ?,
                  change_kind = ?, reconciliation_reason = ?, reconciliation_diagnostics = ?::jsonb,
-                 compared_at = ?, updated_at = now()
+                 compared_at = ?, requires_separate_listing = ?, updated_at = now()
                where id = ? and review_status = 'PENDING' and deleted_at is null`,
               [
                 proposal.tradingCardVariantId, proposal.proposedQuantity, proposal.previousQuantity, proposal.quantityDelta,
@@ -1051,7 +1057,7 @@ class TradingCardInventoryModuleService extends MedusaService({
                 proposal.proposedUnitMarketPrice, proposal.previousUnitMarketPrice, proposal.proposedUnitSellingPrice,
                 proposal.previousUnitSellingPrice, proposal.changeKind, proposal.reason,
                 JSON.stringify({ changedFields: proposal.changedFields.slice(0, 8), duplicateRowCount: proposal.duplicateRowCount, sellingPriceLocked: proposal.sellingPriceLocked }),
-                comparedAt, currentProposal.id,
+                comparedAt, proposal.requiresSeparateListing, currentProposal.id,
               ],
             )
           }
@@ -1435,11 +1441,15 @@ class TradingCardInventoryModuleService extends MedusaService({
         unitAcquisitionCost: row.unit_acquisition_cost === null ? null : String(row.unit_acquisition_cost),
         unitMarketPrice: row.unit_market_price === null ? null : String(row.unit_market_price),
         unitSellingPrice: row.unit_selling_price === null ? null : String(row.unit_selling_price),
+        conditionCandidate: row.condition_candidate as string | null,
+        finishCandidate: row.finish_candidate as string | null,
+        specialTreatmentCandidate: row.special_treatment_candidate as string | null,
+        requiresSeparateListing: Boolean(row.requires_separate_listing),
       })
       const proposals = reconcileSnapshots({ previous: previousRows.map(mapEntry), current: currentRows.map(mapEntry), priceLockedVariantIds: lockedIds })
       for (let offset = 0; offset < proposals.length; offset += 250) {
         const chunk = proposals.slice(offset, offset + 250)
-        const placeholders = chunk.map(() => `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, 'PENDING')`).join(", ")
+        const placeholders = chunk.map(() => `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, 'PENDING', ?)`).join(", ")
         const params = chunk.flatMap((proposal) => [
           generateEntityId(undefined, "tciprop"), input.inventorySourceId, input.snapshotId,
           baselineSnapshotId, proposal.reconciliationKey, proposal.tradingCardVariantId,
@@ -1449,6 +1459,7 @@ class TradingCardInventoryModuleService extends MedusaService({
           proposal.previousUnitSellingPrice, proposal.changeKind, proposal.reason,
           JSON.stringify({ changedFields: proposal.changedFields.slice(0, 8), duplicateRowCount: proposal.duplicateRowCount, sellingPriceLocked: proposal.sellingPriceLocked }),
           comparedAt,
+          proposal.requiresSeparateListing,
         ])
         await manager.execute(
           `insert into trading_card_inventory_proposal
@@ -1456,7 +1467,7 @@ class TradingCardInventoryModuleService extends MedusaService({
             provider_reference, provider_reference_type, proposed_quantity, previous_quantity, quantity_delta, currency_code,
             proposed_unit_acquisition_cost, previous_unit_acquisition_cost, proposed_unit_market_price, previous_unit_market_price,
             proposed_unit_selling_price, previous_unit_selling_price, change_kind, reconciliation_reason,
-            reconciliation_diagnostics, compared_at, review_status) values ${placeholders}`,
+            reconciliation_diagnostics, compared_at, review_status, requires_separate_listing) values ${placeholders}`,
           params,
         )
       }

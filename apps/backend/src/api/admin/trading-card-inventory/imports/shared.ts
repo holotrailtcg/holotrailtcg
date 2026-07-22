@@ -96,6 +96,10 @@ export const uploadCsvBodySchema = z.object({
   newSourceDefaultCurrencyCode: z.string().regex(/^[A-Z]{3}$/).optional(),
   previousApprovedSnapshotId: z.string().min(1).optional(),
   reason: z.string().max(500).optional(),
+  // Multipart form fields always arrive as strings — accept the literal
+  // "true"/"false" text rather than z.coerce.boolean(), which would treat
+  // any non-empty string (including the literal text "false") as true.
+  requiresSeparateListingDefault: z.enum(["true", "false"]).optional().transform((value) => value === "true"),
 }).strict().refine(
   (value) => Boolean(value.inventorySourceId) !== Boolean(value.newSourceDisplayName && value.newSourceProvider),
   { message: "Provide either inventorySourceId or newSourceDisplayName together with newSourceProvider, not both or neither" },

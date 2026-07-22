@@ -25,6 +25,35 @@ function isBlankRow(record: PulseCsvRecord): boolean {
 }
 
 /**
+ * Zips a raw physical CSV row's cells against the validated header set.
+ * Returns `null` when the cell count doesn't match the header count — too
+ * few or too many columns — so the caller can produce a clear, line-numbered
+ * `COLUMN_COUNT_MISMATCH` error instead of silently misaligning fields or
+ * silently dropping trailing cells.
+ */
+export function buildPulseCsvRecord(headers: string[], cells: string[]): PulseCsvRecord | null {
+  if (cells.length !== headers.length) return null
+  const record: PulseCsvRecord = {}
+  headers.forEach((header, index) => { record[header] = cells[index] })
+  return record
+}
+
+/** Constructs the immutable INVALID row produced when a physical row's column count doesn't match the header. Never participates in matching, grouping or price fields. */
+export function columnCountMismatchRow(rowNumber: number, expectedColumns: number, actualColumns: number, sourceLanguage: string | null): ParsedPulseRow {
+  return {
+    rowNumber, outcome: "INVALID", providerReference: "", quantity: null, currencyCode: null,
+    unitAcquisitionCost: null, unitMarketPrice: null, unitSellingPrice: null, conditionSource: null,
+    conditionCandidate: null, conditionUnknownToken: null, finishCandidate: null, specialTreatmentCandidate: null, rarityCandidate: null,
+    rarityRaw: null, languageConflict: false, languageCandidate: sourceLanguage, cardNumberCandidate: null,
+    setCodeCandidate: null, gradedCardDetected: false, rawFields: {},
+    diagnostics: [{
+      rowNumber, phase: "PARSE", code: "COLUMN_COUNT_MISMATCH", severity: "ERROR", fieldRef: null,
+      message: `Row has ${actualColumns} column${actualColumns === 1 ? "" : "s"}, but the file header defines ${expectedColumns}.`,
+    }],
+  }
+}
+
+/**
  * Parses one Pulse CSV data row into a bounded, immutable `ParsedPulseRow`.
  * Pure function — no I/O, no database access. `sourceLanguage` is the
  * selected inventory source's configured language (the authority; see
@@ -80,7 +109,11 @@ export function parsePulseRow(record: PulseCsvRecord, rowNumber: number, sourceL
   const conditionFieldRef = conditionColumnValue ? "Condition" : "Product ID"
   const condition = resolveCondition(conditionColumnValue ?? productId.conditionCandidate)
   if ((conditionColumnValue || productId.conditionCandidate) && condition.unknownToken) {
-    addDiagnostic("UNKNOWN_CONDITION_TOKEN", "WARNING", `Condition token "${condition.unknownToken}" is not recognised; defaulted to Near Mint pending review.`, conditionFieldRef)
+    // An explicit, non-blank condition token that isn't recognised must be a
+    // clear review error, not a silent default — it stays ERROR/INVALID
+    // rather than the WARNING/REVIEW_REQUIRED path used for merely-ambiguous
+    // fields, so it can never be silently applied as Near Mint.
+    addDiagnostic("UNKNOWN_CONDITION_TOKEN", "ERROR", `Condition token "${condition.unknownToken}" is not a supported condition value.`, conditionFieldRef)
   }
 
   const languageHint = inferProviderLanguageHint(productId.setCodeCandidate)

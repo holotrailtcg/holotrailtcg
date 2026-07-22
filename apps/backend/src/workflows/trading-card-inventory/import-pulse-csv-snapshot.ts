@@ -10,7 +10,7 @@ import type TradingCardInventoryModuleService from "../../modules/trading-card-i
 import { DuplicateSnapshotError, type ImportedSnapshotEntryInput } from "../../modules/trading-card-inventory/service"
 import { INVENTORY_AUDIT_ACTION, INVENTORY_PROVIDER_REFERENCE_TYPE, INVENTORY_SNAPSHOT_STATUS, INVENTORY_SOURCE_STATUS } from "../../modules/trading-card-inventory/types"
 import { decodeUtf8Strict, validateHeaders } from "../../modules/trading-card-inventory/pulse/csv-format"
-import { parsePulseRow, type PulseCsvRecord } from "../../modules/trading-card-inventory/pulse/row-parser"
+import { buildPulseCsvRecord, columnCountMismatchRow, parsePulseRow } from "../../modules/trading-card-inventory/pulse/row-parser"
 import {
   PULSE_FILE_LIMITS, PULSE_UPLOAD_FILENAME_SUFFIX, PULSE_UPLOAD_MIME_ALLOWLIST, type ParsedPulseRow,
 } from "../../modules/trading-card-inventory/pulse/types"
@@ -33,9 +33,10 @@ export class SourceArchivedError extends Error {
   }
 }
 
-function toImportedSnapshotEntryInput(row: ParsedPulseRow): ImportedSnapshotEntryInput {
+function toImportedSnapshotEntryInput(row: ParsedPulseRow, requiresSeparateListingDefault: boolean): ImportedSnapshotEntryInput {
   return {
     rowNumber: row.rowNumber,
+    requiresSeparateListing: requiresSeparateListingDefault,
     outcome: row.outcome,
     providerReference: row.providerReference,
     providerReferenceType: INVENTORY_PROVIDER_REFERENCE_TYPE.PULSE_PRODUCT_ID,
@@ -59,7 +60,29 @@ function toImportedSnapshotEntryInput(row: ParsedPulseRow): ImportedSnapshotEntr
   }
 }
 
-interface ValidatedFile { contentHash: string; headers: string[]; dataRows: string[][] }
+/** One row of raw cells paired with its true one-based physical line number in the original uploaded file. */
+interface PhysicalCsvRow { lineNumber: number; cells: string[] }
+
+interface ValidatedFile { contentHash: string; headers: string[]; dataRows: PhysicalCsvRow[] }
+
+/**
+ * Parses with `skip_empty_lines: false` and `relax_column_count: true` so that
+ * every physical line (header, blank, or data) becomes exactly one record at
+ * its own array index — giving us the true one-based physical file line
+ * number as `index + 1` for every row, including blank lines and quoted
+ * multiline fields (csv-parse counts a multiline record's *start* line as its
+ * own record index). Column-count enforcement is done per-row downstream
+ * (`row-parser.ts`) rather than here, so a single malformed row produces a
+ * clear, line-numbered validation error instead of aborting the whole file.
+ */
+function parsePhysicalCsvRows(decodedText: string): PhysicalCsvRow[] {
+  const records = parse(decodedText, { skip_empty_lines: false, relax_column_count: true, bom: false }) as string[][]
+  return records.map((cells, index) => ({ lineNumber: index + 1, cells }))
+}
+
+function isBlankCells(cells: string[]): boolean {
+  return cells.every((cell) => !cell || cell.trim() === "")
+}
 
 /** Pure, in-memory, no DB. Fatal failures here must never reach even a DRAFT row — they are pre-existence facts. */
 function validatePulseFile(input: ImportPulseCsvSnapshotInput): ValidatedFile {
@@ -80,14 +103,15 @@ function validatePulseFile(input: ImportPulseCsvSnapshotInput): ValidatedFile {
   } catch (error) {
     throw new ValidationFailedError(error instanceof Error ? error.message : "File could not be decoded as UTF-8")
   }
-  let records: string[][]
+  let allRows: PhysicalCsvRow[]
   try {
-    records = parse(decodedText, { skip_empty_lines: true, relax_column_count: true, bom: false }) as string[][]
+    allRows = parsePhysicalCsvRows(decodedText)
   } catch {
     throw new ValidationFailedError("File could not be parsed as CSV")
   }
-  if (records.length === 0) throw new ValidationFailedError("File has no header row")
-  const headerResult = validateHeaders(records[0])
+  if (allRows.length === 0) throw new ValidationFailedError("File has no header row")
+  const headerRow = allRows[0]
+  const headerResult = validateHeaders(headerRow.cells)
   if (!headerResult.ok) {
     const parts: string[] = []
     if (headerResult.missing.length) parts.push(`missing: ${headerResult.missing.join(", ")}`)
@@ -95,7 +119,9 @@ function validatePulseFile(input: ImportPulseCsvSnapshotInput): ValidatedFile {
     if (headerResult.unsupported.length) parts.push(`unsupported: ${headerResult.unsupported.join(", ")}`)
     throw new ValidationFailedError(`Invalid CSV headers (${parts.join("; ")})`)
   }
-  const dataRows = records.slice(1)
+  // Blank physical lines are preserved for line-number provenance but never
+  // counted as data rows — do not renumber after filtering them out.
+  const dataRows = allRows.slice(1).filter((row) => !isBlankCells(row.cells))
   if (dataRows.length === 0) throw new ValidationFailedError("File has no data rows")
   if (dataRows.length > PULSE_FILE_LIMITS.MAX_ROWS) throw new ValidationFailedError("File exceeds the maximum allowed row count")
   return { contentHash, headers: headerResult.normalizedHeaders, dataRows }
@@ -168,14 +194,14 @@ async function parseAndPersistEntries(
   file: ValidatedFile,
   sourceLanguage: string | null,
 ): Promise<{ rows: ParsedPulseRow[]; entryIds: string[] }> {
-  const rows = file.dataRows.map((cells, index) => {
-    const record: PulseCsvRecord = {}
-    file.headers.forEach((header, columnIndex) => { record[header] = cells[columnIndex] })
-    return parsePulseRow(record, index + 1, sourceLanguage)
+  const rows = file.dataRows.map((row) => {
+    const record = buildPulseCsvRecord(file.headers, row.cells)
+    if (!record) return columnCountMismatchRow(row.lineNumber, file.headers.length, row.cells.length, sourceLanguage)
+    return parsePulseRow(record, row.lineNumber, sourceLanguage)
   })
   const persisted = await inventory.addInventorySnapshotEntriesWithDiagnostics({
     actor: input.actor, source: input.source, reason: input.reason,
-    snapshotId, rows: rows.map(toImportedSnapshotEntryInput),
+    snapshotId, rows: rows.map((row) => toImportedSnapshotEntryInput(row, Boolean(input.requiresSeparateListingDefault))),
   })
   await inventory.recordImportLifecycleAudit({
     actor: input.actor, source: input.source, reason: input.reason,

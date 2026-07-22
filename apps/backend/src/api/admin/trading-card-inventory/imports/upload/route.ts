@@ -27,6 +27,7 @@ export async function POST(req: AuthenticatedMedusaRequest, res: MedusaResponse)
       newSourceDisplayName: body.newSourceDisplayName, newSourceProvider: body.newSourceProvider,
       newSourceLanguage: body.newSourceLanguage ?? null, newSourceDefaultCurrencyCode: body.newSourceDefaultCurrencyCode ?? null,
       previousApprovedSnapshotId: body.previousApprovedSnapshotId ?? null, reason: body.reason,
+      requiresSeparateListingDefault: body.requiresSeparateListingDefault,
     },
   }))
 

@@ -19,20 +19,52 @@ describe("snapshot aggregation", () => {
   it("groups duplicate provider IDs, sums quantity, and calculates weighted acquisition cost", () => {
     const grouped = aggregateSnapshotEntries([
       row({ quantity: 1, unitAcquisitionCost: "1.00" }), row({ quantity: 3, unitAcquisitionCost: "2.00" }),
-    ]).get("PULSE_PRODUCT_ID:product-1")!
+    ]).get("variant:tcvar_1|sep=0")!
     expect(grouped.quantity).toBe(4)
     expect(grouped.unitAcquisitionCost).toBe("1.75")
     expect(grouped.duplicateRowCount).toBe(2)
   })
 
-  it("turns missing and conflicting variant matches into unresolved groups", () => {
+  it("marks a missing variant match as unresolved", () => {
     expect(aggregateSnapshotEntries([row({ tradingCardVariantId: null })]).values().next().value.unresolvedReason).toMatch(/No approved/)
-    expect(aggregateSnapshotEntries([row(), row({ tradingCardVariantId: "tcvar_2" })]).values().next().value.tradingCardVariantId).toBeNull()
+  })
+
+  it("never groups rows solely because they share a raw Pulse Product ID — a resolved variant is the real identity", () => {
+    // Same raw provider reference, but two different resolved variants (e.g. explicit CSV
+    // Condition differed row-to-row): must become two separate, independently-resolved
+    // groups, never one merged "unresolved" bucket with summed quantity across identities.
+    const grouped = aggregateSnapshotEntries([row({ tradingCardVariantId: "tcvar_1" }), row({ tradingCardVariantId: "tcvar_2" })])
+    expect(grouped.size).toBe(2)
+    expect(grouped.get("variant:tcvar_1|sep=0")!.quantity).toBe(1)
+    expect(grouped.get("variant:tcvar_2|sep=0")!.quantity).toBe(1)
+    expect([...grouped.values()].every((entry) => entry.unresolvedReason === null)).toBe(true)
+  })
+
+  it("keeps rows with different conditions/finishes/treatments apart before a variant is resolved", () => {
+    const unmatched = (overrides: Partial<SnapshotEntryInput> = {}) =>
+      row({ tradingCardVariantId: null, conditionCandidate: "NEAR_MINT", finishCandidate: "NORMAL", specialTreatmentCandidate: "NONE", ...overrides })
+    const grouped = aggregateSnapshotEntries([
+      unmatched(),
+      unmatched({ conditionCandidate: "LIGHTLY_PLAYED" }),
+      unmatched({ finishCandidate: "HOLO" }),
+      unmatched({ specialTreatmentCandidate: "COSMOS_HOLO" }),
+    ])
+    expect(grouped.size).toBe(4)
+  })
+
+  it("never merges rows with different language, or different requires-separate-listing intent, even under the same resolved variant", () => {
+    const grouped = aggregateSnapshotEntries([
+      row({ tradingCardVariantId: "tcvar_1", requiresSeparateListing: false }),
+      row({ tradingCardVariantId: "tcvar_1", requiresSeparateListing: true }),
+    ])
+    expect(grouped.size).toBe(2)
+    expect(grouped.get("variant:tcvar_1|sep=0")!.quantity).toBe(1)
+    expect(grouped.get("variant:tcvar_1|sep=1")!.quantity).toBe(1)
   })
 
   it("aggregates a large duplicate group without losing rows", () => {
     const entries = Array.from({ length: 10_000 }, () => row())
-    const grouped = aggregateSnapshotEntries(entries).get("PULSE_PRODUCT_ID:product-1")!
+    const grouped = aggregateSnapshotEntries(entries).get("variant:tcvar_1|sep=0")!
     expect(grouped.quantity).toBe(10_000)
     expect(grouped.duplicateRowCount).toBe(10_000)
   })
@@ -40,19 +72,22 @@ describe("snapshot aggregation", () => {
 
 describe("snapshot comparison", () => {
   it("creates new, quantity, cost, price, no-change, unresolved, and missing-to-zero proposals", () => {
+    // Each scenario is modelled as a genuinely distinct saleable identity (its own
+    // resolved variant) — reconciliation groups by identity, not raw provider reference,
+    // so scenarios sharing one variant would incorrectly merge into a single proposal.
     const previous = [
-      row({ providerReference: "missing", quantity: 4 }),
-      row({ providerReference: "quantity", quantity: 1 }),
-      row({ providerReference: "cost", unitAcquisitionCost: "1" }),
-      row({ providerReference: "price", unitSellingPrice: "3" }),
-      row({ providerReference: "same" }),
+      row({ providerReference: "missing", tradingCardVariantId: "tcvar_missing", quantity: 4 }),
+      row({ providerReference: "quantity", tradingCardVariantId: "tcvar_quantity", quantity: 1 }),
+      row({ providerReference: "cost", tradingCardVariantId: "tcvar_cost", unitAcquisitionCost: "1" }),
+      row({ providerReference: "price", tradingCardVariantId: "tcvar_price", unitSellingPrice: "3" }),
+      row({ providerReference: "same", tradingCardVariantId: "tcvar_same" }),
     ]
     const current = [
-      row({ providerReference: "new" }),
-      row({ providerReference: "quantity", quantity: 2 }),
-      row({ providerReference: "cost", unitAcquisitionCost: "1.5" }),
-      row({ providerReference: "price", unitSellingPrice: "4" }),
-      row({ providerReference: "same" }),
+      row({ providerReference: "new", tradingCardVariantId: "tcvar_new" }),
+      row({ providerReference: "quantity", tradingCardVariantId: "tcvar_quantity", quantity: 2 }),
+      row({ providerReference: "cost", tradingCardVariantId: "tcvar_cost", unitAcquisitionCost: "1.5" }),
+      row({ providerReference: "price", tradingCardVariantId: "tcvar_price", unitSellingPrice: "4" }),
+      row({ providerReference: "same", tradingCardVariantId: "tcvar_same" }),
       row({ providerReference: "unresolved", tradingCardVariantId: null }),
     ]
     const result = reconcileSnapshots({ previous, current })

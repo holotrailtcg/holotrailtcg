@@ -6,7 +6,7 @@ import { importPulseCsvSnapshot } from "../import-pulse-csv-snapshot"
 const VALID_CSV_HEADER =
   "Product Name,Set,Card Number,Material,Promo Info,Rarity,Graded By,Grade,Item Type,Product ID,Quantity,Avg Cost,Market Price,Sticker Price,Total Cost,Total Market Value,Total Sticker Value,Profit,Margin %,Markup vs Market %"
 const VALID_CSV_ROW =
-  "Gengar,Lost Origin,066/196,Holo,,Rare,,,,card:sv1|066/196|holo|nm,2,1.50,3.00,4.00,3.00,6.00,8.00,5.00,50%"
+  "Gengar,Lost Origin,066/196,Holo,,Rare,,,,card:sv1|066/196|holo|nm,2,1.50,3.00,4.00,3.00,6.00,8.00,5.00,50%,10%"
 
 function csvBuffer(rows: string[] = [VALID_CSV_ROW]): Buffer {
   return Buffer.from([VALID_CSV_HEADER, ...rows].join("\n"), "utf-8")

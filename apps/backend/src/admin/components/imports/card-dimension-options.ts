@@ -40,6 +40,7 @@ export const SPECIAL_TREATMENT_OPTIONS: DimensionOption[] = [
   { value: "MASTER_BALL", label: "Master Ball" },
   { value: "STARLIGHT_HOLO", label: "Starlight Holo" },
   { value: "COSMOS_HOLO", label: "Cosmos Holo" },
+  { value: "TINSEL_HOLO", label: "Tinsel Holo" },
   { value: "GALAXY_HOLO", label: "Galaxy Holo" },
   { value: "CRACKED_ICE", label: "Cracked Ice" },
   { value: "STAMPED", label: "Stamped" },
