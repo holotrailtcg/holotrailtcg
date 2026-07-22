@@ -250,6 +250,8 @@ export function toSafeInventoryProposalDto(row: Record<string, unknown>) {
     confirmedEbayStoreCategoryId: (row.confirmed_ebay_store_category_id as string | null) ?? null,
     categoryConfirmedAt: row.category_confirmed_at ?? null,
     categoryConfirmedBy: row.category_confirmed_by ?? null,
+    // Stage 1: "does this card require a separate listing?" review intent — see reconciliation/reconcile.ts.
+    requiresSeparateListing: Boolean(row.requires_separate_listing),
   }
 }
 

@@ -1,5 +1,5 @@
 import { canonicalDecimal, weightedAverage } from "../decimal"
-import { aggregateSnapshotEntries, reconcileSnapshots, type SnapshotEntryInput } from "../reconcile"
+import { aggregateSnapshotEntries, groupKey, reconcileSnapshots, type SnapshotEntryInput } from "../reconcile"
 
 const row = (overrides: Partial<SnapshotEntryInput> = {}): SnapshotEntryInput => ({
   providerReference: "product-1", providerReferenceType: "PULSE_PRODUCT_ID", tradingCardVariantId: "tcvar_1",
@@ -19,7 +19,7 @@ describe("snapshot aggregation", () => {
   it("groups duplicate provider IDs, sums quantity, and calculates weighted acquisition cost", () => {
     const grouped = aggregateSnapshotEntries([
       row({ quantity: 1, unitAcquisitionCost: "1.00" }), row({ quantity: 3, unitAcquisitionCost: "2.00" }),
-    ]).get("variant:tcvar_1|sep=0")!
+    ]).get("variant:tcvar_1|sep=0|split=")!
     expect(grouped.quantity).toBe(4)
     expect(grouped.unitAcquisitionCost).toBe("1.75")
     expect(grouped.duplicateRowCount).toBe(2)
@@ -35,8 +35,8 @@ describe("snapshot aggregation", () => {
     // groups, never one merged "unresolved" bucket with summed quantity across identities.
     const grouped = aggregateSnapshotEntries([row({ tradingCardVariantId: "tcvar_1" }), row({ tradingCardVariantId: "tcvar_2" })])
     expect(grouped.size).toBe(2)
-    expect(grouped.get("variant:tcvar_1|sep=0")!.quantity).toBe(1)
-    expect(grouped.get("variant:tcvar_2|sep=0")!.quantity).toBe(1)
+    expect(grouped.get("variant:tcvar_1|sep=0|split=")!.quantity).toBe(1)
+    expect(grouped.get("variant:tcvar_2|sep=0|split=")!.quantity).toBe(1)
     expect([...grouped.values()].every((entry) => entry.unresolvedReason === null)).toBe(true)
   })
 
@@ -58,15 +58,39 @@ describe("snapshot aggregation", () => {
       row({ tradingCardVariantId: "tcvar_1", requiresSeparateListing: true }),
     ])
     expect(grouped.size).toBe(2)
-    expect(grouped.get("variant:tcvar_1|sep=0")!.quantity).toBe(1)
-    expect(grouped.get("variant:tcvar_1|sep=1")!.quantity).toBe(1)
+    expect(grouped.get("variant:tcvar_1|sep=0|split=")!.quantity).toBe(1)
+    expect(grouped.get("variant:tcvar_1|sep=1|split=")!.quantity).toBe(1)
   })
 
   it("aggregates a large duplicate group without losing rows", () => {
     const entries = Array.from({ length: 10_000 }, () => row())
-    const grouped = aggregateSnapshotEntries(entries).get("variant:tcvar_1|sep=0")!
+    const grouped = aggregateSnapshotEntries(entries).get("variant:tcvar_1|sep=0|split=")!
     expect(grouped.quantity).toBe(10_000)
     expect(grouped.duplicateRowCount).toBe(10_000)
+  })
+
+  it("splits a reviewer-tagged subset into its own group via splitGroupKey, never merging split and unsplit rows", () => {
+    const grouped = aggregateSnapshotEntries([
+      row({ splitGroupKey: null }),
+      row({ splitGroupKey: null }),
+      row({ splitGroupKey: "abc123" }),
+    ])
+    expect(grouped.size).toBe(2)
+    expect(grouped.get("variant:tcvar_1|sep=0|split=")!.quantity).toBe(2)
+    expect(grouped.get("variant:tcvar_1|sep=0|split=abc123")!.quantity).toBe(1)
+  })
+
+  it("keeps rows tagged with different split tokens apart from each other too", () => {
+    const grouped = aggregateSnapshotEntries([row({ splitGroupKey: "token-a" }), row({ splitGroupKey: "token-b" })])
+    expect(grouped.size).toBe(2)
+  })
+})
+
+describe("groupKey (exported for split-workflow reuse)", () => {
+  it("computes the identical key aggregateSnapshotEntries would bucket the same entry under", () => {
+    const entry = row({ splitGroupKey: "tok" })
+    expect(groupKey(entry)).toBe("variant:tcvar_1|sep=0|split=tok")
+    expect([...aggregateSnapshotEntries([entry]).keys()]).toEqual([groupKey(entry)])
   })
 })
 

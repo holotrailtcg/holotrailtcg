@@ -25,6 +25,13 @@ export interface SnapshotEntryInput {
   specialTreatmentCandidate?: string | null
   /** "Does this card require a separate listing?" — always part of grouping identity; true and false must never merge. */
   requiresSeparateListing?: boolean
+  /**
+   * Reviewer-assigned split discriminator (`InventorySnapshotEntryOverride.split_group_key`).
+   * Null for every row until a reviewer explicitly splits a proposal — rows sharing a
+   * non-null token always group together and never merge with rows carrying a
+   * different token (or none), even if every other identity field matches.
+   */
+  splitGroupKey?: string | null
 }
 
 export interface GroupedSnapshotEntry {
@@ -78,11 +85,11 @@ export interface ReconciliationProposal {
  * variant is resolved. Different `requiresSeparateListing` values never
  * merge, regardless of variant resolution.
  */
-function groupKey(entry: SnapshotEntryInput): string {
+export function groupKey(entry: SnapshotEntryInput): string {
   const identity = entry.tradingCardVariantId
     ? `variant:${entry.tradingCardVariantId}`
     : `unmatched:${entry.providerReferenceType}:${entry.providerReference}:${entry.conditionCandidate ?? ""}:${entry.finishCandidate ?? ""}:${entry.specialTreatmentCandidate ?? ""}`
-  return `${identity}|sep=${entry.requiresSeparateListing ? "1" : "0"}`
+  return `${identity}|sep=${entry.requiresSeparateListing ? "1" : "0"}|split=${entry.splitGroupKey ?? ""}`
 }
 
 export function aggregateSnapshotEntries(entries: SnapshotEntryInput[]): Map<string, GroupedSnapshotEntry> {
