@@ -1214,6 +1214,93 @@ class TradingCardInventoryModuleService extends MedusaService({
     )
   }
 
+  /**
+   * Stage 1 alternative-match selection: one immutable entry plus its
+   * current effective match state, snapshot id/status, and whether any
+   * APPLIED proposal in this snapshot already covers its current variant —
+   * everything `selectAlternativeTcgdexMatch` needs to validate and apply
+   * a rematch safely.
+   */
+  async retrieveSnapshotEntryForRematch(entryId: string): Promise<Record<string, unknown> | null> {
+    idSchema.parse(entryId)
+    const [row] = await this.manager_.execute<Record<string, unknown>>(
+      `select e.*, s.status as snapshot_status,
+              coalesce(m.trading_card_variant_id, e.trading_card_variant_id) as effective_trading_card_variant_id,
+              exists (
+                select 1 from trading_card_inventory_proposal p
+                where p.inventory_snapshot_id = e.inventory_snapshot_id and p.deleted_at is null
+                  and p.review_status = 'APPLIED'
+                  and p.trading_card_variant_id = coalesce(m.trading_card_variant_id, e.trading_card_variant_id)
+              ) as current_variant_applied
+       from trading_card_inventory_snapshot_entry e
+       inner join trading_card_inventory_snapshot s on s.id = e.inventory_snapshot_id
+       left join trading_card_inventory_snapshot_entry_match m on m.snapshot_entry_id = e.id and m.deleted_at is null
+       where e.id = ? and e.deleted_at is null`,
+      [entryId],
+    )
+    return row ?? null
+  }
+
+  /**
+   * Stage 1 alternative-match selection: atomically locks the entry (so two
+   * concurrent rematch requests for the same row serialise rather than
+   * racing), re-validates that its current match hasn't already been
+   * applied to stock, and writes the new match — all inside one
+   * transaction, so the applied-status check can never go stale between
+   * check and write. Delegates the actual write/reconciliation-refresh to
+   * `recordSnapshotEntryMatches` (MikroORM nests this call as a savepoint
+   * within the already-open transaction rather than opening a second one).
+   */
+  async selectAlternativeMatchForEntry(input: AuditContext & {
+    snapshotEntryId: string; tradingCardVariantId: string; priceLockedVariantIds?: string[]
+  }): Promise<{ previousVariantId: string | null; snapshotId: string }> {
+    idSchema.parse(input.snapshotEntryId)
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    return this.manager_.transactional(async (manager) => {
+      const [entry] = await manager.execute<Record<string, unknown>>(
+        `select e.*, s.status as snapshot_status,
+                coalesce(m.trading_card_variant_id, e.trading_card_variant_id) as effective_trading_card_variant_id
+         from trading_card_inventory_snapshot_entry e
+         inner join trading_card_inventory_snapshot s on s.id = e.inventory_snapshot_id
+         left join trading_card_inventory_snapshot_entry_match m on m.snapshot_entry_id = e.id and m.deleted_at is null
+         where e.id = ? and e.deleted_at is null for update`,
+        [input.snapshotEntryId],
+      )
+      if (!entry) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Snapshot entry not found")
+      await this.lockAndAssertSnapshotNotDiscarded(manager, entry.inventory_snapshot_id as string)
+
+      const previousVariantId = (entry.effective_trading_card_variant_id as string | null) ?? null
+      if (previousVariantId) {
+        const [applied] = await manager.execute<{ exists: boolean }>(
+          `select exists(
+             select 1 from trading_card_inventory_proposal
+             where inventory_snapshot_id = ? and deleted_at is null and review_status = 'APPLIED' and trading_card_variant_id = ?
+           ) as exists`,
+          [entry.inventory_snapshot_id, previousVariantId],
+        )
+        if (applied.exists) {
+          throw new MedusaError(
+            MedusaError.Types.NOT_ALLOWED,
+            "This row's current match has already been applied to stock and cannot be rematched",
+          )
+        }
+      }
+
+      await this.recordSnapshotEntryMatches({
+        actor: input.actor, source: input.source, reason: input.reason,
+        inventorySnapshotId: entry.inventory_snapshot_id as string,
+        entries: [{
+          snapshotEntryId: input.snapshotEntryId, matchingStatus: INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS.MATCHED,
+          tradingCardVariantId: input.tradingCardVariantId, matchedVia: INVENTORY_SNAPSHOT_ENTRY_MATCHED_VIA.MANUAL, diagnostics: [],
+        }],
+        refreshPendingProposals: entry.snapshot_status === INVENTORY_SNAPSHOT_STATUS.PENDING_REVIEW,
+        priceLockedVariantIds: input.priceLockedVariantIds ?? [],
+      })
+
+      return { previousVariantId, snapshotId: entry.inventory_snapshot_id as string }
+    })
+  }
+
   /** Stage 5B.1: paginated, filterable entry listing for the Admin preview screen. */
   async listSnapshotEntriesForAdmin(
     snapshotId: string,

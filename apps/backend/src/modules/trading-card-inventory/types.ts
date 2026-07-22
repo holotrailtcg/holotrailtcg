@@ -227,6 +227,8 @@ export const INVENTORY_AUDIT_ACTION = {
   PROPOSAL_CATEGORY_PROPOSED: "PROPOSAL_CATEGORY_PROPOSED",
   PROPOSAL_CATEGORY_CONFIRMED: "PROPOSAL_CATEGORY_CONFIRMED",
   PROPOSAL_SPLIT: "PROPOSAL_SPLIT",
+  /** Stage 1: a reviewer selected an alternative TCGdex card for a snapshot row that was matched (or unmatched) to the wrong card. */
+  ENTRY_MATCH_REMATCHED: "ENTRY_MATCH_REMATCHED",
 } as const
 export type InventoryAuditAction = (typeof INVENTORY_AUDIT_ACTION)[keyof typeof INVENTORY_AUDIT_ACTION]
 

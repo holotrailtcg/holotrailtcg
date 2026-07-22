@@ -27,6 +27,8 @@ import { runOrphanReconciliation, type OrphanReconciliationCounts } from "./imag
 import type { TcgDexMatchInput, TcgDexMatchResult } from "./tcgdex/matching-types"
 import type { TcgDexLookupDependency } from "./tcgdex/matching"
 import { matchTcgdexCard } from "./tcgdex/matching"
+import { searchTcgdexSetCards } from "./tcgdex/search"
+import type { TcgDexSetDetail } from "./tcgdex/types"
 import { auditContextSchema, canonicalSnapshot, diagnosticFingerprint, enrichmentSnapshotSchema, providerIdentifierSchema, pulseProviderIdentifierSchema, snapshotFingerprint, tcgdexMatchResultSchema, tradingCardIdSchema } from "./tcgdex/persistence-validation"
 import {
   listTcgdexAttempts,
@@ -59,6 +61,17 @@ export interface UpdateTradingCardIdentityInput extends AuditContext {
   searchName?: string
   slug?: string | null
   cardNumber?: string
+  /**
+   * Optional canonical metadata, never part of saleable identity/grouping.
+   * When provided alongside `illustratorConfirmed: true`, this is treated
+   * as an explicit reviewer correction and becomes protected — a later call
+   * with `illustratorConfirmed` false/omitted (e.g. an automatic TCGdex
+   * re-sync) is silently ignored rather than overwriting it. When the
+   * current value is not yet confirmed, any supplied value (confirmed or
+   * not) is applied.
+   */
+  illustrator?: string | null
+  illustratorConfirmed?: boolean
 }
 
 export interface UpdateVariantConditionInput extends AuditContext {
@@ -254,11 +267,16 @@ class TradingCardsModuleService extends MedusaService({
   async updateTradingCardIdentity(input: UpdateTradingCardIdentityInput) {
     return this.manager_.transactional(async (manager) => {
       const [current] = await manager.execute<Record<string, unknown>>(
-        `select id, card_set_id, name, search_name, slug, card_number, card_number_normalised
+        `select id, card_set_id, name, search_name, slug, card_number, card_number_normalised, illustrator, illustrator_confirmed
          from trading_card where id = ? and deleted_at is null for update`, [input.id]
       )
       if (!current) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Trading card not found")
       const numbers = input.cardNumber === undefined ? null : cardNumberForms(input.cardNumber)
+      // A manually-confirmed illustrator is protected: an unconfirmed incoming
+      // value (e.g. an automatic TCGdex re-sync) is silently ignored rather
+      // than overwriting the reviewer's correction. Any value is accepted
+      // while the current one is not yet confirmed.
+      const illustratorLocked = Boolean(current.illustrator_confirmed) && !input.illustratorConfirmed
       const next = {
         card_set_id: input.cardSetId ?? current.card_set_id,
         name: input.name ?? current.name,
@@ -266,11 +284,14 @@ class TradingCardsModuleService extends MedusaService({
         slug: input.slug === undefined ? current.slug : input.slug,
         card_number: numbers?.original ?? current.card_number,
         card_number_normalised: numbers?.normalised ?? current.card_number_normalised,
+        illustrator: input.illustrator === undefined || illustratorLocked ? current.illustrator : input.illustrator,
+        illustrator_confirmed: illustratorLocked ? current.illustrator_confirmed : Boolean(input.illustratorConfirmed),
       }
       await manager.execute(
         `update trading_card set card_set_id = ?, name = ?, search_name = ?, slug = ?,
-         card_number = ?, card_number_normalised = ?, updated_at = now() where id = ?`,
-        [next.card_set_id, next.name, next.search_name, next.slug, next.card_number, next.card_number_normalised, input.id]
+         card_number = ?, card_number_normalised = ?, illustrator = ?, illustrator_confirmed = ?, updated_at = now() where id = ?`,
+        [next.card_set_id, next.name, next.search_name, next.slug, next.card_number, next.card_number_normalised,
+          next.illustrator, next.illustrator_confirmed, input.id]
       )
       await this.writeAudit(manager, {
         ...input, entityType: AUDIT_ENTITY_TYPE.TRADING_CARD, entityId: input.id,
@@ -458,6 +479,57 @@ class TradingCardsModuleService extends MedusaService({
       [input.setCodeCandidate, input.language, ...cardNumberCandidates, input.condition, input.finish, input.specialTreatment],
     )
     return rows.map((row) => ({ id: row.id, tradingCardId: row.trading_card_id }))
+  }
+
+  /**
+   * Stage 1 alternative-match search: fetches one TCGdex set and returns
+   * its cards filtered by an optional name/local-number query, using only
+   * the already-verified `getSetById` client call (see `tcgdex/search.ts`
+   * for why this avoids inventing an unverified free-text search endpoint).
+   */
+  async searchTcgdexCardsInSet(input: {
+    language: CardLanguage; tcgdexSetId: string; query?: string | null
+    client: { getSetById(language: CardLanguage, setId: string): Promise<TcgDexSetDetail> }
+  }) {
+    const setDetail = await input.client.getSetById(input.language, input.tcgdexSetId)
+    return searchTcgdexSetCards(setDetail, input.query)
+  }
+
+  /**
+   * Stage 1 alternative-match selection: given a TCGdex card identity a
+   * reviewer picked, finds the existing `TradingCardVariant` for that exact
+   * card at the *row's own* preserved condition/finish/special-treatment —
+   * never the reviewer's free choice, and never a newly-created variant.
+   * Returns `null` when no such card or variant exists yet, so the caller
+   * can direct the reviewer to manual card creation instead of silently
+   * fabricating one here (that belongs to the manual-correction workflow,
+   * which already implements the create-or-reuse chain safely).
+   */
+  /** Stage 1 alternative-match audit: the trusted TCGdex card identifier currently recorded for a variant's trading card, if any — used only to record the "old identifier" side of a rematch audit entry. */
+  async findTrustedTcgdexIdentifierForVariant(tradingCardVariantId: string): Promise<string | null> {
+    const [row] = await this.manager_.execute<{ provider_identifier: string }>(
+      `select ref.provider_identifier from trading_card_external_reference ref
+       inner join trading_card_variant tcv on tcv.trading_card_id = ref.trading_card_id and tcv.deleted_at is null
+       where tcv.id = ? and ref.provider = 'TCGDEX' and ref.provenance = 'TRUSTED_MANUAL' and ref.deleted_at is null limit 1`,
+      [tradingCardVariantId],
+    )
+    return row?.provider_identifier ?? null
+  }
+
+  async findExistingVariantForTcgdexCard(input: {
+    tcgdexCardId: string; condition: string; finish: string; specialTreatment: string
+  }): Promise<{ tradingCardId: string; tradingCardVariantId: string } | null> {
+    const [row] = await this.manager_.execute<{ trading_card_id: string; trading_card_variant_id: string }>(
+      `select tc.id as trading_card_id, tcv.id as trading_card_variant_id
+       from trading_card_external_reference ref
+       inner join trading_card tc on tc.id = ref.trading_card_id and tc.deleted_at is null
+       inner join trading_card_variant tcv on tcv.trading_card_id = tc.id and tcv.deleted_at is null
+       where ref.provider = 'TCGDEX' and ref.provider_identifier = ? and ref.trading_card_id is not null and ref.deleted_at is null
+         and tcv.condition = ? and tcv.finish = ? and tcv.special_treatment = ?
+       limit 1`,
+      [input.tcgdexCardId, input.condition, input.finish, input.specialTreatment],
+    )
+    return row ? { tradingCardId: row.trading_card_id, tradingCardVariantId: row.trading_card_variant_id } : null
   }
 
   private async transitionEnrichment(input: AuditContext & { proposalId: string; target: "APPROVED" | "REJECTED" }) {

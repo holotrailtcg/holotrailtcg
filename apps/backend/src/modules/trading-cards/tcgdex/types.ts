@@ -38,8 +38,16 @@ export type TcgDexSetSummary = {
   name: string
 }
 
+export type TcgDexSetCardSummary = {
+  id: string
+  localId: string
+  name: string
+  image?: string
+}
+
 export type TcgDexSetDetail = TcgDexSet & {
   serie: TcgDexSetSummary
+  cards?: TcgDexSetCardSummary[]
 }
 
 export type TcgDexSet = {

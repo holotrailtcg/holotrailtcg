@@ -33,7 +33,26 @@ const boosterSchema = z.object({
 
 export const tcgDexSetSummarySchema = z.object({ id: nonEmptyString, name: nonEmptyString })
 export const tcgDexSetListSchema = z.array(tcgDexSetSummarySchema)
-export const tcgDexSetDetailSchema = setSchema.extend({ serie: tcgDexSetSummarySchema })
+/**
+ * Stage 1 alternative-match search: TCGdex's set-detail response also lists
+ * every card in the set (id, local id, name, artwork) — real, documented
+ * TCGdex v2 behaviour, not a new endpoint. Capturing it here lets a
+ * reviewer search for a distinguishing card by name within a specific set
+ * using only the already-verified `getSetById` call, rather than adding an
+ * unverified free-text search endpoint this client has never exercised.
+ * Optional/bounded so an older or unusual set missing this field never
+ * breaks parsing.
+ */
+const tcgDexSetCardSummarySchema = z.object({
+  id: nonEmptyString,
+  localId: z.union([nonEmptyString, z.number().int().nonnegative()]).transform(String),
+  name: nonEmptyString,
+  image: z.string().url().optional(),
+})
+export const tcgDexSetDetailSchema = setSchema.extend({
+  serie: tcgDexSetSummarySchema,
+  cards: z.array(tcgDexSetCardSummarySchema).optional(),
+})
 
 export const tcgDexCardSchema = z.object({
   category: nonEmptyString,

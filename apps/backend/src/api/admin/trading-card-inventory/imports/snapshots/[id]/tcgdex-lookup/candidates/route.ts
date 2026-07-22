@@ -37,13 +37,14 @@ export async function GET(req: AuthenticatedMedusaRequest, res: MedusaResponse) 
       provider: "PULSE" as never, language, tcgdexSetId: candidateKey.tcgdexSetId, cardNumber: candidateKey.cardNumber,
     }))
     if (!row || row.match_outcome !== "MATCHED" || row.review_status !== "PENDING") continue
-    const enrichment = row.enrichment as { name: string; referenceArtworkUrl?: string; providerRarity?: string } | null
+    const enrichment = row.enrichment as { name: string; referenceArtworkUrl?: string; providerRarity?: string; illustrator?: string } | null
     if (!enrichment) continue
     candidates.push({
       id: row.id,
       name: enrichment.name,
       referenceArtworkUrl: enrichment.referenceArtworkUrl ?? null,
       providerRarity: enrichment.providerRarity ?? null,
+      illustrator: enrichment.illustrator ?? null,
       tcgdexSetId: row.tcgdex_set_id,
       cardNumber: row.card_number,
       rowCount: rowCountByKey.get(`${candidateKey.tcgdexSetId}::${candidateKey.cardNumber}`) ?? 0,
