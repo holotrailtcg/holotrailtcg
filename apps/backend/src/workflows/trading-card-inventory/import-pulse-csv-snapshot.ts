@@ -66,18 +66,27 @@ interface PhysicalCsvRow { lineNumber: number; cells: string[] }
 interface ValidatedFile { contentHash: string; headers: string[]; dataRows: PhysicalCsvRow[] }
 
 /**
- * Parses with `skip_empty_lines: false` and `relax_column_count: true` so that
- * every physical line (header, blank, or data) becomes exactly one record at
- * its own array index — giving us the true one-based physical file line
- * number as `index + 1` for every row, including blank lines and quoted
- * multiline fields (csv-parse counts a multiline record's *start* line as its
- * own record index). Column-count enforcement is done per-row downstream
- * (`row-parser.ts`) rather than here, so a single malformed row produces a
- * clear, line-numbered validation error instead of aborting the whole file.
+ * Parses with `skip_empty_lines: false`, `relax_column_count: true` and
+ * `info: true` so each record is paired with csv-parse's own cumulative
+ * physical-line count (`info.lines`). A quoted field spanning several
+ * physical lines is still exactly one *record*, but consumes several
+ * *lines* — `index + 1` would silently under-count every row after it, so
+ * the true one-based start line of each record is derived from the
+ * previous record's cumulative line count instead. Column-count
+ * enforcement is done per-row downstream (`row-parser.ts`) rather than
+ * here, so a single malformed row produces a clear, line-numbered
+ * validation error instead of aborting the whole file.
  */
 function parsePhysicalCsvRows(decodedText: string): PhysicalCsvRow[] {
-  const records = parse(decodedText, { skip_empty_lines: false, relax_column_count: true, bom: false }) as string[][]
-  return records.map((cells, index) => ({ lineNumber: index + 1, cells }))
+  const entries = parse(decodedText, {
+    skip_empty_lines: false, relax_column_count: true, bom: false, info: true,
+  }) as { record: string[]; info: { lines: number } }[]
+  let linesConsumed = 0
+  return entries.map(({ record, info }) => {
+    const lineNumber = linesConsumed + 1
+    linesConsumed = info.lines
+    return { lineNumber, cells: record }
+  })
 }
 
 function isBlankCells(cells: string[]): boolean {
@@ -135,7 +144,13 @@ async function resolveInventorySource(
     const source = await inventory.retrieveInventorySource(input.inventorySourceId).catch(() => null)
     if (!source) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory source not found")
     if (source.status === INVENTORY_SOURCE_STATUS.ARCHIVED) throw new SourceArchivedError()
-    return { inventorySourceId: source.id as string, sourceLanguage: (source.language as string | null) ?? null }
+    const sourceLanguage = (source.language as string | null) ?? null
+    if (!sourceLanguage) {
+      throw new ValidationFailedError(
+        "This inventory source has no card language configured. Set a language on the source before importing.",
+      )
+    }
+    return { inventorySourceId: source.id as string, sourceLanguage }
   }
   if (!input.newSourceDisplayName || !input.newSourceProvider) {
     throw new MedusaError(MedusaError.Types.INVALID_DATA, "Either inventorySourceId or newSourceDisplayName and newSourceProvider is required")
@@ -272,6 +287,9 @@ export async function importPulseCsvSnapshot(
       sourceLanguage = resolved.sourceLanguage
     }
   } catch (error) {
+    if (error instanceof ValidationFailedError) {
+      return { kind: "VALIDATION_FAILED", reason: error.message, diagnostics: [] }
+    }
     if (error instanceof SourceArchivedError || (MedusaError.isMedusaError(error) && error.type === MedusaError.Types.NOT_ALLOWED)) {
       return { kind: "SOURCE_ARCHIVED", inventorySourceId: input.inventorySourceId }
     }

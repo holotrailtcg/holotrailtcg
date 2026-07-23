@@ -105,6 +105,9 @@ export const uploadCsvBodySchema = z.object({
 }).strict().refine(
   (value) => Boolean(value.inventorySourceId) !== Boolean(value.newSourceDisplayName && value.newSourceProvider),
   { message: "Provide either inventorySourceId or newSourceDisplayName together with newSourceProvider, not both or neither" },
+).refine(
+  (value) => Boolean(value.inventorySourceId) || Boolean(value.newSourceLanguage),
+  { message: "A card language (EN, JA or ZH) must be explicitly selected when creating a new inventory source" },
 )
 
 export const snapshotEntriesQuerySchema = z.object({
