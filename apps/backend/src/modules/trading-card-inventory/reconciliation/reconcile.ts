@@ -23,6 +23,16 @@ export interface SnapshotEntryInput {
   conditionCandidate?: string | null
   finishCandidate?: string | null
   specialTreatmentCandidate?: string | null
+  /**
+   * The owning inventory source's card language (EN/JA/ZH). Every entry
+   * within one snapshot always shares the same source and therefore the
+   * same language, but this is included directly and structurally in the
+   * `unmatched:` grouping identity below (rather than relied on only via
+   * that per-snapshot invariant) so the key itself can never merge rows
+   * across a language boundary, even under a future change that lets one
+   * snapshot span more than one source/language.
+   */
+  language?: string | null
   /** "Does this card require a separate listing?" — always part of grouping identity; true and false must never merge. */
   requiresSeparateListing?: boolean
   /**
@@ -88,7 +98,7 @@ export interface ReconciliationProposal {
 export function groupKey(entry: SnapshotEntryInput): string {
   const identity = entry.tradingCardVariantId
     ? `variant:${entry.tradingCardVariantId}`
-    : `unmatched:${entry.providerReferenceType}:${entry.providerReference}:${entry.conditionCandidate ?? ""}:${entry.finishCandidate ?? ""}:${entry.specialTreatmentCandidate ?? ""}`
+    : `unmatched:${entry.providerReferenceType}:${entry.providerReference}:${entry.conditionCandidate ?? ""}:${entry.finishCandidate ?? ""}:${entry.specialTreatmentCandidate ?? ""}:${entry.language ?? ""}`
   return `${identity}|sep=${entry.requiresSeparateListing ? "1" : "0"}|split=${entry.splitGroupKey ?? ""}`
 }
 

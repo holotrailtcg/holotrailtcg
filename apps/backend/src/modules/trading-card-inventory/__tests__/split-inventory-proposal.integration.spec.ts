@@ -57,14 +57,12 @@ async function snapshotFixture(sourceId: string) {
 
 /**
  * Two entries sharing a variant (so they'd naturally group together), plus a
- * PENDING proposal covering both. `previousQuantity` defaults to a *nonzero*
- * baseline (2, matching the current total) specifically to catch the
- * previous-quantity-allocation bug: a split must PROPORTIONALLY divide this
- * baseline between the remaining and moved sides (never leave it wholly on
- * one side), so `remaining.previous_quantity + moved.previous_quantity`
- * always equals the original.
+ * PENDING proposal covering both. `previousQuantity` defaults to 0
+ * (NEW_HOLDING) — the only baseline a split is allowed to touch in Stage 1
+ * (see the "rejects splitting a proposal with a nonzero previous quantity"
+ * test below); pass a nonzero value explicitly to exercise that rejection.
  */
-async function twoEntryGroupFixture(sourceId: string, previousQuantity = 2) {
+async function twoEntryGroupFixture(sourceId: string, previousQuantity = 0) {
   const snapshot = await snapshotFixture(sourceId)
   const variantId = `tcvar_split_${suffix()}`
   const entryIds = [`tcisentry_split_a_${suffix()}`, `tcisentry_split_b_${suffix()}`]
@@ -162,25 +160,30 @@ describe("splitInventoryProposal", () => {
     })).rejects.toThrow(/proper|subset/)
   })
 
-  it("proportionally allocates a nonzero previous_quantity baseline across both sides after a split", async () => {
+  it("rejects splitting a proposal with a nonzero previous quantity", async () => {
+    // A nonzero previous_quantity describes real, already-known physical
+    // stock with no per-unit provenance a Pulse CSV row could carry — Stage 1
+    // refuses to invent which physical copies now belong to which side of a
+    // split (see the code comment on this guard in `splitInventoryProposal`).
+    // An earlier remediation attempt proportionally allocated this baseline
+    // instead; that let two independently-applied sibling proposals both
+    // believe they safely represented part of one already-counted holding,
+    // which neither could actually prove.
     const source = await sourceFixture()
     const { proposal, entryIds } = await twoEntryGroupFixture(source.id, 2)
 
-    const result = await inventory.splitInventoryProposal({
+    await expect(inventory.splitInventoryProposal({
       proposalId: proposal.id, sourceEntryIds: [entryIds[0]], actor: "reviewer-1", source: "MANUAL",
-    })
+    })).rejects.toThrow(/nonzero previous quantity/)
 
+    // No mutation: the original proposal and its rows are untouched.
     const original = await inventory.retrieveInventoryProposal(proposal.id)
-    const created = await inventory.retrieveInventoryProposal(result.newProposalId)
-
-    // 1 row stays behind, 1 row moves, out of an even 2-unit baseline — each side gets 1.
-    expect(original.previous_quantity).toBe(1)
-    expect(created.previous_quantity).toBe(1)
-    expect(original.previous_quantity + created.previous_quantity).toBe(2)
-    expect(original.quantity_delta).toBe(original.proposed_quantity - original.previous_quantity)
-    expect(created.quantity_delta).toBe(created.proposed_quantity - created.previous_quantity)
-    // Neither side is misleadingly reported as a brand-new holding when the baseline was nonzero.
-    expect(created.change_kind).not.toBe("NEW_HOLDING")
+    expect(original.previous_quantity).toBe(2)
+    expect(original.proposed_quantity).toBe(2)
+    const [{ count }] = (await pgConnection.raw(
+      `select count(*)::int as count from trading_card_inventory_proposal where inventory_source_id = ?`, [source.id],
+    )).rows
+    expect(count).toBe(1)
   })
 
   it("rejects an empty selection", async () => {

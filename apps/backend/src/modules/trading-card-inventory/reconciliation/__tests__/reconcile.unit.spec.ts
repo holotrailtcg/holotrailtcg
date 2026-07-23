@@ -92,6 +92,28 @@ describe("groupKey (exported for split-workflow reuse)", () => {
     expect(groupKey(entry)).toBe("variant:tcvar_1|sep=0|split=tok")
     expect([...aggregateSnapshotEntries([entry]).keys()]).toEqual([groupKey(entry)])
   })
+
+  it("includes language structurally in the unmatched grouping key — two otherwise-identical unmatched rows in different languages never merge", () => {
+    // A resolved tradingCardVariantId already fully encodes language (a
+    // Medusa variant IS the saleable identity), so this only matters for the
+    // `unmatched:` branch, which still needs its own explicit language
+    // component now that grouping keys are compared across the codebase
+    // wherever `groupKey` is called directly (not just via aggregateSnapshotEntries).
+    const enEntry = row({ tradingCardVariantId: null, language: "EN" })
+    const jaEntry = row({ tradingCardVariantId: null, language: "JA" })
+    expect(groupKey(enEntry)).not.toBe(groupKey(jaEntry))
+
+    const grouped = aggregateSnapshotEntries([enEntry, jaEntry])
+    expect(grouped.size).toBe(2)
+    expect([...grouped.values()].every((entry) => entry.quantity === 1)).toBe(true)
+  })
+
+  it("still merges two unmatched rows with the same language and every other identity field equal", () => {
+    const a = row({ tradingCardVariantId: null, language: "EN" })
+    const b = row({ tradingCardVariantId: null, language: "EN" })
+    expect(groupKey(a)).toBe(groupKey(b))
+    expect(aggregateSnapshotEntries([a, b]).size).toBe(1)
+  })
 })
 
 describe("snapshot comparison", () => {

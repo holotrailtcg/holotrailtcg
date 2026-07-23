@@ -51,8 +51,13 @@ async function snapshotFixture(sourceId: string) {
   return snapshot
 }
 
-/** `previousQuantity` defaults nonzero — see the matching note in split-inventory-proposal's fixture. */
-async function twoEntryGroupFixture(sourceId: string, previousQuantity = 2) {
+/**
+ * `previousQuantity` defaults to 0 (NEW_HOLDING) — the only baseline a
+ * partial-subset override is allowed to touch in Stage 1 (see the
+ * "rejects a partial override with a nonzero previous quantity" test
+ * below); pass a nonzero value explicitly to exercise that rejection.
+ */
+async function twoEntryGroupFixture(sourceId: string, previousQuantity = 0) {
   const snapshot = await snapshotFixture(sourceId)
   const variantId = `tcvar_sep_${suffix()}`
   const entryIds = [`tcisentry_sep_a_${suffix()}`, `tcisentry_sep_b_${suffix()}`]
@@ -113,6 +118,25 @@ describe("setRequiresSeparateListingOverride", () => {
     // asserting they now have distinct reconciliation_key values, which reconcile.ts's groupKey always
     // reproduces deterministically from each entry's (possibly overridden) requiresSeparateListing.
     expect(original.reconciliation_key).not.toBe(created.reconciliation_key)
+  })
+
+  it("rejects a partial override with a nonzero previous quantity", async () => {
+    // Same Stage 1-safe restriction as splitInventoryProposal: a nonzero
+    // previous_quantity has no per-unit provenance a partial override could
+    // safely divide between the unchanged and flipped sides.
+    const source = await sourceFixture()
+    const { proposal, entryIds } = await twoEntryGroupFixture(source.id, 2)
+
+    await expect(inventory.setRequiresSeparateListingOverride({
+      proposalId: proposal.id, sourceEntryIds: [entryIds[0]], requiresSeparateListing: true, actor: "reviewer-1", source: "MANUAL",
+    })).rejects.toThrow(/nonzero previous quantity/)
+
+    const original = await inventory.retrieveInventoryProposal(proposal.id)
+    expect(original.previous_quantity).toBe(2)
+    const [{ count }] = (await pgConnection.raw(
+      `select count(*)::int as count from trading_card_inventory_proposal where inventory_source_id = ?`, [source.id],
+    )).rows
+    expect(count).toBe(1)
   })
 
   it("is idempotent: setting the same value again is a no-op", async () => {
