@@ -70,7 +70,7 @@ const EditIllustratorDialog = ({ tradingCardId, onClose, onSaved }: EditIllustra
 
   return (
     <FocusModal open onOpenChange={(open) => { if (!open) onClose() }}>
-      <FocusModal.Content>
+      <FocusModal.Content className="!bottom-auto !left-1/2 !right-auto !top-1/2 h-auto max-h-[calc(100vh-3rem)] w-[min(28rem,calc(100vw-3rem))] -translate-x-1/2 -translate-y-1/2">
         <FocusModal.Header>
           <Text weight="plus">Correct illustrator</Text>
         </FocusModal.Header>
@@ -111,7 +111,12 @@ const EditIllustratorDialog = ({ tradingCardId, onClose, onSaved }: EditIllustra
                 Reload
               </Button>
             ) : (
-              <Button variant="primary" isLoading={saveMutation.isPending} onClick={() => saveMutation.mutate()}>
+              <Button
+                variant="primary"
+                isLoading={saveMutation.isPending}
+                disabled={!cardQuery.data}
+                onClick={() => saveMutation.mutate()}
+              >
                 Save
               </Button>
             )}

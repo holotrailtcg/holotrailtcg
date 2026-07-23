@@ -148,7 +148,10 @@ export const updateTradingCardIdentityBodySchema = z.object({
   /** Optimistic-concurrency guard — see `updateTradingCardIdentity`'s `expectedUpdatedAt`. */
   expectedUpdatedAt: z.string().datetime({ offset: true }).nullish(),
   reason: z.string().max(500).optional(),
-}).strict()
+}).strict().refine(
+  (body) => !(("illustrator" in body || "illustratorConfirmed" in body) && !body.expectedUpdatedAt),
+  { message: "expectedUpdatedAt is required when changing the illustrator — load the current card state first", path: ["expectedUpdatedAt"] },
+)
 
 export { CARD_GAME, CARD_LANGUAGE }
 

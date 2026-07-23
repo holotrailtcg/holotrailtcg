@@ -4,10 +4,7 @@ import { Migration20260723140000 } from "../migrations/Migration20260723140000"
 /**
  * Stage 1 remediation: the `trading_card_variant_special_treatment_check`
  * constraint never included TINSEL_HOLO even though the TypeScript enum, UI
- * and SKU generation already accepted it (Codex finding #2). NOT RUN this
- * session — no approved, isolated test database connection was available.
- * Run with `npm run test:integration:modules` against the project's
- * approved test database before merging.
+ * and SKU generation already accepted it (Codex finding #2).
  */
 let rootConnection: ReturnType<typeof createPgConnection>
 let pgConnection: ReturnType<typeof createPgConnection>
@@ -29,9 +26,15 @@ const allowedValues = async (): Promise<string[]> => {
     `select pg_get_constraintdef(oid) as definition from pg_constraint
      where conname = 'trading_card_variant_special_treatment_check'`,
   ))
-  const match = /in \(([^)]*)\)/.exec(row?.definition ?? "")
+  const definition: string = row?.definition ?? ""
+  // Postgres renders this constraint as either `IN (...)` or
+  // `= ANY (ARRAY['VALUE'::text, ...])` depending on version, so both forms
+  // must be recognised.
+  const match = /in \(([^)]*)\)/i.exec(definition) ?? /array\[([^\]]*)\]/i.exec(definition)
   if (!match) return []
-  return match[1].split(",").map((value) => value.trim().replace(/^'|'$/g, ""))
+  return match[1]
+    .split(",")
+    .map((value) => value.trim().replace(/::\w+$/, "").replace(/^'|'$/g, ""))
 }
 
 async function fixtureVariantRow(specialTreatment: string) {

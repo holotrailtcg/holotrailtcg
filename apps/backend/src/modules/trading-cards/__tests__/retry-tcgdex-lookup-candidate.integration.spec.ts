@@ -2,6 +2,7 @@ import { MedusaApp } from "@medusajs/framework/modules-sdk"
 import { ContainerRegistrationKeys, createPgConnection } from "@medusajs/framework/utils"
 import { TRADING_CARDS_MODULE } from "../index"
 import { Migration20260723100000 } from "../migrations/Migration20260723100000"
+import { Migration20260723150000 } from "../migrations/Migration20260723150000"
 import { TCGDEX_ERROR_CODE, TcgDexError } from "../tcgdex/errors"
 import type { TcgDexLookupDependency } from "../tcgdex/matching"
 
@@ -51,10 +52,22 @@ function fakeClient(outcomes: Array<{ code: string; card?: unknown; providerErro
 beforeAll(async () => {
   rootConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
   pgConnection = (await rootConnection.transaction()) as never
-  const migration = new Migration20260723100000(undefined as never, undefined as never)
-  await migration.up()
-  for (const query of migration.getQueries()) await pgConnection.raw(String(query))
-  migration.reset()
+  // Only re-applies Migration20260723100000's entity_type widening (the
+  // first two of its four queries) — its own action-list widening is stale
+  // and narrower than Migration20260723150000's, which runs right after and
+  // would otherwise be validated (and rejected) against real
+  // TCGDEX_MANUAL_REFERENCE_REVERTED/etc. audit rows the rematch-compensation
+  // saga may already have committed to this shared test database.
+  const entityTypeMigration = new Migration20260723100000(undefined as never, undefined as never)
+  await entityTypeMigration.up()
+  const entityTypeQueries = entityTypeMigration.getQueries().slice(0, 2)
+  for (const query of entityTypeQueries) await pgConnection.raw(String(query))
+  entityTypeMigration.reset()
+
+  const actionMigration = new Migration20260723150000(undefined as never, undefined as never)
+  await actionMigration.up()
+  for (const query of actionMigration.getQueries()) await pgConnection.raw(String(query))
+  actionMigration.reset()
 
   medusaApp = await MedusaApp({
     modulesConfig: { [TRADING_CARDS_MODULE]: { resolve: "./src/modules/trading-cards" } },

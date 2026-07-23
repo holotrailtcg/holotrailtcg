@@ -1,17 +1,28 @@
 import { MedusaApp } from "@medusajs/framework/modules-sdk"
 import { ContainerRegistrationKeys, createPgConnection } from "@medusajs/framework/utils"
 import { TRADING_CARDS_MODULE } from "../../trading-cards"
+import { Migration20260723150000 } from "../../trading-cards/migrations/Migration20260723150000"
 import { TRADING_CARD_INVENTORY_MODULE } from "../index"
 import { selectAlternativeTcgdexMatchWorkflow } from "../../../workflows/trading-card-inventory/select-alternative-tcgdex-match"
 
 /**
- * Stage 1: alternative TCGdex match selection. NOT RUN this session — no
- * approved, isolated test database connection was available (see the
- * Stage 1 continuation report). Run with `npm run test:integration:modules`
- * against the project's approved test database before merging.
+ * This suite calls the real workflow (`createWorkflow(...).run()`), including
+ * a genuine concurrent-execution test — like
+ * `create-card-from-inventory-row.integration.spec.ts`, that is not
+ * expressible against a single shared, uncommitted outer transaction (which
+ * serialises everything issued through it, and made every test here hang
+ * indefinitely under real concurrency rather than fail fast). This file
+ * therefore commits for real instead of rolling back; every fixture id is
+ * suffixed uniquely per test run, so nothing here collides with other tests'
+ * rows in the shared test database. It does still accumulate real rows
+ * across runs, though, so every inventory source and card set this file
+ * creates is tracked below and torn down in `afterAll` (children before
+ * parents — none of the relevant foreign keys cascade on delete).
  */
+const createdInventorySourceIds: string[] = []
+const createdCardSetIds: string[] = []
+
 let pgConnection: ReturnType<typeof createPgConnection>
-let rootConnection: ReturnType<typeof createPgConnection>
 let medusaApp: Awaited<ReturnType<typeof MedusaApp>>
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let cards: any
@@ -23,8 +34,16 @@ let container: any
 const suffix = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 9)}`
 
 beforeAll(async () => {
-  rootConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
-  pgConnection = (await rootConnection.transaction()) as never
+  pgConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
+  // Re-applies the audit-action widening migration defensively (idempotent
+  // `drop constraint if exists` + `add constraint`) — see the identical
+  // pattern in retry-tcgdex-lookup-candidate.integration.spec.ts. This spec's
+  // compensation tests write TCGDEX_MANUAL_REFERENCE_REVERTED/
+  // COMPENSATION_SKIPPED_STALE/COMPENSATION_FAILED audit actions.
+  const migration = new Migration20260723150000(undefined as never, undefined as never)
+  await migration.up()
+  for (const query of migration.getQueries()) await pgConnection.raw(String(query))
+  migration.reset()
   medusaApp = await MedusaApp({
     modulesConfig: {
       [TRADING_CARD_INVENTORY_MODULE]: { resolve: "./src/modules/trading-card-inventory" },
@@ -40,12 +59,71 @@ beforeAll(async () => {
 }, 60000)
 
 afterAll(async () => {
+  await cleanUpFixtures()
   await medusaApp?.onApplicationPrepareShutdown()
   await medusaApp?.onApplicationShutdown()
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  await (pgConnection as any)?.rollback()
-  await rootConnection?.destroy()
+  await pgConnection?.destroy()
 })
+
+/**
+ * Ordered teardown (children before parents) for every row this file's
+ * fixtures created — this suite commits for real (see the note above), so
+ * nothing here rolls back on its own. None of the relevant foreign keys are
+ * `on delete cascade` (verified against the trading-card-inventory
+ * migrations), so each table is deleted explicitly rather than relying on
+ * cascade from the two tracked parent-id arrays.
+ */
+async function cleanUpFixtures() {
+  if (createdInventorySourceIds.length > 0) {
+    const sourcePlaceholders = createdInventorySourceIds.map(() => "?").join(", ")
+    const snapshotIdsSubquery = `select id from trading_card_inventory_snapshot where inventory_source_id in (${sourcePlaceholders})`
+    await pgConnection.raw(
+      `delete from trading_card_inventory_snapshot_entry_diagnostic where inventory_snapshot_id in (${snapshotIdsSubquery})`,
+      createdInventorySourceIds,
+    )
+    await pgConnection.raw(
+      `delete from trading_card_inventory_snapshot_entry_match where inventory_snapshot_id in (${snapshotIdsSubquery})`,
+      createdInventorySourceIds,
+    )
+    await pgConnection.raw(
+      `delete from trading_card_inventory_snapshot_entry_override where snapshot_entry_id in (
+         select id from trading_card_inventory_snapshot_entry where inventory_snapshot_id in (${snapshotIdsSubquery})
+       )`,
+      createdInventorySourceIds,
+    )
+    await pgConnection.raw(
+      `delete from trading_card_inventory_snapshot_entry where inventory_snapshot_id in (${snapshotIdsSubquery})`,
+      createdInventorySourceIds,
+    )
+    await pgConnection.raw(
+      `delete from trading_card_inventory_proposal where inventory_source_id in (${sourcePlaceholders})`,
+      createdInventorySourceIds,
+    )
+    await pgConnection.raw(
+      `delete from trading_card_inventory_audit_entry where entity_id in (${snapshotIdsSubquery}) or entity_id in (${sourcePlaceholders})`,
+      [...createdInventorySourceIds, ...createdInventorySourceIds],
+    )
+    await pgConnection.raw(`delete from trading_card_inventory_snapshot where inventory_source_id in (${sourcePlaceholders})`, createdInventorySourceIds)
+    await pgConnection.raw(`delete from trading_card_inventory_source where id in (${sourcePlaceholders})`, createdInventorySourceIds)
+  }
+
+  if (createdCardSetIds.length > 0) {
+    const setPlaceholders = createdCardSetIds.map(() => "?").join(", ")
+    const cardIdsSubquery = `select id from trading_card where card_set_id in (${setPlaceholders})`
+    const variantIdsSubquery = `select id from trading_card_variant where trading_card_id in (${cardIdsSubquery})`
+    await pgConnection.raw(
+      `delete from trading_card_audit_entry where entity_id in (${variantIdsSubquery}) or entity_id in (${cardIdsSubquery}) or entity_id in (${setPlaceholders})`,
+      [...createdCardSetIds, ...createdCardSetIds, ...createdCardSetIds],
+    )
+    await pgConnection.raw(
+      `delete from trading_card_external_reference where trading_card_id in (${cardIdsSubquery}) or card_set_id in (${setPlaceholders})`,
+      [...createdCardSetIds, ...createdCardSetIds],
+    )
+    await pgConnection.raw(`delete from trading_card_variant where trading_card_id in (${cardIdsSubquery})`, createdCardSetIds)
+    await pgConnection.raw(`delete from trading_card where card_set_id in (${setPlaceholders})`, createdCardSetIds)
+    await pgConnection.raw(`delete from trading_card_set where id in (${setPlaceholders})`, createdCardSetIds)
+  }
+}
 
 /**
  * `tcgdexSetId` defaults to a fresh, unique value per call rather than a
@@ -64,6 +142,7 @@ async function cardVariantFixture(
   const id = suffix()
   const tcgdexSetId = dimensions.tcgdexSetId ?? `swsh4pt5-${id}`
   const set = await cards.createCardSets({ game: "POKEMON", language: "EN", display_name: `Set ${id}`, provider_set_code: `set_${id}` })
+  createdCardSetIds.push(set.id)
   const card = await cards.createTradingCards({
     card_set_id: set.id, name: `Alt Card ${id}`, search_name: `alt card ${id}`,
     card_number: "001", card_number_normalised: "001", origin: "MANUAL",
@@ -83,6 +162,7 @@ async function cardVariantFixture(
 async function sourceAndSnapshotFixture() {
   const id = suffix()
   const source = await inventory.createInventorySources({ display_name: `Alt Source ${id}`, normalized_name: `alt source ${id}`, provider: "PULSE", language: "EN" })
+  createdInventorySourceIds.push(source.id)
   const [snapshot] = (await pgConnection.raw(
     `insert into trading_card_inventory_snapshot (id, inventory_source_id, status, sequence_number, created_by)
      values (?, ?, 'PENDING_REVIEW', 1, 'test-actor') returning *`,
@@ -105,6 +185,8 @@ async function entryFixture(snapshotId: string, overrides: { quantity?: number; 
   )).rows
   return entry
 }
+
+jest.setTimeout(30000)
 
 describe("selectAlternativeTcgdexMatchWorkflow", () => {
   it("rematches an unmatched row to an existing variant for the chosen TCGdex identity", async () => {
@@ -206,7 +288,7 @@ describe("selectAlternativeTcgdexMatchWorkflow", () => {
     // Entry currently matches `oldVariant`, which already has its own PENDING proposal.
     await pgConnection.raw(
       `insert into trading_card_inventory_snapshot_entry_match (id, snapshot_entry_id, inventory_snapshot_id, matching_status, trading_card_variant_id, matched_via)
-       values (?, ?, ?, 'MATCHED', ?, 'AUTOMATIC')`,
+       values (?, ?, ?, 'MATCHED', ?, 'UNIQUE_ATTRIBUTE_MATCH')`,
       [`tcisematch_${suffix()}`, entry.id, snapshot.id, oldVariant.id],
     )
     const oldProposalId = `tciprop_old_${suffix()}`
@@ -239,12 +321,25 @@ describe("selectAlternativeTcgdexMatchWorkflow", () => {
     expect(newProposal.proposed_quantity).toBe(entry.quantity)
   })
 
-  it("returns NO_EXISTING_CARD_OR_VARIANT rather than creating a variant when none exists yet", async () => {
+  it("returns NO_TRUSTED_SET when the submitted set has no trusted TCGdex set reference at all", async () => {
     const { snapshot } = await sourceAndSnapshotFixture()
     const entry = await entryFixture(snapshot.id)
 
     const { result } = await selectAlternativeTcgdexMatchWorkflow(container).run({
       input: { actor: "reviewer-1", snapshotEntryId: entry.id, tcgdexSetId: "swsh4pt5", tcgdexCardId: `no-such-card-${suffix()}` },
+    })
+
+    expect(result.outcome).toBe("NO_TRUSTED_SET")
+  })
+
+  it("returns NO_EXISTING_CARD_OR_VARIANT when the set is trusted but no matching card/variant exists yet", async () => {
+    const tcgdexCardId = `swsh4pt5-${suffix()}`
+    const { tcgdexSetId } = await cardVariantFixture(tcgdexCardId)
+    const { snapshot } = await sourceAndSnapshotFixture()
+    const entry = await entryFixture(snapshot.id)
+
+    const { result } = await selectAlternativeTcgdexMatchWorkflow(container).run({
+      input: { actor: "reviewer-1", snapshotEntryId: entry.id, tcgdexSetId, tcgdexCardId: `no-such-card-${suffix()}` },
     })
 
     expect(result.outcome).toBe("NO_EXISTING_CARD_OR_VARIANT")
@@ -253,6 +348,14 @@ describe("selectAlternativeTcgdexMatchWorkflow", () => {
   it("rejects rematching a row whose current variant has already been applied to stock", async () => {
     const tcgdexCardId = `swsh4pt5-${suffix()}`
     const { variant, tcgdexSetId } = await cardVariantFixture(tcgdexCardId)
+    // The rematch target must itself resolve to a trusted, existing
+    // card/variant — otherwise `findExistingVariantForTcgdexCard` returns
+    // early with NO_TRUSTED_SET/NO_EXISTING_CARD_OR_VARIANT (no throw) before
+    // the workflow ever reaches the "already applied" check this test exists
+    // to prove. A second, independently trusted fixture card stands in for
+    // "some other real card the reviewer picks".
+    const otherTcgdexCardId = `swsh4pt5-other-${suffix()}`
+    const { tcgdexSetId: otherTcgdexSetId } = await cardVariantFixture(otherTcgdexCardId)
     const { source, snapshot } = await sourceAndSnapshotFixture()
     const entry = await entryFixture(snapshot.id)
     await pgConnection.raw(
@@ -279,9 +382,16 @@ describe("selectAlternativeTcgdexMatchWorkflow", () => {
       ],
     )
 
+    // Not `.rejects.toThrow()`: the workflow engine's transaction
+    // orchestrator round-trips a failed step's error through its own
+    // checkpoint/transaction-state handling before `.run()` rethrows it,
+    // which does not preserve the original error's prototype chain (see the
+    // identical note in create-card-from-inventory-row.integration.spec.ts)
+    // — the rejection reason is Error-*shaped* but not `instanceof Error`,
+    // which `toThrow` requires.
     await expect(selectAlternativeTcgdexMatchWorkflow(container).run({
-      input: { actor: "reviewer-1", snapshotEntryId: entry.id, tcgdexSetId, tcgdexCardId: `other-${suffix()}` },
-    })).rejects.toThrow(/applied/)
+      input: { actor: "reviewer-1", snapshotEntryId: entry.id, tcgdexSetId: otherTcgdexSetId, tcgdexCardId: otherTcgdexCardId },
+    })).rejects.toMatchObject({ message: expect.stringMatching(/applied/) })
   })
 
   it("rejects a submitted tcgdexCardId whose card belongs to a different set than the one submitted", async () => {
@@ -298,7 +408,9 @@ describe("selectAlternativeTcgdexMatchWorkflow", () => {
       input: { actor: "reviewer-1", snapshotEntryId: entry.id, tcgdexSetId: `${tcgdexSetId}-wrong`, tcgdexCardId },
     })
 
-    expect(result.outcome).toBe("NO_EXISTING_CARD_OR_VARIANT")
+    // The submitted (wrong) set was never itself trusted, so this is caught
+    // by the trusted-set check before it ever reaches the card/variant lookup.
+    expect(result.outcome).toBe("NO_TRUSTED_SET")
   })
 
   it("rejects a card whose set language does not match the row's own inventory-source language", async () => {
@@ -308,6 +420,7 @@ describe("selectAlternativeTcgdexMatchWorkflow", () => {
     const tcgdexCardId = `swsh4pt5-${suffix()}`
     const id = suffix()
     const set = await cards.createCardSets({ game: "POKEMON", language: "JA", display_name: `JA Set ${id}`, provider_set_code: `set_ja_${id}` })
+    createdCardSetIds.push(set.id)
     const card = await cards.createTradingCards({
       card_set_id: set.id, name: `JA Card ${id}`, search_name: `ja card ${id}`,
       card_number: "001", card_number_normalised: "001", origin: "MANUAL",
@@ -340,6 +453,7 @@ describe("selectAlternativeTcgdexMatchWorkflow", () => {
     const id = suffix()
     const tcgdexSetId = `swsh4pt5-untrusted-${id}`
     const set = await cards.createCardSets({ game: "POKEMON", language: "EN", display_name: `Untrusted Set ${id}`, provider_set_code: tcgdexSetId })
+    createdCardSetIds.push(set.id)
     const card = await cards.createTradingCards({
       card_set_id: set.id, name: `Untrusted Card ${id}`, search_name: `untrusted card ${id}`,
       card_number: "001", card_number_normalised: "001", origin: "MANUAL",
@@ -358,7 +472,10 @@ describe("selectAlternativeTcgdexMatchWorkflow", () => {
       input: { actor: "reviewer-1", snapshotEntryId: entry.id, tcgdexSetId, tcgdexCardId },
     })
 
-    expect(result.outcome).toBe("NO_EXISTING_CARD_OR_VARIANT")
+    // The set itself has no TRUSTED_MANUAL reference at all (only the card
+    // does), so this is caught by the trusted-set check — the whole point of
+    // this test is that the matching provider_set_code never substitutes for it.
+    expect(result.outcome).toBe("NO_TRUSTED_SET")
   })
 
   it("compensateTrustedTcgdexCardReference reverts a reference to no prior state by soft-deleting it", async () => {
@@ -374,12 +491,12 @@ describe("selectAlternativeTcgdexMatchWorkflow", () => {
     const { variant } = await cardVariantFixture(tcgdexCardId)
 
     const otherCardId = `${tcgdexCardId}-other`
-    const { referenceId, priorState } = await cards.recordTrustedTcgdexCardReferenceWithPriorState({
+    const { referenceId, priorState, writtenVersion } = await cards.recordTrustedTcgdexCardReferenceWithPriorState({
       actor: "reviewer-1", source: "MANUAL", tradingCardId: variant.trading_card_id, providerIdentifier: otherCardId,
     })
     expect(priorState).toBeNull() // otherCardId had never been referenced before
 
-    await cards.compensateTrustedTcgdexCardReference({ actor: "reviewer-1", source: "MANUAL", referenceId, priorState })
+    await cards.compensateTrustedTcgdexCardReference({ actor: "reviewer-1", source: "MANUAL", referenceId, priorState, writtenVersion })
 
     const [reverted] = (await pgConnection.raw(
       `select * from trading_card_external_reference where id = ?`, [referenceId],
@@ -398,18 +515,49 @@ describe("selectAlternativeTcgdexMatchWorkflow", () => {
     })
 
     // A later (about-to-fail) rematch re-records the same identifier against variantB's card instead.
-    const { referenceId, priorState } = await cards.recordTrustedTcgdexCardReferenceWithPriorState({
+    const { referenceId, priorState, writtenVersion } = await cards.recordTrustedTcgdexCardReferenceWithPriorState({
       actor: "reviewer-1", source: "MANUAL", tradingCardId: variantB.trading_card_id, providerIdentifier: sharedCardId,
     })
     expect(priorState).not.toBeNull()
     expect(priorState.trading_card_id).toBe(variantA.trading_card_id)
 
-    await cards.compensateTrustedTcgdexCardReference({ actor: "reviewer-1", source: "MANUAL", referenceId, priorState })
+    await cards.compensateTrustedTcgdexCardReference({ actor: "reviewer-1", source: "MANUAL", referenceId, priorState, writtenVersion })
 
     const [restored] = (await pgConnection.raw(
       `select * from trading_card_external_reference where id = ?`, [referenceId],
     )).rows
     expect(restored.deleted_at).toBeNull()
     expect(restored.trading_card_id).toBe(variantA.trading_card_id) // reverted back to what it pointed at before
+  })
+
+  it("compensateTrustedTcgdexCardReference skips (does not clobber) a row a later legitimate write has already changed", async () => {
+    // Simulates a delayed/retried compensation racing a later, successful
+    // write to the same reference row: the row's version has moved on since
+    // this saga wrote it, so compensation must not blindly restore/delete it.
+    const tcgdexCardId = `swsh4pt5-${suffix()}`
+    const { variant } = await cardVariantFixture(tcgdexCardId)
+    const otherCardId = `${tcgdexCardId}-stale-${suffix()}`
+
+    const { referenceId, priorState, writtenVersion } = await cards.recordTrustedTcgdexCardReferenceWithPriorState({
+      actor: "reviewer-1", source: "MANUAL", tradingCardId: variant.trading_card_id, providerIdentifier: otherCardId,
+    })
+
+    // A later, legitimate write lands on the same row before compensation runs.
+    await pgConnection.raw(
+      `update trading_card_external_reference set raw_payload_note = ?, updated_at = now() where id = ?`,
+      [`later-write-${suffix()}`, referenceId],
+    )
+
+    await cards.compensateTrustedTcgdexCardReference({ actor: "reviewer-1", source: "MANUAL", referenceId, priorState, writtenVersion })
+
+    const [row] = (await pgConnection.raw(
+      `select * from trading_card_external_reference where id = ?`, [referenceId],
+    )).rows
+    expect(row.deleted_at).toBeNull() // compensation must not have soft-deleted the row the later write updated
+    const [skippedAudit] = (await pgConnection.raw(
+      `select * from trading_card_audit_entry where entity_id = ? and action = 'TCGDEX_MANUAL_REFERENCE_COMPENSATION_SKIPPED_STALE'`,
+      [referenceId],
+    )).rows
+    expect(skippedAudit).toBeTruthy()
   })
 })

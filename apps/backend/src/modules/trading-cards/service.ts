@@ -27,8 +27,11 @@ import { runOrphanReconciliation, type OrphanReconciliationCounts } from "./imag
 import type { TcgDexMatchInput, TcgDexMatchResult } from "./tcgdex/matching-types"
 import type { TcgDexLookupDependency } from "./tcgdex/matching"
 import { matchTcgdexCard } from "./tcgdex/matching"
+import { normalizeTcgdexCard } from "./tcgdex/normalization"
 import { searchTcgdexSetCards } from "./tcgdex/search"
-import type { TcgDexSetDetail } from "./tcgdex/types"
+import type { TcgDexSetDetail, TcgDexLanguage } from "./tcgdex/types"
+import { tcgDexCardSchema } from "./tcgdex/schemas"
+import { TCGDEX_ERROR_CODE, TcgDexError } from "./tcgdex/errors"
 import { auditContextSchema, canonicalSnapshot, diagnosticFingerprint, enrichmentSnapshotSchema, providerIdentifierSchema, pulseProviderIdentifierSchema, snapshotFingerprint, tcgdexMatchResultSchema, tradingCardIdSchema } from "./tcgdex/persistence-validation"
 import {
   listTcgdexAttempts,
@@ -342,23 +345,59 @@ class TradingCardsModuleService extends MedusaService({
    * is the safe Stage 1 substitute for a true shared transaction, which
    * this module system does not support.
    */
-  async recordTrustedTcgdexCardReferenceWithPriorState(input: AuditContext & { tradingCardId: string; providerIdentifier: string; language?: CardLanguage | null }): Promise<{ referenceId: string; priorState: Record<string, unknown> | null }> {
+  async recordTrustedTcgdexCardReferenceWithPriorState(input: AuditContext & { tradingCardId: string; providerIdentifier: string; language?: CardLanguage | null }): Promise<{ referenceId: string; priorState: Record<string, unknown> | null; writtenVersion: string }> {
     auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason }); tradingCardIdSchema.parse(input.tradingCardId); providerIdentifierSchema.parse(input.providerIdentifier)
     return this.manager_.transactional(async (manager) => {
+      // Acquire the same transaction-scoped advisory lock `upsertExternalReferenceInTransaction`
+      // takes for this logical key BEFORE reading prior state — otherwise a
+      // concurrent write could land between this read and the serialized
+      // upsert below, and this saga would capture (and could later restore)
+      // a state that was never actually "before" its own write.
+      await manager.execute(
+        `select pg_advisory_xact_lock(hashtextextended(?::text, 0))`,
+        [`TCGDEX:${input.providerIdentifier}`],
+      )
       const [priorState] = await manager.execute<Record<string, unknown>>(
-        `select * from trading_card_external_reference where provider = 'TCGDEX' and provider_identifier = ? and deleted_at is null`,
+        `select *, xmin::text as version from trading_card_external_reference where provider = 'TCGDEX' and provider_identifier = ? and deleted_at is null`,
         [input.providerIdentifier],
       )
-      const reference = await this.upsertExternalReferenceInTransaction(manager, { ...input, tradingCardId: input.tradingCardId, provider: "TCGDEX", providerIdentifier: input.providerIdentifier, provenance: EXTERNAL_REFERENCE_PROVENANCE.TRUSTED_MANUAL }) as Record<string, unknown>
+      const reference = await this.upsertExternalReferenceInTransaction(manager, { ...input, tradingCardId: input.tradingCardId, provider: "TCGDEX", providerIdentifier: input.providerIdentifier, provenance: EXTERNAL_REFERENCE_PROVENANCE.TRUSTED_MANUAL, referenceId: priorState?.id as string | undefined, expectedVersion: priorState?.version as string | undefined }) as Record<string, unknown>
       await this.recordManualReferenceAudit(manager, input, reference.id as string)
-      return { referenceId: reference.id as string, priorState: priorState ?? null }
+      // The exact row version this saga wrote — compensation must only ever
+      // revert a row that still carries this version (see
+      // `compensateTrustedTcgdexCardReference`), never a row some other
+      // legitimate write has since moved on from.
+      const [written] = await manager.execute<{ version: string }>(
+        `select xmin::text as version from trading_card_external_reference where id = ?`, [reference.id],
+      )
+      return { referenceId: reference.id as string, priorState: priorState ?? null, writtenVersion: written.version }
     })
   }
 
-  /** Reverts a `recordTrustedTcgdexCardReferenceWithPriorState` write — restores the row's prior state, or soft-deletes it if it did not exist before. */
-  async compensateTrustedTcgdexCardReference(input: AuditContext & { referenceId: string; priorState: Record<string, unknown> | null }) {
+  /**
+   * Reverts a `recordTrustedTcgdexCardReferenceWithPriorState` write —
+   * restores the row's prior state, or soft-deletes it if it did not exist
+   * before. Compare-and-set on `writtenVersion`: if the row's current
+   * version no longer matches what this saga itself wrote, some other
+   * legitimate write has already landed on it (e.g. a later successful
+   * rematch, or a fresh automatic sync) and compensation must not clobber
+   * that — it is skipped and durably recorded as skipped-stale rather than
+   * silently applied or silently dropped.
+   */
+  async compensateTrustedTcgdexCardReference(input: AuditContext & { referenceId: string; priorState: Record<string, unknown> | null; writtenVersion: string }) {
     auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
     return this.manager_.transactional(async (manager) => {
+      const [current] = await manager.execute<{ version: string }>(
+        `select xmin::text as version from trading_card_external_reference where id = ? for update`, [input.referenceId],
+      )
+      if (!current || current.version !== input.writtenVersion) {
+        await this.writeAudit(manager, {
+          ...input, entityType: "EXTERNAL_CARD_REFERENCE", entityId: input.referenceId,
+          action: "TCGDEX_MANUAL_REFERENCE_COMPENSATION_SKIPPED_STALE",
+          newValue: { reverted: false, reason: current ? "row changed since this saga's write" : "row no longer exists" },
+        })
+        return
+      }
       if (input.priorState) {
         await manager.execute(
           `update trading_card_external_reference
@@ -376,6 +415,24 @@ class TradingCardsModuleService extends MedusaService({
       await this.writeAudit(manager, {
         ...input, entityType: "EXTERNAL_CARD_REFERENCE", entityId: input.referenceId,
         action: "TCGDEX_MANUAL_REFERENCE_REVERTED", newValue: { reverted: true, hadPriorState: Boolean(input.priorState) },
+      })
+    })
+  }
+
+  /**
+   * Durable record of a failed compensation attempt — written in its own,
+   * fresh transaction so it survives even though the compensation
+   * transaction that failed necessarily rolled back. Never swallow a
+   * compensation failure to nothing: a trusted reference may be left
+   * committed for a rematch that never actually succeeded, and this is the
+   * only trace an operator has to find and manually fix it.
+   */
+  async recordCompensationFailure(input: AuditContext & { referenceId: string; errorMessage: string }) {
+    return this.manager_.transactional(async (manager) => {
+      await this.writeAudit(manager, {
+        ...input, entityType: "EXTERNAL_CARD_REFERENCE", entityId: input.referenceId,
+        action: "TCGDEX_MANUAL_REFERENCE_COMPENSATION_FAILED",
+        newValue: { reverted: false, errorMessage: input.errorMessage },
       })
     })
   }
@@ -463,7 +520,13 @@ class TradingCardsModuleService extends MedusaService({
        where trading_card_id = ? and provider = 'TCGDEX' and provenance = 'TRUSTED_MANUAL' and deleted_at is null limit 1`,
       [input.tradingCardId]
     )
-    const trustedSetId = setReference ? String(setReference.provider_identifier).slice(4) : String(card.provider_set_code)
+    if (!setReference) {
+      throw new MedusaError(
+        MedusaError.Types.NOT_ALLOWED,
+        "This card's set has no trusted TCGdex set reference recorded — record a trusted set match before retrying enrichment",
+      )
+    }
+    const trustedSetId = String(setReference.provider_identifier).slice(4)
     const matchInput: TcgDexMatchInput = {
       language: card.set_language as TcgDexMatchInput["language"],
       setCode: String(card.provider_set_code),
@@ -596,7 +659,17 @@ class TradingCardsModuleService extends MedusaService({
    */
   async findExistingVariantForTcgdexCard(input: {
     tcgdexCardId: string; tcgdexSetId: string; language: CardLanguage; condition: string; finish: string; specialTreatment: string
-  }): Promise<{ tradingCardId: string; tradingCardVariantId: string } | null> {
+  }): Promise<
+    | { outcome: "FOUND"; tradingCardId: string; tradingCardVariantId: string }
+    | { outcome: "NO_TRUSTED_SET" }
+    | { outcome: "NO_EXISTING_CARD_OR_VARIANT" }
+  > {
+    const [trustedSet] = await this.manager_.execute<{ id: string }>(
+      `select 1 from trading_card_external_reference
+       where provider = 'TCGDEX' and provenance = 'TRUSTED_MANUAL' and provider_identifier = ? and deleted_at is null limit 1`,
+      [`SET:${input.tcgdexSetId}`],
+    )
+    if (!trustedSet) return { outcome: "NO_TRUSTED_SET" }
     const [row] = await this.manager_.execute<{ trading_card_id: string; trading_card_variant_id: string }>(
       `select tc.id as trading_card_id, tcv.id as trading_card_variant_id
        from trading_card_external_reference ref
@@ -614,7 +687,8 @@ class TradingCardsModuleService extends MedusaService({
        limit 1`,
       [input.tcgdexCardId, input.condition, input.finish, input.specialTreatment, input.language, `SET:${input.tcgdexSetId}`],
     )
-    return row ? { tradingCardId: row.trading_card_id, tradingCardVariantId: row.trading_card_variant_id } : null
+    if (!row) return { outcome: "NO_EXISTING_CARD_OR_VARIANT" }
+    return { outcome: "FOUND", tradingCardId: row.trading_card_id, tradingCardVariantId: row.trading_card_variant_id }
   }
 
   private async transitionEnrichment(input: AuditContext & { proposalId: string; target: "APPROVED" | "REJECTED" }) {
@@ -847,22 +921,120 @@ class TradingCardsModuleService extends MedusaService({
    */
   async recordTcgdexLookupCandidate(input: {
     provider: ExternalProvider; language: CardLanguage; tcgdexSetId: string; cardNumber: string
-    matchOutcome: "MATCHED" | "NO_MATCH" | "UNRESOLVED_SET" | "IDENTITY_MISMATCH"
+    matchOutcome: "MATCHED" | "AMBIGUOUS" | "NO_MATCH" | "UNRESOLVED_SET" | "IDENTITY_MISMATCH"
     enrichment?: Record<string, unknown> | null
+    /** Only meaningful (and required) when `matchOutcome` is `AMBIGUOUS` — the shortlist a reviewer picks from. */
+    candidateOptions?: Array<{ tcgdexCardId: string; localId: string; name: string; image: string | null }> | null
   }) {
     const existing = await this.findTcgdexLookupCandidate(input)
     if (existing) return existing
     const id = generateEntityId(undefined, "tclookup")
-    const reviewStatus = input.matchOutcome === "MATCHED" ? "PENDING" : null
+    const reviewStatus = input.matchOutcome === "MATCHED" || input.matchOutcome === "AMBIGUOUS" ? "PENDING" : null
     await this.manager_.execute(
       `insert into trading_card_tcgdex_lookup_candidate
-         (id, provider, language, tcgdex_set_id, card_number, match_outcome, enrichment, review_status)
-       values (?, ?, ?, ?, ?, ?, ?::jsonb, ?)
+         (id, provider, language, tcgdex_set_id, card_number, match_outcome, enrichment, candidate_options, review_status)
+       values (?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?)
        on conflict (provider, language, tcgdex_set_id, card_number) where deleted_at is null do nothing`,
       [id, input.provider, input.language, input.tcgdexSetId, input.cardNumber, input.matchOutcome,
-        input.enrichment ? JSON.stringify(input.enrichment) : null, reviewStatus]
+        input.enrichment ? JSON.stringify(input.enrichment) : null,
+        input.candidateOptions ? JSON.stringify(input.candidateOptions) : null, reviewStatus]
     )
     return this.findTcgdexLookupCandidate(input)
+  }
+
+  /**
+   * A reviewer's explicit pick from an `AMBIGUOUS` candidate's shortlist —
+   * promotes the row to `MATCHED` using a fresh, full TCGdex fetch of the
+   * chosen card (never the stale shortlist summary), so the reviewer sees
+   * current illustrator/rarity/artwork once resolved. This deliberately does
+   * NOT re-check that the chosen card's local number matches the row's own
+   * card number the way the automatic exact-match path does — the whole
+   * point of an ambiguous shortlist is that the reviewer is choosing between
+   * cards that don't identically match (e.g. a reprint/promo), the same way
+   * the existing manual "alternative match" flow also never re-validates
+   * card-number identity for a reviewer's own explicit choice.
+   */
+  async resolveAmbiguousTcgdexLookupCandidate(input: AuditContext & { candidateId: string; chosenTcgdexCardId: string; client: TcgDexLookupDependency }) {
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    tradingCardIdSchema.parse(input.candidateId)
+
+    // Cheap pre-check, no lock held: validate the candidate is in the right
+    // state and the choice is on its shortlist before ever making a network
+    // call. Re-validated fresh, under the row lock, immediately below before
+    // any write is made — this pre-check only exists to fail fast and to
+    // avoid a wasted TCGdex call for an already-invalid request.
+    const [candidateBefore] = await this.manager_.execute<Record<string, unknown>>(
+      `select * from trading_card_tcgdex_lookup_candidate where id = ? and deleted_at is null`, [input.candidateId]
+    )
+    if (!candidateBefore) throw new MedusaError(MedusaError.Types.NOT_FOUND, "TCGdex lookup candidate not found")
+    if (candidateBefore.match_outcome !== "AMBIGUOUS" || candidateBefore.review_status !== "PENDING") {
+      throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Only a pending, ambiguous lookup candidate can be resolved this way")
+    }
+    const optionsBefore = (candidateBefore.candidate_options ?? []) as Array<{ tcgdexCardId: string }>
+    if (!optionsBefore.some((option) => option.tcgdexCardId === input.chosenTcgdexCardId)) {
+      throw new MedusaError(MedusaError.Types.INVALID_DATA, "The chosen card is not one of this candidate's shortlisted options")
+    }
+
+    // The TCGdex network call must never run while holding a DB transaction
+    // or row lock — an HTTP round-trip can take seconds, and holding that
+    // lock for that long blocks every other concurrent operation on this
+    // candidate for no reason. State is re-checked fresh, under the lock,
+    // immediately below before any write is made.
+    let response: unknown
+    try {
+      response = await input.client.getCardById(candidateBefore.language as TcgDexLanguage, input.chosenTcgdexCardId)
+    } catch (error) {
+      if (error instanceof TcgDexError && error.code === TCGDEX_ERROR_CODE.NOT_FOUND) {
+        throw new MedusaError(MedusaError.Types.NOT_FOUND, "The chosen card could not be found on TCGdex anymore")
+      }
+      throw error
+    }
+    const parsed = tcgDexCardSchema.safeParse(response)
+    if (!parsed.success) {
+      throw new MedusaError(MedusaError.Types.UNEXPECTED_STATE, "TCGdex returned an unexpected response for the chosen card")
+    }
+    // Schema validation alone only proves TCGdex returned *a* well-shaped
+    // card, not the *chosen* one — a reviewer must never end up with a
+    // MATCHED row whose enrichment silently belongs to a different card than
+    // the one they picked from the shortlist.
+    if (parsed.data.id !== input.chosenTcgdexCardId) {
+      throw new MedusaError(
+        MedusaError.Types.UNEXPECTED_STATE,
+        "TCGdex returned a different card than the one chosen from the shortlist",
+      )
+    }
+    const enrichment = normalizeTcgdexCard(parsed.data)
+
+    return this.manager_.transactional(async (manager) => {
+      const [candidate] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_tcgdex_lookup_candidate where id = ? and deleted_at is null for update`, [input.candidateId]
+      )
+      if (!candidate) throw new MedusaError(MedusaError.Types.NOT_FOUND, "TCGdex lookup candidate not found")
+      if (candidate.match_outcome !== "AMBIGUOUS" || candidate.review_status !== "PENDING") {
+        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Only a pending, ambiguous lookup candidate can be resolved this way")
+      }
+      const options = (candidate.candidate_options ?? []) as Array<{ tcgdexCardId: string }>
+      if (!options.some((option) => option.tcgdexCardId === input.chosenTcgdexCardId)) {
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, "The chosen card is not one of this candidate's shortlisted options")
+      }
+
+      await manager.execute(
+        `update trading_card_tcgdex_lookup_candidate
+         set match_outcome = 'MATCHED', enrichment = ?::jsonb, candidate_options = null, updated_at = now()
+         where id = ?`,
+        [JSON.stringify(enrichment), input.candidateId],
+      )
+      await this.writeAudit(manager, {
+        ...input, entityType: "TCGDEX_LOOKUP_CANDIDATE", entityId: input.candidateId,
+        action: "TCGDEX_AMBIGUOUS_CANDIDATE_RESOLVED",
+        oldValue: { matchOutcome: "AMBIGUOUS", candidateOptions: options },
+        newValue: { matchOutcome: "MATCHED", chosenTcgdexCardId: input.chosenTcgdexCardId },
+      })
+      const [saved] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_tcgdex_lookup_candidate where id = ?`, [input.candidateId]
+      )
+      return saved
+    })
   }
 
   /**

@@ -17,6 +17,7 @@ export interface SelectAlternativeTcgdexMatchInput {
 export type SelectAlternativeTcgdexMatchResult =
   | { outcome: "REMATCHED"; tradingCardId: string; tradingCardVariantId: string; imageReassignmentWarning: boolean }
   | { outcome: "NO_EXISTING_CARD_OR_VARIANT" }
+  | { outcome: "NO_TRUSTED_SET" }
 
 /**
  * Stage 1: lets a reviewer point an already-parsed snapshot row at a
@@ -73,7 +74,8 @@ const selectAlternativeTcgdexMatchStep = createStep(
       tcgdexCardId: input.tcgdexCardId, tcgdexSetId: input.tcgdexSetId, language: entryLanguage as CardLanguage,
       condition, finish, specialTreatment,
     })
-    if (!found) return new StepResponse({ outcome: "NO_EXISTING_CARD_OR_VARIANT" })
+    if (found.outcome === "NO_TRUSTED_SET") return new StepResponse({ outcome: "NO_TRUSTED_SET" })
+    if (found.outcome === "NO_EXISTING_CARD_OR_VARIANT") return new StepResponse({ outcome: "NO_EXISTING_CARD_OR_VARIANT" })
 
     const previousVariantIdBeforeWrite = (entry.effective_trading_card_variant_id as string | null) ?? null
     const previousTcgdexCardId = previousVariantIdBeforeWrite
@@ -93,7 +95,7 @@ const selectAlternativeTcgdexMatchStep = createStep(
     // the match write then fails, the reference is compensated back to
     // exactly what it was before — no trusted reference may survive a
     // failed rematch.
-    const { referenceId, priorState } = await cards.recordTrustedTcgdexCardReferenceWithPriorState({
+    const { referenceId, priorState, writtenVersion } = await cards.recordTrustedTcgdexCardReferenceWithPriorState({
       actor: input.actor, source: "MANUAL", reason: input.reason ?? null,
       tradingCardId: found.tradingCardId, providerIdentifier: input.tcgdexCardId,
     })
@@ -112,12 +114,36 @@ const selectAlternativeTcgdexMatchStep = createStep(
       }))
     } catch (error) {
       // Best-effort compensation: the original error is always what the
-      // caller sees, whether or not the revert itself succeeds. If the
-      // revert also fails, the reference is left for manual review rather
-      // than the real failure being masked.
-      await cards.compensateTrustedTcgdexCardReference({
-        actor: input.actor, source: "MANUAL", reason: input.reason ?? null, referenceId, priorState,
-      }).catch(() => undefined)
+      // caller sees, whether or not the revert itself succeeds. Compare-and-set
+      // on `writtenVersion` keeps this safe under concurrency — see
+      // `compensateTrustedTcgdexCardReference`. If the revert transaction
+      // itself throws (e.g. a DB error), that failure must never be
+      // swallowed to nothing: it is durably recorded in its own transaction
+      // so an operator can find and manually fix the leftover reference.
+      const compensationFailure = await cards.compensateTrustedTcgdexCardReference({
+        actor: input.actor, source: "MANUAL", reason: input.reason ?? null, referenceId, priorState, writtenVersion,
+      }).then(() => null).catch((compensationError: unknown) => compensationError)
+      if (compensationFailure) {
+        // The durable-record write itself must never be the thing that
+        // silently swallows this failure: if it also throws, that fact is
+        // folded into the error message this call throws (a combined
+        // operational error), rather than discarded — the original rematch
+        // failure is never hidden, but neither is a second failure on top of it.
+        const recordingFailure = await cards.recordCompensationFailure({
+          actor: input.actor, source: "MANUAL", reason: input.reason ?? null, referenceId,
+          errorMessage: compensationFailure instanceof Error ? compensationFailure.message : String(compensationFailure),
+        }).then(() => null).catch((recordingError: unknown) => recordingError)
+        if (recordingFailure) {
+          const compensationMessage = compensationFailure instanceof Error ? compensationFailure.message : String(compensationFailure)
+          const recordingMessage = recordingFailure instanceof Error ? recordingFailure.message : String(recordingFailure)
+          throw new MedusaError(
+            MedusaError.Types.UNEXPECTED_STATE,
+            `Rematch failed and compensation could not be recorded (referenceId=${referenceId}). ` +
+              `Original error: ${error instanceof Error ? error.message : String(error)}. ` +
+              `Compensation error: ${compensationMessage}. Recording error: ${recordingMessage}.`,
+          )
+        }
+      }
       throw error
     }
 

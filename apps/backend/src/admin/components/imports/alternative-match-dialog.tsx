@@ -8,6 +8,7 @@ interface TcgdexCandidate { tcgdexSetId: string; tcgdexCardId: string; localId: 
 type RematchResult =
   | { outcome: "REMATCHED"; tradingCardId: string; tradingCardVariantId: string; imageReassignmentWarning: boolean }
   | { outcome: "NO_EXISTING_CARD_OR_VARIANT" }
+  | { outcome: "NO_TRUSTED_SET" }
 
 interface AlternativeMatchDialogProps {
   snapshotId: string
@@ -63,6 +64,8 @@ const AlternativeMatchDialog = ({ snapshotId, entryId, onClose, onMatched }: Alt
         client.invalidateQueries({ queryKey: ["inventory-proposals"] })
         onMatched()
         onClose()
+      } else if (result.outcome === "NO_TRUSTED_SET") {
+        toast.error("This set has no trusted TCGdex set reference recorded yet. Record a trusted set match before rematching.")
       } else {
         toast.error("No existing card/variant matches this identity yet. Use \"Create card\" to add it first.")
       }
@@ -72,11 +75,11 @@ const AlternativeMatchDialog = ({ snapshotId, entryId, onClose, onMatched }: Alt
 
   return (
     <FocusModal open onOpenChange={(open) => { if (!open) onClose() }}>
-      <FocusModal.Content>
+      <FocusModal.Content className="!bottom-auto !left-1/2 !right-auto !top-1/2 h-[min(40rem,calc(100vh-4rem))] w-[min(36rem,calc(100vw-3rem))] -translate-x-1/2 -translate-y-1/2">
         <FocusModal.Header>
           <Text weight="plus">Select an alternative TCGdex card</Text>
         </FocusModal.Header>
-        <FocusModal.Body className="flex flex-col gap-4 p-6">
+        <FocusModal.Body className="flex flex-col gap-4 overflow-y-auto p-6">
           {!language && <Text size="small" className="text-ui-fg-error">This snapshot's source has no configured language.</Text>}
           <div className="flex flex-col gap-1">
             <Label htmlFor="am-set">Set</Label>

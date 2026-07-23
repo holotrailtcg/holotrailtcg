@@ -121,6 +121,24 @@ describe("bulkReviewTcgdexCandidates", () => {
     expect(cards.reviewTcgdexLookupCandidates).toHaveBeenCalledWith({ ids: [CANDIDATE_ID], reviewStatus: "ACCEPTED" })
   })
 
+  it("dedupes a repeated candidate id instead of processing it twice and misreporting the second pass as no-longer-pending", async () => {
+    // Two duplicate CSV rows for the same physical card resolve to one
+    // canonical TCGdex lookup candidate — a client selecting "every
+    // selectable row" (rather than every distinct candidate id) can submit
+    // the same id twice in one request.
+    runMock.mockResolvedValueOnce({ result: { tradingCardId: "tcard_1", tradingCardVariantId: "tcvar_1" } })
+    const { container, cards } = fakeContainer()
+
+    const result = await bulkReviewTcgdexCandidates(container, {
+      actor: "reviewer", snapshotId: "tcisnap_1", candidateIds: [CANDIDATE_ID, CANDIDATE_ID], action: "ACCEPT",
+    })
+
+    expect(result.results).toHaveLength(1)
+    expect(result.results[0]).toMatchObject({ candidateId: CANDIDATE_ID, createdVariantCount: 1, errors: [] })
+    expect(cards.retrieveTcgdexLookupCandidateById).toHaveBeenCalledTimes(1)
+    expect(runMock).toHaveBeenCalledTimes(1)
+  })
+
   it("leaves the candidate retryable (not ACCEPTED) when any of its rows fail to create", async () => {
     runMock.mockRejectedValueOnce({ message: "boom" })
     const { container, cards } = fakeContainer()
