@@ -91,17 +91,40 @@ describe("retryTcgdexLookupCandidate", () => {
     expect(result.code).toBe("MATCHED")
   })
 
-  it("never caches a PROVIDER_ERROR outcome, leaving the identity retryable again", async () => {
+  it("never caches a PROVIDER_ERROR outcome, and leaves no candidate behind when there was nothing cached before", async () => {
     const setId = `set-${suffix()}`
     const cardNumber = "003"
 
-    await expect(cards.retryTcgdexLookupCandidate({
+    // matchTcgdexCard converts a thrown client error into a structured PROVIDER_ERROR
+    // *result* (see tcgdex/matching.ts) — the retry resolves, it does not throw.
+    const result = await cards.retryTcgdexLookupCandidate({
       actor: "reviewer-1", source: "TCGDEX", provider: "PULSE", language: "EN", tcgdexSetId: setId, cardNumber,
       client: fakeClient([{ code: "PROVIDER_ERROR" }]),
-    })).rejects.toThrow()
+    })
 
+    expect(result.code).toBe("PROVIDER_ERROR")
+    expect(result.candidate).toBeNull()
     const live = await cards.findTcgdexLookupCandidate({ provider: "PULSE", language: "EN", tcgdexSetId: setId, cardNumber })
     expect(live).toBeNull()
+  })
+
+  it("preserves the previously cached stable failure when a retry hits a transient PROVIDER_ERROR", async () => {
+    const setId = `set-${suffix()}`
+    const cardNumber = "003b"
+    await cards.recordTcgdexLookupCandidate({ provider: "PULSE", language: "EN", tcgdexSetId: setId, cardNumber, matchOutcome: "NO_MATCH" })
+    const before = await cards.findTcgdexLookupCandidate({ provider: "PULSE", language: "EN", tcgdexSetId: setId, cardNumber })
+
+    const result = await cards.retryTcgdexLookupCandidate({
+      actor: "reviewer-1", source: "TCGDEX", provider: "PULSE", language: "EN", tcgdexSetId: setId, cardNumber,
+      client: fakeClient([{ code: "PROVIDER_ERROR" }]),
+    })
+
+    expect(result.code).toBe("PROVIDER_ERROR")
+    // The prior NO_MATCH row must survive untouched — a transient provider failure must never
+    // erase a genuine, previously-confirmed stable outcome.
+    const after = await cards.findTcgdexLookupCandidate({ provider: "PULSE", language: "EN", tcgdexSetId: setId, cardNumber })
+    expect(after?.id).toBe(before?.id)
+    expect(after?.match_outcome).toBe("NO_MATCH")
   })
 
   it("records a TCGDEX_LOOKUP_RETRIED audit entry", async () => {

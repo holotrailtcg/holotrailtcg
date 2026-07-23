@@ -51,7 +51,8 @@ async function snapshotFixture(sourceId: string) {
   return snapshot
 }
 
-async function twoEntryGroupFixture(sourceId: string) {
+/** `previousQuantity` defaults nonzero — see the matching note in split-inventory-proposal's fixture. */
+async function twoEntryGroupFixture(sourceId: string, previousQuantity = 2) {
   const snapshot = await snapshotFixture(sourceId)
   const variantId = `tcvar_sep_${suffix()}`
   const entryIds = [`tcisentry_sep_a_${suffix()}`, `tcisentry_sep_b_${suffix()}`]
@@ -65,12 +66,13 @@ async function twoEntryGroupFixture(sourceId: string) {
     )
   }
   const reconciliationKey = `variant:${variantId}|sep=0|split=`
+  const changeKind = previousQuantity === 0 ? "NEW_HOLDING" : "NO_CHANGE"
   const [proposal] = (await pgConnection.raw(
     `insert into trading_card_inventory_proposal
       (id, inventory_source_id, inventory_snapshot_id, reconciliation_key, trading_card_variant_id,
        change_kind, proposed_quantity, previous_quantity, quantity_delta, review_status, requires_separate_listing)
-     values (?, ?, ?, ?, ?, 'NEW_HOLDING', 2, 0, 2, 'PENDING', false) returning *`,
-    [`tciprop_sep_${suffix()}`, sourceId, snapshot.id, reconciliationKey, variantId],
+     values (?, ?, ?, ?, ?, ?, 2, ?, ?, 'PENDING', false) returning *`,
+    [`tciprop_sep_${suffix()}`, sourceId, snapshot.id, reconciliationKey, variantId, changeKind, previousQuantity, 2 - previousQuantity],
   )).rows
   return { snapshot, proposal, entryIds, variantId }
 }

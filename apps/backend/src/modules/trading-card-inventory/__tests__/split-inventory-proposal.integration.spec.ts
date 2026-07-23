@@ -55,8 +55,16 @@ async function snapshotFixture(sourceId: string) {
   return snapshot
 }
 
-/** Two entries sharing a variant (so they'd naturally group together), plus a PENDING proposal covering both. */
-async function twoEntryGroupFixture(sourceId: string) {
+/**
+ * Two entries sharing a variant (so they'd naturally group together), plus a
+ * PENDING proposal covering both. `previousQuantity` defaults to a *nonzero*
+ * baseline (2, matching the current total) specifically to catch the
+ * previous-quantity-allocation bug: a split must PROPORTIONALLY divide this
+ * baseline between the remaining and moved sides (never leave it wholly on
+ * one side), so `remaining.previous_quantity + moved.previous_quantity`
+ * always equals the original.
+ */
+async function twoEntryGroupFixture(sourceId: string, previousQuantity = 2) {
   const snapshot = await snapshotFixture(sourceId)
   const variantId = `tcvar_split_${suffix()}`
   const entryIds = [`tcisentry_split_a_${suffix()}`, `tcisentry_split_b_${suffix()}`]
@@ -70,12 +78,13 @@ async function twoEntryGroupFixture(sourceId: string) {
     )
   }
   const reconciliationKey = `variant:${variantId}|sep=0|split=`
+  const changeKind = previousQuantity === 0 ? "NEW_HOLDING" : "NO_CHANGE"
   const [proposal] = (await pgConnection.raw(
     `insert into trading_card_inventory_proposal
       (id, inventory_source_id, inventory_snapshot_id, reconciliation_key, trading_card_variant_id,
        change_kind, proposed_quantity, previous_quantity, quantity_delta, review_status)
-     values (?, ?, ?, ?, ?, 'NEW_HOLDING', 2, 0, 2, 'PENDING') returning *`,
-    [`tciprop_split_${suffix()}`, sourceId, snapshot.id, reconciliationKey, variantId],
+     values (?, ?, ?, ?, ?, ?, 2, ?, ?, 'PENDING') returning *`,
+    [`tciprop_split_${suffix()}`, sourceId, snapshot.id, reconciliationKey, variantId, changeKind, previousQuantity, 2 - previousQuantity],
   )).rows
   return { snapshot, proposal, entryIds, variantId }
 }
@@ -151,6 +160,27 @@ describe("splitInventoryProposal", () => {
     await expect(inventory.splitInventoryProposal({
       proposalId: proposal.id, sourceEntryIds: entryIds, actor: "reviewer-1", source: "MANUAL",
     })).rejects.toThrow(/proper|subset/)
+  })
+
+  it("proportionally allocates a nonzero previous_quantity baseline across both sides after a split", async () => {
+    const source = await sourceFixture()
+    const { proposal, entryIds } = await twoEntryGroupFixture(source.id, 2)
+
+    const result = await inventory.splitInventoryProposal({
+      proposalId: proposal.id, sourceEntryIds: [entryIds[0]], actor: "reviewer-1", source: "MANUAL",
+    })
+
+    const original = await inventory.retrieveInventoryProposal(proposal.id)
+    const created = await inventory.retrieveInventoryProposal(result.newProposalId)
+
+    // 1 row stays behind, 1 row moves, out of an even 2-unit baseline — each side gets 1.
+    expect(original.previous_quantity).toBe(1)
+    expect(created.previous_quantity).toBe(1)
+    expect(original.previous_quantity + created.previous_quantity).toBe(2)
+    expect(original.quantity_delta).toBe(original.proposed_quantity - original.previous_quantity)
+    expect(created.quantity_delta).toBe(created.proposed_quantity - created.previous_quantity)
+    // Neither side is misleadingly reported as a brand-new holding when the baseline was nonzero.
+    expect(created.change_kind).not.toBe("NEW_HOLDING")
   })
 
   it("rejects an empty selection", async () => {

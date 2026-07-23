@@ -182,6 +182,48 @@ describe("selectAlternativeTcgdexMatchWorkflow", () => {
     expect([variantA.id, variantB.id]).toContain(matches[0].trading_card_variant_id)
   })
 
+  it("refreshes proposals for both the old and new grouping keys when a PENDING_REVIEW snapshot is rematched", async () => {
+    const tcgdexCardId = `swsh4pt5-${suffix()}`
+    const { variant: newVariant } = await cardVariantFixture(tcgdexCardId)
+    const { variant: oldVariant } = await cardVariantFixture(`swsh4pt5-old-${suffix()}`)
+    const { source, snapshot } = await sourceAndSnapshotFixture()
+    const entry = await entryFixture(snapshot.id)
+    // Entry currently matches `oldVariant`, which already has its own PENDING proposal.
+    await pgConnection.raw(
+      `insert into trading_card_inventory_snapshot_entry_match (id, snapshot_entry_id, inventory_snapshot_id, matching_status, trading_card_variant_id, matched_via)
+       values (?, ?, ?, 'MATCHED', ?, 'AUTOMATIC')`,
+      [`tcisematch_${suffix()}`, entry.id, snapshot.id, oldVariant.id],
+    )
+    const oldProposalId = `tciprop_old_${suffix()}`
+    await pgConnection.raw(
+      `insert into trading_card_inventory_proposal
+        (id, inventory_source_id, inventory_snapshot_id, reconciliation_key, trading_card_variant_id, change_kind,
+         proposed_quantity, previous_quantity, quantity_delta, review_status)
+       values (?, ?, ?, ?, ?, 'NEW_HOLDING', ?, 0, ?, 'PENDING')`,
+      [oldProposalId, source.id, snapshot.id, `variant:${oldVariant.id}|sep=0|split=`, oldVariant.id, entry.quantity, entry.quantity],
+    )
+
+    await selectAlternativeTcgdexMatchWorkflow(container).run({
+      input: { actor: "reviewer-1", snapshotEntryId: entry.id, tcgdexSetId: "swsh4pt5", tcgdexCardId },
+    })
+
+    // Old key's proposal (now empty) must be soft-deleted, not left stale/orphaned.
+    const [oldProposal] = (await pgConnection.raw(
+      `select * from trading_card_inventory_proposal where id = ?`, [oldProposalId],
+    )).rows
+    expect(oldProposal.deleted_at).not.toBeNull()
+
+    // A brand-new proposal must be INSERTED for the new key — it never existed before this rematch.
+    const [newProposal] = (await pgConnection.raw(
+      `select * from trading_card_inventory_proposal
+       where inventory_snapshot_id = ? and reconciliation_key = ? and deleted_at is null`,
+      [snapshot.id, `variant:${newVariant.id}|sep=0|split=`],
+    )).rows
+    expect(newProposal).toBeTruthy()
+    expect(newProposal.trading_card_variant_id).toBe(newVariant.id)
+    expect(newProposal.proposed_quantity).toBe(entry.quantity)
+  })
+
   it("returns NO_EXISTING_CARD_OR_VARIANT rather than creating a variant when none exists yet", async () => {
     const { snapshot } = await sourceAndSnapshotFixture()
     const entry = await entryFixture(snapshot.id)
@@ -203,12 +245,23 @@ describe("selectAlternativeTcgdexMatchWorkflow", () => {
        values (?, ?, ?, 'MATCHED', ?, 'MANUAL')`,
       [`tcisematch_${suffix()}`, entry.id, snapshot.id, variant.id],
     )
+    // review_status = 'APPLIED' requires resolved_by/resolved_at AND the full applied-fields
+    // set per CK_tci_proposal_applied_consistency — an incomplete fixture would be rejected by
+    // the real constraint the code path actually runs against, silently hiding the "cannot
+    // rematch an applied proposal" behavior this test exists to prove.
+    const appliedId = `tciprop_applied_${suffix()}`
     await pgConnection.raw(
       `insert into trading_card_inventory_proposal
         (id, inventory_source_id, inventory_snapshot_id, reconciliation_key, trading_card_variant_id, change_kind,
-         proposed_quantity, previous_quantity, quantity_delta, review_status)
-       values (?, ?, ?, ?, ?, 'NEW_HOLDING', 1, 0, 1, 'APPLIED')`,
-      [`tciprop_applied_${suffix()}`, source.id, snapshot.id, `variant:${variant.id}|sep=0|split=`, variant.id],
+         proposed_quantity, previous_quantity, quantity_delta, review_status,
+         resolved_by, resolved_at, applied_at, applied_transaction_id, applied_holding_id,
+         application_idempotency_key, medusa_sync_status)
+       values (?, ?, ?, ?, ?, 'NEW_HOLDING', 1, 0, 1, 'APPLIED',
+         'reviewer-1', now(), now(), ?, ?, ?, 'SYNCED')`,
+      [
+        appliedId, source.id, snapshot.id, `variant:${variant.id}|sep=0|split=`, variant.id,
+        `tcitxn_${suffix()}`, `tciholding_${suffix()}`, `idem_${suffix()}`,
+      ],
     )
 
     await expect(selectAlternativeTcgdexMatchWorkflow(container).run({
