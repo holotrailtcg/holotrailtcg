@@ -39,7 +39,7 @@ const FailedLookupsPanel = ({ snapshotId, onRetried }: FailedLookupsPanelProps) 
   })
 
   const retryMutation = useMutation({
-    mutationFn: (candidate: FailedCandidate) => postAction<{ result: { code: string } }>(
+    mutationFn: (candidate: FailedCandidate) => postAction<{ result: { code: string; providerCode: string | null } }>(
       `/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/tcgdex-lookup/retry`,
       { tcgdexSetId: candidate.tcgdexSetId, cardNumber: candidate.cardNumber },
     ),
@@ -47,7 +47,13 @@ const FailedLookupsPanel = ({ snapshotId, onRetried }: FailedLookupsPanelProps) 
       if (result.code === "MATCHED") {
         toast.success("TCGdex found a match this time.")
       } else if (result.code === "PROVIDER_ERROR" || result.code === "INVALID_LOCAL_IDENTITY") {
-        toast.error("TCGdex could not be reached to retry this lookup — its previous result was kept. Try again shortly.")
+        // `providerCode` distinguishes a genuine timeout from other transient
+        // provider failures (rate limiting, network error, server error) so
+        // the reviewer isn't shown one generic message for all of them.
+        const message = result.providerCode === "TIMEOUT"
+          ? "TCGdex timed out retrying this lookup — its previous result was kept. Try again shortly."
+          : "TCGdex could not be reached to retry this lookup — its previous result was kept. Try again shortly."
+        toast.error(message)
       } else {
         toast.info("TCGdex was checked again — still no match.")
       }

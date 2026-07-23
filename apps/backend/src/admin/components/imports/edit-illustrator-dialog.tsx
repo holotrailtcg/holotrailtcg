@@ -1,10 +1,10 @@
 import { Button, FocusModal, Input, Label, Switch, Text, toast } from "@medusajs/ui"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useEffect, useState } from "react"
-import { fetchJson, patchAction } from "./fetch-json"
+import { fetchJson, HttpError, patchAction } from "./fetch-json"
 
 interface TradingCardDetail {
-  card: { id: string; illustrator: string | null; illustrator_confirmed: boolean }
+  card: { id: string; illustrator: string | null; illustrator_confirmed: boolean; updated_at: string }
 }
 
 interface EditIllustratorDialogProps {
@@ -40,11 +40,16 @@ const EditIllustratorDialog = ({ tradingCardId, onClose, onSaved }: EditIllustra
   }, [cardQuery.data, touched])
 
   const alreadyConfirmed = cardQuery.data?.card.illustrator_confirmed ?? false
+  const [conflict, setConflict] = useState(false)
 
   const saveMutation = useMutation({
     mutationFn: () => patchAction(`/admin/trading-cards/${encodeURIComponent(tradingCardId)}`, {
       illustrator: illustrator.trim() || null,
       illustratorConfirmed: confirmed,
+      // Optimistic-concurrency guard: the exact `updated_at` this dialog loaded.
+      // A stale request (someone else edited this card in between) is rejected
+      // with a 409 rather than silently overwriting their change.
+      expectedUpdatedAt: cardQuery.data?.card.updated_at ?? null,
     }),
     onSuccess: () => {
       toast.success("Illustrator updated.")
@@ -53,7 +58,14 @@ const EditIllustratorDialog = ({ tradingCardId, onClose, onSaved }: EditIllustra
       onSaved()
       onClose()
     },
-    onError: (error: Error) => toast.error(error.message || "This card could not be updated. Please try again."),
+    onError: (error: Error) => {
+      if (error instanceof HttpError && error.status === 409) {
+        setConflict(true)
+        toast.error("This card was changed by someone else since it was loaded — reload and try again.")
+        return
+      }
+      toast.error(error.message || "This card could not be updated. Please try again.")
+    },
   })
 
   return (
@@ -64,6 +76,11 @@ const EditIllustratorDialog = ({ tradingCardId, onClose, onSaved }: EditIllustra
         </FocusModal.Header>
         <FocusModal.Body className="flex flex-col gap-4 p-6">
           {cardQuery.isLoading && <Text size="small" className="text-ui-fg-subtle">Loading…</Text>}
+          {conflict && (
+            <Text size="small" className="text-ui-fg-error">
+              This card was changed by someone else since it was loaded. Reload before saving again.
+            </Text>
+          )}
           {alreadyConfirmed && (
             <Text size="small" className="text-ui-fg-subtle">
               This card's illustrator was manually confirmed — it will not be silently overwritten by TCGdex data.
@@ -86,9 +103,18 @@ const EditIllustratorDialog = ({ tradingCardId, onClose, onSaved }: EditIllustra
         <FocusModal.Footer>
           <div className="flex items-center gap-2">
             <Button variant="transparent" onClick={onClose}>Cancel</Button>
-            <Button variant="primary" isLoading={saveMutation.isPending} onClick={() => saveMutation.mutate()}>
-              Save
-            </Button>
+            {conflict ? (
+              <Button
+                variant="secondary"
+                onClick={() => { setConflict(false); setTouched(false); client.invalidateQueries({ queryKey: ["trading-card-detail", tradingCardId] }) }}
+              >
+                Reload
+              </Button>
+            ) : (
+              <Button variant="primary" isLoading={saveMutation.isPending} onClick={() => saveMutation.mutate()}>
+                Save
+              </Button>
+            )}
           </div>
         </FocusModal.Footer>
       </FocusModal.Content>
