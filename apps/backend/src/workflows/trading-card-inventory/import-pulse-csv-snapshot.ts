@@ -61,7 +61,7 @@ function toImportedSnapshotEntryInput(row: ParsedPulseRow, requiresSeparateListi
 }
 
 /** One row of raw cells paired with its true one-based physical line number in the original uploaded file. */
-interface PhysicalCsvRow { lineNumber: number; cells: string[] }
+export interface PhysicalCsvRow { lineNumber: number; cells: string[] }
 
 interface ValidatedFile { contentHash: string; headers: string[]; dataRows: PhysicalCsvRow[] }
 
@@ -77,7 +77,7 @@ interface ValidatedFile { contentHash: string; headers: string[]; dataRows: Phys
  * here, so a single malformed row produces a clear, line-numbered
  * validation error instead of aborting the whole file.
  */
-function parsePhysicalCsvRows(decodedText: string): PhysicalCsvRow[] {
+export function parsePhysicalCsvRows(decodedText: string): PhysicalCsvRow[] {
   const entries = parse(decodedText, {
     skip_empty_lines: false, relax_column_count: true, bom: false, info: true,
   }) as { record: string[]; info: { lines: number } }[]
