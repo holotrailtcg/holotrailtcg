@@ -12,14 +12,13 @@ export const PULSE_EXPECTED_HEADERS = [
 ] as const
 
 /**
- * Headers Pulse's export now includes that we tolerate but never read: not
- * required, and not treated as "unsupported" either. `Condition` is the
- * first case — Pulse added a free-text Condition column, but this importer
- * deliberately keeps trusting the short token embedded in `Product ID`
- * instead (see pulse/condition.ts), since that is Pulse's stable identifier
- * field rather than free text. If a real need to read `Condition` directly
- * ever comes up, that is a deliberate parsing change, not a side effect of
- * merely allowing the column to be present.
+ * Headers Pulse's export includes that are tolerated when present but not
+ * required. `Condition` is read directly and is authoritative over the
+ * condition token embedded in `Product ID` whenever it is present and
+ * non-blank (see condition.ts and row-parser.ts). It stays "optional" here
+ * only because older Pulse exports predate the column; absent the column,
+ * the `Product ID` token is used as a fallback, and with neither present the
+ * condition defaults to Near Mint.
  */
 export const PULSE_OPTIONAL_HEADERS = ["Condition"] as const
 

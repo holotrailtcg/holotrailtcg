@@ -25,7 +25,7 @@ describe("nonNegativeIntSchema", () => {
 
 describe("createInventorySourceSchema", () => {
   const base = {
-    displayName: "[SWSH] eBay Stock", provider: "PULSE", language: null,
+    displayName: "[SWSH] eBay Stock", provider: "PULSE", language: "EN",
     defaultCurrencyCode: null, defaultPricingProfileKey: null, defaultStorefrontCategoryId: null, notes: null,
   }
 
@@ -39,6 +39,10 @@ describe("createInventorySourceSchema", () => {
 
   it("rejects an empty display name", () => {
     expect(() => createInventorySourceSchema.parse({ ...base, displayName: "   " })).toThrow()
+  })
+
+  it("rejects a missing card language — a new source must always have an explicit language", () => {
+    expect(() => createInventorySourceSchema.parse({ ...base, language: null })).toThrow()
   })
 
   it("rejects an unsupported provider", () => {

@@ -104,7 +104,7 @@ export async function POST(req: AuthenticatedMedusaRequest, res: MedusaResponse)
         name: body.name, cardNumber: body.cardNumber, rarityRaw: body.rarityRaw ?? null,
         condition: body.condition as never, finish: body.finish as never, specialTreatment: body.specialTreatment as never,
         finishConfirmed: body.finishConfirmed, specialTreatmentConfirmed: body.specialTreatmentConfirmed,
-        categoryId,
+        categoryId, illustrator: body.illustrator ?? null, illustratorConfirmed: body.illustratorConfirmed ?? false,
       },
     }))
     const [variant] = await cards.listTradingCardVariants(

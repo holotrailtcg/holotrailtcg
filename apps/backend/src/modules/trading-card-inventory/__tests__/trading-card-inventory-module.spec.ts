@@ -33,7 +33,7 @@ afterAll(async () => {
 async function createSource(overrides: Record<string, unknown> = {}) {
   const id = suffix()
   return service.createInventorySource({
-    displayName: `Test Source ${id}`, provider: "PULSE", actor: "test-actor", source: "MANUAL", ...overrides,
+    displayName: `Test Source ${id}`, provider: "PULSE", language: "EN", actor: "test-actor", source: "MANUAL", ...overrides,
   })
 }
 
@@ -160,9 +160,9 @@ describe("inventory source", () => {
 
   it("rejects a duplicate name under normalised comparison", async () => {
     const id = suffix()
-    await service.createInventorySource({ displayName: `  [ME]  eBay Stock ${id}  `, provider: "PULSE", actor: "test-actor", source: "MANUAL" })
+    await service.createInventorySource({ displayName: `  [ME]  eBay Stock ${id}  `, provider: "PULSE", language: "EN", actor: "test-actor", source: "MANUAL" })
     await expect(service.createInventorySource({
-      displayName: `[me] ebay   stock ${id}`, provider: "PULSE", actor: "test-actor", source: "MANUAL",
+      displayName: `[me] ebay   stock ${id}`, provider: "PULSE", language: "EN", actor: "test-actor", source: "MANUAL",
     })).rejects.toThrow()
   })
 
@@ -435,6 +435,19 @@ describe("Stage 5B.2 proposal review and application", () => {
       const source = await createSource()
       const variantId = `tcvar_${suffix()}`
       const proposal = await approvedProposal(source.id, variantId, { changeKind: "NEW_HOLDING", previousQuantity: 0, proposedQuantity: 6 })
+      const categoryId = `ebstorecat_${suffix()}`
+      await pgConnection.raw(
+        `insert into ebay_integration_store_category
+          (id, environment, ebay_account_id, external_id, name, sibling_order, level, path, status, source, medusa_category_id)
+         values (?, 'SANDBOX', ?, ?, 'Test category', 1, 1, 'Test category', 'ACTIVE', 'MANUAL', ?)`,
+        [categoryId, `acct_${suffix()}`, `ext_${suffix()}`, `pcat_${suffix()}`],
+      )
+      await pgConnection.raw(
+        `update trading_card_inventory_proposal
+         set confirmed_ebay_store_category_id = ?, category_confirmed_at = now(), category_confirmed_by = 'reviewer'
+         where id = ?`,
+        [categoryId, proposal.id],
+      )
       const result = await service.applyInventoryProposal({ id: proposal.id, actor: "applier", source: "MANUAL" })
       expect(result.localApplicationStatus).toBe("APPLIED")
       const [, count] = await service.listAndCountInventoryHoldings({ inventory_source_id: source.id, trading_card_variant_id: variantId })

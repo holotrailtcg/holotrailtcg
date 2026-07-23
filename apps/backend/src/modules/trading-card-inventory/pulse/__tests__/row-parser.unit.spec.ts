@@ -1,4 +1,4 @@
-import { parsePulseRow, type PulseCsvRecord } from "../row-parser"
+import { buildPulseCsvRecord, columnCountMismatchRow, parsePulseRow, type PulseCsvRecord } from "../row-parser"
 import { INVENTORY_SOURCE_LANGUAGE } from "../../types"
 
 const baseRecord = (overrides: Partial<PulseCsvRecord> = {}): PulseCsvRecord => ({
@@ -90,11 +90,71 @@ describe("parsePulseRow", () => {
     expect(row.conditionSource).toBe("EXPLICIT")
   })
 
+  it("treats blank material as clean Normal/None and does not force review", () => {
+    const row = parsePulseRow(baseRecord({ Material: "", Rarity: "Common", Condition: "NM" }), 2, INVENTORY_SOURCE_LANGUAGE.EN)
+    expect(row.outcome).toBe("VALID")
+    expect(row.finishCandidate).toBe("NORMAL")
+    expect(row.specialTreatmentCandidate).toBe("NONE")
+  })
+
+  it("maps Cosmos Holo and Tinsel Holo material values", () => {
+    const cosmos = parsePulseRow(baseRecord({ Material: "Cosmos Holo", Rarity: "Common", Condition: "NM" }), 2, INVENTORY_SOURCE_LANGUAGE.EN)
+    expect(cosmos.finishCandidate).toBe("HOLO")
+    expect(cosmos.specialTreatmentCandidate).toBe("COSMOS_HOLO")
+
+    const tinsel = parsePulseRow(baseRecord({ Material: "Tinsel Holo", Rarity: "Common", Condition: "NM" }), 2, INVENTORY_SOURCE_LANGUAGE.EN)
+    expect(tinsel.finishCandidate).toBe("HOLO")
+    expect(tinsel.specialTreatmentCandidate).toBe("TINSEL_HOLO")
+  })
+
+  it("treats an unsupported explicit Condition value as a clear INVALID review error, never silently defaulted", () => {
+    const row = parsePulseRow(baseRecord({ Rarity: "Common", Condition: "GEM MINT 10" }), 2, INVENTORY_SOURCE_LANGUAGE.EN)
+    expect(row.outcome).toBe("INVALID")
+    const diagnostic = row.diagnostics.find((d) => d.code === "UNKNOWN_CONDITION_TOKEN")
+    expect(diagnostic?.severity).toBe("ERROR")
+    expect(diagnostic?.rowNumber).toBe(2)
+  })
+
+  it("defaults a genuinely blank condition (no CSV value, no Product ID token) to Near Mint without a diagnostic", () => {
+    const row = parsePulseRow(baseRecord({ Rarity: "Common" }), 2, INVENTORY_SOURCE_LANGUAGE.EN)
+    expect(row.conditionCandidate).toBe("NEAR_MINT")
+    expect(row.conditionSource).toBe("DEFAULTED")
+    expect(row.diagnostics.some((d) => d.code === "UNKNOWN_CONDITION_TOKEN")).toBe(false)
+  })
+
   it("keeps raw fields bounded and never stores the full raw row", () => {
     const row = parsePulseRow(baseRecord(), 2, INVENTORY_SOURCE_LANGUAGE.EN)
     expect(Object.keys(row.rawFields).sort()).toEqual(
       ["cardNumber", "gradedBy", "grade", "itemType", "material", "productName", "promoInfo", "setName"].sort(),
     )
     expect(JSON.stringify(row.rawFields).length).toBeLessThan(4000)
+  })
+})
+
+describe("buildPulseCsvRecord / columnCountMismatchRow", () => {
+  const headers = ["Product Name", "Set", "Card Number"]
+
+  it("builds a record when the cell count matches the header count", () => {
+    const record = buildPulseCsvRecord(headers, ["Crobat V", "Shining Fates", "044/072"])
+    expect(record).toEqual({ "Product Name": "Crobat V", "Set": "Shining Fates", "Card Number": "044/072" })
+  })
+
+  it("rejects a row with too few columns", () => {
+    expect(buildPulseCsvRecord(headers, ["Crobat V", "Shining Fates"])).toBeNull()
+  })
+
+  it("rejects a row with too many columns", () => {
+    expect(buildPulseCsvRecord(headers, ["Crobat V", "Shining Fates", "044/072", "extra"])).toBeNull()
+  })
+
+  it("produces a clear, line-numbered INVALID row for a column-count mismatch", () => {
+    const row = columnCountMismatchRow(42, 3, 2, "EN")
+    expect(row.outcome).toBe("INVALID")
+    expect(row.rowNumber).toBe(42)
+    expect(row.diagnostics).toHaveLength(1)
+    expect(row.diagnostics[0].code).toBe("COLUMN_COUNT_MISMATCH")
+    expect(row.diagnostics[0].severity).toBe("ERROR")
+    expect(row.diagnostics[0].rowNumber).toBe(42)
+    expect(row.diagnostics[0].message).toMatch(/2 columns.*header.*3/)
   })
 })

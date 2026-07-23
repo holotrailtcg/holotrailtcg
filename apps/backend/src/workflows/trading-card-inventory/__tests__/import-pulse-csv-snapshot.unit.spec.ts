@@ -6,7 +6,7 @@ import { importPulseCsvSnapshot } from "../import-pulse-csv-snapshot"
 const VALID_CSV_HEADER =
   "Product Name,Set,Card Number,Material,Promo Info,Rarity,Graded By,Grade,Item Type,Product ID,Quantity,Avg Cost,Market Price,Sticker Price,Total Cost,Total Market Value,Total Sticker Value,Profit,Margin %,Markup vs Market %"
 const VALID_CSV_ROW =
-  "Gengar,Lost Origin,066/196,Holo,,Rare,,,,card:sv1|066/196|holo|nm,2,1.50,3.00,4.00,3.00,6.00,8.00,5.00,50%"
+  "Gengar,Lost Origin,066/196,Holo,,Rare,,,,card:sv1|066/196|holo|nm,2,1.50,3.00,4.00,3.00,6.00,8.00,5.00,50%,10%"
 
 function csvBuffer(rows: string[] = [VALID_CSV_ROW]): Buffer {
   return Buffer.from([VALID_CSV_HEADER, ...rows].join("\n"), "utf-8")
@@ -97,10 +97,21 @@ describe("importPulseCsvSnapshot", () => {
   it("creates a new source when no inventorySourceId is given", async () => {
     const inventory = fakeInventory()
     const cards = fakeCards()
-    const input = { ...baseInput, inventorySourceId: undefined, newSourceDisplayName: "Pulse Export", newSourceProvider: "PULSE" }
+    const input = {
+      ...baseInput, inventorySourceId: undefined, newSourceDisplayName: "Pulse Export", newSourceProvider: "PULSE", newSourceLanguage: "EN",
+    }
     const result = await importPulseCsvSnapshot(fakeContainer(inventory, cards), input)
     expect(result.kind).toBe("IMPORTED")
     expect(inventory.createOrGetInventorySource).toHaveBeenCalledTimes(1)
+  })
+
+  it("rejects creating a new source with no card language selected", async () => {
+    const inventory = fakeInventory()
+    const cards = fakeCards()
+    const input = { ...baseInput, inventorySourceId: undefined, newSourceDisplayName: "Pulse Export", newSourceProvider: "PULSE" }
+    const result = await importPulseCsvSnapshot(fakeContainer(inventory, cards), input)
+    expect(result.kind).toBe("VALIDATION_FAILED")
+    expect(inventory.createOrGetInventorySource).not.toHaveBeenCalled()
   })
 
   it("rejects source selection input that supplies neither an existing id nor a full new-source spec", async () => {

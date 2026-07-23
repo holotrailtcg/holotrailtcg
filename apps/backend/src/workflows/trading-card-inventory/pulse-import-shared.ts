@@ -11,7 +11,6 @@ import {
 } from "../../modules/trading-card-inventory/types"
 import { matchSnapshotEntry, type TradingCardMatchLookup } from "../../modules/trading-card-inventory/pulse/matching"
 import { parseProductId } from "../../modules/trading-card-inventory/pulse/product-id"
-import { resolveCondition } from "../../modules/trading-card-inventory/pulse/condition"
 import { inferProviderLanguageHint, resolveRowLanguage } from "../../modules/trading-card-inventory/pulse/language"
 import type { ParsedPulseRow } from "../../modules/trading-card-inventory/pulse/types"
 import { reconcileInventorySnapshotWithPriceLocks } from "./reconcile-inventory-snapshot"
@@ -59,16 +58,27 @@ export function buildTradingCardMatchLookup(cards: TradingCardsModuleService): T
   }
 }
 
-/** Re-derives the matching-relevant fields of a `ParsedPulseRow` from an immutable, already-persisted entry row plus the (unchanged) source language — used only on retry, never mutates the entry itself. Pure/deterministic given the same provider reference and source language. */
+/**
+ * Re-derives the matching-relevant fields of a `ParsedPulseRow` from an
+ * immutable, already-persisted entry row plus the (unchanged) source
+ * language — used only on retry, never mutates the entry itself.
+ *
+ * Condition is read back directly from the persisted `condition_candidate`/
+ * `condition_source` columns (the outcome of the original parse, which
+ * already applied the correct precedence — explicit CSV `Condition` value
+ * over the `Product ID` token). It must never be re-derived from
+ * `Product ID` alone here: `Product ID` carries no condition information for
+ * an explicit-CSV-condition row, so recomputing from it would silently
+ * discard the original explicit condition and re-default to Near Mint on
+ * every retry.
+ */
 export function entryRowToMatchInput(entryRow: Record<string, unknown>, sourceLanguage: string | null): ParsedPulseRow {
   const providerReference = String(entryRow.provider_reference ?? "")
   const productId = parseProductId(providerReference)
   const languageHint = inferProviderLanguageHint(productId.setCodeCandidate)
   const language = resolveRowLanguage(sourceLanguage, languageHint)
-  // Re-resolved from the raw product-ID token (not read back from the persisted `condition_source`
-  // column) so this stays a pure function of the provider reference — the same helper `parsePulseRow`
-  // itself uses, so a retry sees exactly the same condition/source/unknownToken as the original parse.
-  const condition = resolveCondition(productId.conditionCandidate)
+  const persistedConditionCandidate = (entryRow.condition_candidate as string | null) ?? null
+  const persistedConditionSource = (entryRow.condition_source as ParsedPulseRow["conditionSource"]) ?? null
   return {
     rowNumber: Number(entryRow.row_number ?? 0),
     outcome: String(entryRow.outcome) as ParsedPulseRow["outcome"],
@@ -78,9 +88,11 @@ export function entryRowToMatchInput(entryRow: Record<string, unknown>, sourceLa
     unitAcquisitionCost: entryRow.unit_acquisition_cost === null || entryRow.unit_acquisition_cost === undefined ? null : String(entryRow.unit_acquisition_cost),
     unitMarketPrice: entryRow.unit_market_price === null || entryRow.unit_market_price === undefined ? null : String(entryRow.unit_market_price),
     unitSellingPrice: entryRow.unit_selling_price === null || entryRow.unit_selling_price === undefined ? null : String(entryRow.unit_selling_price),
-    conditionSource: condition.source,
-    conditionCandidate: condition.condition,
-    conditionUnknownToken: condition.unknownToken,
+    conditionSource: persistedConditionSource,
+    conditionCandidate: persistedConditionCandidate,
+    // The unknown-token diagnostic was already recorded (or not) at original parse time; retry never
+    // re-emits it, so there is nothing to reconstruct here.
+    conditionUnknownToken: null,
     finishCandidate: (entryRow.finish_candidate as string | null) ?? null,
     specialTreatmentCandidate: (entryRow.special_treatment_candidate as string | null) ?? null,
     rarityCandidate: (entryRow.rarity_candidate as string | null) ?? null,
@@ -275,6 +287,16 @@ export async function retryPulseSnapshotMatching(
   const inventorySourceId = snapshot.inventory_source_id as string
   const sourceRow = await inventory.retrieveInventorySource(inventorySourceId)
   const sourceLanguage = (sourceRow.language as string | null) ?? null
+  // A source created before language enforcement (or otherwise left
+  // language-less) must never be silently matched/reconciled with no
+  // language — that would generate unmatched-group identities and
+  // reconciliation keys missing a structural part of saleable identity.
+  if (!sourceLanguage) {
+    throw new MedusaError(
+      MedusaError.Types.INVALID_DATA,
+      "This inventory source has no card language configured. Set a language on the source before retrying matching.",
+    )
+  }
 
   if (![INVENTORY_SNAPSHOT_STATUS.DRAFT, INVENTORY_SNAPSHOT_STATUS.VALIDATED, INVENTORY_SNAPSHOT_STATUS.PENDING_REVIEW]
     .includes(snapshot.status as never)) {

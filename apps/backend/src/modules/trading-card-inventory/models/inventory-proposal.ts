@@ -88,6 +88,8 @@ const InventoryProposal = model
     confirmed_ebay_store_category_id: model.text().nullable(),
     category_confirmed_at: model.dateTime().nullable(),
     category_confirmed_by: model.text().nullable(),
+    /** Stage 1: reviewer-facing, overridable "requires separate listing" intent for this group. See `InventorySnapshotEntry.requires_separate_listing`. */
+    requires_separate_listing: model.boolean().default(false),
   })
   .indexes([
     {

@@ -15,11 +15,21 @@ export interface ImportPulseCsvSnapshotInput extends AuditContext {
   /** Path B: create-or-get a source by display name. Both fields are required together. */
   newSourceDisplayName?: string
   newSourceProvider?: string
-  newSourceLanguage?: string | null
+  /** Required together with newSourceDisplayName/newSourceProvider — a new source must always have an explicit card language. */
+  newSourceLanguage?: string
   newSourceDefaultCurrencyCode?: string | null
   previousApprovedSnapshotId?: string | null
   /** When set, skips source/file/snapshot creation and resumes matching/reconciliation for an existing snapshot. */
   retryOfSnapshotId?: string | null
+  /**
+   * Upload-level default answer to "Does this card require a separate
+   * listing?" — applied to every row in this import. A later stage will use
+   * this to drive physical-copy/separate-listing behaviour; for Stage 1 it
+   * is carried through parsing, persistence, grouping and review only, and
+   * never changes stock application. Reviewers can override it per group
+   * during review (see `InventoryProposal.requires_separate_listing`).
+   */
+  requiresSeparateListingDefault?: boolean
 }
 
 export interface ImportSummary {

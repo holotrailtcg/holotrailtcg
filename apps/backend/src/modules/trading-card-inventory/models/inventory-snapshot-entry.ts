@@ -31,6 +31,8 @@ const InventorySnapshotEntry = model
     rarity_candidate: model.text().nullable(),
     rarity_raw: model.text().nullable(),
     language_conflict: model.boolean().default(false),
+    /** Stage 1: "Does this card require a separate listing?" — upload-level default, or a per-row reviewer correction. Part of the saleable grouping identity; see reconciliation/reconcile.ts. */
+    requires_separate_listing: model.boolean().default(false),
     raw_fields: model.json().nullable(),
   })
   .indexes([

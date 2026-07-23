@@ -17,19 +17,24 @@ export {
 export interface SafeTcgdexCandidate {
   id: string
   reviewStatus: "PENDING" | "ACCEPTED"
-  name: string
+  matchOutcome: "MATCHED" | "AMBIGUOUS"
+  name: string | null
   setName: string
   seriesName: string | null
   referenceArtworkUrl: string | null
   providerRarity: string | null
+  illustrator: string | null
+  /** Only set when `matchOutcome` is `AMBIGUOUS` — the shortlist a reviewer picks from via "View matches". */
+  candidateOptions: Array<{ tcgdexCardId: string; localId: string; name: string; image: string | null }> | null
 }
 
 /**
- * Fills in `tcgdexCandidate` on a page of entry DTOs — a `MATCHED`+`PENDING`
- * TCGdex lookup result for a row that has no matched variant yet, if one
- * has already been cached (see `process-tcgdex-lookup-batch.ts`). Batched
- * per unique (set, card number) so a page of duplicate rows for the same
- * card only costs one lookup, not one per row.
+ * Fills in `tcgdexCandidate` on a page of entry DTOs — a `MATCHED` or
+ * `AMBIGUOUS`, `PENDING` (or `ACCEPTED`, for `MATCHED`) TCGdex lookup result
+ * for a row that has no matched variant yet, if one has already been cached
+ * (see `process-tcgdex-lookup-batch.ts`). Batched per unique (set, card
+ * number) so a page of duplicate rows for the same card only costs one
+ * lookup, not one per row.
  */
 export async function attachTcgdexCandidates<T extends {
   providerReference: string | null
@@ -66,15 +71,25 @@ export async function attachTcgdexCandidates<T extends {
     let candidate = candidateCache.get(cacheKey)
     if (candidate === undefined) {
       const found = await cards.findTcgdexLookupCandidate({ provider: EXTERNAL_PROVIDER.PULSE, language, tcgdexSetId: setMapping.setId, cardNumber })
-      const enrichment = found?.enrichment as { name?: string; referenceArtworkUrl?: string; providerRarity?: string } | null
-      candidate = found && found.match_outcome === "MATCHED"
-        && (found.review_status === "PENDING" || found.review_status === "ACCEPTED") && enrichment?.name
-        ? {
-            id: found.id as string, reviewStatus: found.review_status, name: enrichment.name,
-            setName: setMapping.setName, seriesName: setMapping.seriesName,
-            referenceArtworkUrl: enrichment.referenceArtworkUrl ?? null, providerRarity: enrichment.providerRarity ?? null,
-          }
-        : null
+      const enrichment = found?.enrichment as { name?: string; referenceArtworkUrl?: string; providerRarity?: string; illustrator?: string } | null
+      const candidateOptions = found?.candidate_options as SafeTcgdexCandidate["candidateOptions"]
+      if (found && found.match_outcome === "MATCHED"
+        && (found.review_status === "PENDING" || found.review_status === "ACCEPTED") && enrichment?.name) {
+        candidate = {
+          id: found.id as string, reviewStatus: found.review_status, matchOutcome: "MATCHED", name: enrichment.name,
+          setName: setMapping.setName, seriesName: setMapping.seriesName,
+          referenceArtworkUrl: enrichment.referenceArtworkUrl ?? null, providerRarity: enrichment.providerRarity ?? null,
+          illustrator: enrichment.illustrator ?? null, candidateOptions: null,
+        }
+      } else if (found && found.match_outcome === "AMBIGUOUS" && found.review_status === "PENDING" && candidateOptions?.length) {
+        candidate = {
+          id: found.id as string, reviewStatus: "PENDING", matchOutcome: "AMBIGUOUS", name: null,
+          setName: setMapping.setName, seriesName: setMapping.seriesName,
+          referenceArtworkUrl: null, providerRarity: null, illustrator: null, candidateOptions,
+        }
+      } else {
+        candidate = null
+      }
       candidateCache.set(cacheKey, candidate)
     }
     result.push({ ...row, tcgdexCandidate: candidate })
@@ -96,9 +111,16 @@ export const uploadCsvBodySchema = z.object({
   newSourceDefaultCurrencyCode: z.string().regex(/^[A-Z]{3}$/).optional(),
   previousApprovedSnapshotId: z.string().min(1).optional(),
   reason: z.string().max(500).optional(),
+  // Multipart form fields always arrive as strings — accept the literal
+  // "true"/"false" text rather than z.coerce.boolean(), which would treat
+  // any non-empty string (including the literal text "false") as true.
+  requiresSeparateListingDefault: z.enum(["true", "false"]).optional().transform((value) => value === "true"),
 }).strict().refine(
   (value) => Boolean(value.inventorySourceId) !== Boolean(value.newSourceDisplayName && value.newSourceProvider),
   { message: "Provide either inventorySourceId or newSourceDisplayName together with newSourceProvider, not both or neither" },
+).refine(
+  (value) => Boolean(value.inventorySourceId) || Boolean(value.newSourceLanguage),
+  { message: "A card language (EN, JA or ZH) must be explicitly selected when creating a new inventory source" },
 )
 
 export const snapshotEntriesQuerySchema = z.object({

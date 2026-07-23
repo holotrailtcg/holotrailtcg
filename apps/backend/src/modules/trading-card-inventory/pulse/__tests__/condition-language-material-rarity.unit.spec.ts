@@ -68,12 +68,21 @@ describe("mapMaterial", () => {
     expect(mapMaterial("Reverse Holo").finishCandidate).toBe(INVENTORY_CARD_FINISH.REVERSE_HOLO)
   })
 
-  it("leaves blank material unrecognised rather than assuming Normal", () => {
-    expect(mapMaterial("")).toEqual({ finishCandidate: null, specialTreatmentCandidate: null, recognized: false })
-    expect(mapMaterial(undefined)).toEqual({ finishCandidate: null, specialTreatmentCandidate: null, recognized: false })
+  it("maps blank material to Normal finish with no special treatment", () => {
+    expect(mapMaterial("")).toEqual({ finishCandidate: INVENTORY_CARD_FINISH.NORMAL, specialTreatmentCandidate: INVENTORY_SPECIAL_TREATMENT.NONE, recognized: true })
+    expect(mapMaterial(undefined)).toEqual({ finishCandidate: INVENTORY_CARD_FINISH.NORMAL, specialTreatmentCandidate: INVENTORY_SPECIAL_TREATMENT.NONE, recognized: true })
+    expect(mapMaterial(null)).toEqual({ finishCandidate: INVENTORY_CARD_FINISH.NORMAL, specialTreatmentCandidate: INVENTORY_SPECIAL_TREATMENT.NONE, recognized: true })
   })
 
-  it("never invents a new enum value for an unrecognised material string", () => {
+  it("maps Cosmos Holo to Holo finish with the Cosmos Holo special treatment", () => {
+    expect(mapMaterial("Cosmos Holo")).toEqual({ finishCandidate: INVENTORY_CARD_FINISH.HOLO, specialTreatmentCandidate: INVENTORY_SPECIAL_TREATMENT.COSMOS_HOLO, recognized: true })
+  })
+
+  it("maps Tinsel Holo to Holo finish with the Tinsel Holo special treatment", () => {
+    expect(mapMaterial("Tinsel Holo")).toEqual({ finishCandidate: INVENTORY_CARD_FINISH.HOLO, specialTreatmentCandidate: INVENTORY_SPECIAL_TREATMENT.TINSEL_HOLO, recognized: true })
+  })
+
+  it("never invents a new enum value for an unrecognised, non-blank material string", () => {
     expect(mapMaterial("Some Unheard-Of Finish")).toEqual({ finishCandidate: null, specialTreatmentCandidate: null, recognized: false })
   })
 })

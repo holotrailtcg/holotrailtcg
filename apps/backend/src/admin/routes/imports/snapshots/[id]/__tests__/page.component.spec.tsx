@@ -236,7 +236,7 @@ describe("ImportsSnapshotDetailPage", () => {
 
     const table = screen.getByRole("table")
     expect(within(table).getByText("Common")).toBeInTheDocument()
-    expect(within(table).getByText("Matched")).toBeInTheDocument()
+    expect(within(table).getByText("Card Matched")).toBeInTheDocument()
     expect(within(table).getByRole("img", { name: acceptedEntry.providerReference })).toHaveAttribute(
       "src", "https://assets.tcgdex.net/absol.webp",
     )
@@ -244,7 +244,7 @@ describe("ImportsSnapshotDetailPage", () => {
     await user.click(within(table).getByText("Absol"))
     const drawer = await screen.findByRole("dialog")
     expect(within(drawer).getByRole("img", { name: "Absol" })).toHaveAttribute("src", "https://assets.tcgdex.net/absol.webp")
-    expect(within(drawer).getByText("Matched")).toBeInTheDocument()
+    expect(within(drawer).getByText("Card Matched")).toBeInTheDocument()
   })
 
   it("opens the replace-image dialog from within the image preview modal", async () => {
@@ -323,7 +323,7 @@ describe("ImportsSnapshotDetailPage", () => {
     await screen.findByText("import.csv")
 
     await user.click(screen.getByText("Not yet matched"))
-    expect(await screen.findByText("Import row 1")).toBeInTheDocument()
+    expect(await screen.findByRole("dialog")).toBeInTheDocument()
   })
 
   it("shows the card image and import details in the widened row drawer", async () => {
@@ -333,8 +333,8 @@ describe("ImportsSnapshotDetailPage", () => {
         ...BASE_ENTRIES.entries[0],
         specialTreatmentCandidate: "DUSK_BALL_REVERSE",
         tcgdexCandidate: {
-          id: "tclookup_1", name: "Gengar", setName: "Ascended Heroes", seriesName: "Mega Evolution",
-          referenceArtworkUrl: "https://assets.example/gengar.png", providerRarity: "Rare",
+          id: "tclookup_1", name: "Gengar", matchOutcome: "MATCHED", setName: "Ascended Heroes", seriesName: "Mega Evolution",
+          referenceArtworkUrl: "https://assets.example/gengar.png", providerRarity: "Rare", candidateOptions: null,
         },
       }],
       count: 1, limit: 20, offset: 0,
@@ -352,7 +352,7 @@ describe("ImportsSnapshotDetailPage", () => {
     expect(within(drawer).getByText("Ascended Heroes")).toBeInTheDocument()
     expect(within(drawer).getByText("Dusk Ball Reverse")).toBeInTheDocument()
     expect(within(drawer).getByText("Market price")).toBeInTheDocument()
-    expect(within(drawer).getByText("Awaiting review")).toBeInTheDocument()
+    expect(within(drawer).getByText("Match found")).toBeInTheDocument()
     expect(within(drawer).getByText("This card will be linked or created when approved.")).toBeInTheDocument()
     expect(within(drawer).queryByText("Treatment")).not.toBeInTheDocument()
   })
@@ -389,7 +389,6 @@ describe("ImportsSnapshotDetailPage", () => {
 
     await user.click(within(drawer).getByRole("button", { name: "Next →" }))
     expect(within(drawer).getByRole("heading", { name: "Hypno" })).toBeInTheDocument()
-    expect(within(drawer).getByText("Import row 2")).toBeInTheDocument()
     expect(within(drawer).getByRole("button", { name: "Next →" })).toBeDisabled()
 
     await user.click(within(drawer).getByRole("button", { name: "← Previous" }))
@@ -443,8 +442,8 @@ describe("ImportsSnapshotDetailPage", () => {
       entries: [{
         ...BASE_ENTRIES.entries[0],
         tcgdexCandidate: {
-          id: "tclookup_1", name: "Gengar", setName: "Ascended Heroes", seriesName: "Mega Evolution",
-          referenceArtworkUrl: null, providerRarity: "Rare",
+          id: "tclookup_1", name: "Gengar", matchOutcome: "MATCHED", setName: "Ascended Heroes", seriesName: "Mega Evolution",
+          referenceArtworkUrl: null, providerRarity: "Rare", candidateOptions: null,
         },
       }],
       count: 1, limit: 20, offset: 0,
@@ -454,7 +453,7 @@ describe("ImportsSnapshotDetailPage", () => {
 
     expect(await screen.findByText("Gengar")).toBeInTheDocument()
     expect(screen.getByText("Mega Evolution · Ascended Heroes")).toBeInTheDocument()
-    expect(within(screen.getByRole("table")).getByText("Awaiting review")).toBeInTheDocument()
+    expect(within(screen.getByRole("table")).getByText("Match found")).toBeInTheDocument()
     expect(screen.queryByText("Found on TCGdex", { exact: false })).not.toBeInTheDocument()
 
     const checkbox = screen.getByRole("checkbox", { name: "Select Gengar" })
@@ -476,7 +475,8 @@ describe("ImportsSnapshotDetailPage", () => {
   it("selects a range of rows with shift-click", async () => {
     const user = userEvent.setup()
     const makeCandidate = (id: string, name: string) => ({
-      id, name, setName: "Ascended Heroes", seriesName: "Mega Evolution", referenceArtworkUrl: null, providerRarity: "Rare",
+      id, name, matchOutcome: "MATCHED", setName: "Ascended Heroes", seriesName: "Mega Evolution", referenceArtworkUrl: null, providerRarity: "Rare",
+      candidateOptions: null,
     })
     const candidateEntries = {
       entries: [
@@ -506,8 +506,8 @@ describe("ImportsSnapshotDetailPage", () => {
           ...BASE_ENTRIES.entries[0],
           id: "tcisentry_1",
           tcgdexCandidate: {
-            id: "tclookup_1", name: "Gengar", setName: "Ascended Heroes", seriesName: "Mega Evolution",
-            referenceArtworkUrl: null, providerRarity: "Rare",
+            id: "tclookup_1", name: "Gengar", matchOutcome: "MATCHED", setName: "Ascended Heroes", seriesName: "Mega Evolution",
+            referenceArtworkUrl: null, providerRarity: "Rare", candidateOptions: null,
           },
         },
         {
@@ -515,8 +515,8 @@ describe("ImportsSnapshotDetailPage", () => {
           id: "tcisentry_2",
           rowNumber: 2,
           tcgdexCandidate: {
-            id: "tclookup_1", name: "Gengar", setName: "Ascended Heroes", seriesName: "Mega Evolution",
-            referenceArtworkUrl: null, providerRarity: "Rare",
+            id: "tclookup_1", name: "Gengar", matchOutcome: "MATCHED", setName: "Ascended Heroes", seriesName: "Mega Evolution",
+            referenceArtworkUrl: null, providerRarity: "Rare", candidateOptions: null,
           },
         },
         {
@@ -525,8 +525,8 @@ describe("ImportsSnapshotDetailPage", () => {
           rowNumber: 3,
           providerReference: "card:sv1|067/196|holo|nm",
           tcgdexCandidate: {
-            id: "tclookup_2", name: "Hypno", setName: "Ascended Heroes", seriesName: "Mega Evolution",
-            referenceArtworkUrl: null, providerRarity: "Rare",
+            id: "tclookup_2", name: "Hypno", matchOutcome: "MATCHED", setName: "Ascended Heroes", seriesName: "Mega Evolution",
+            referenceArtworkUrl: null, providerRarity: "Rare", candidateOptions: null,
           },
         },
       ],
@@ -553,7 +553,8 @@ describe("ImportsSnapshotDetailPage", () => {
   it("excludes an already-ACCEPTED candidate from 'select all', even when mixed with still-pending ones", async () => {
     const user = userEvent.setup()
     const makeCandidate = (id: string, name: string, reviewStatus: string) => ({
-      id, name, setName: "Ascended Heroes", seriesName: "Mega Evolution", referenceArtworkUrl: null, providerRarity: "Rare", reviewStatus,
+      id, name, matchOutcome: "MATCHED", setName: "Ascended Heroes", seriesName: "Mega Evolution", referenceArtworkUrl: null, providerRarity: "Rare", reviewStatus,
+      candidateOptions: null,
     })
     const candidateEntries = {
       entries: [

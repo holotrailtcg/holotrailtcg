@@ -5,6 +5,8 @@ export interface ReviewTableColumn<T> {
   header: string
   /** Overrides the rendered header cell content (e.g. a select-all checkbox) while `header` still supplies the column's stable key. */
   headerCell?: ReactNode
+  /** Caps this column's width (e.g. a thumbnail column that would otherwise stretch to fit its cell content) — a Tailwind max-width class such as `"max-w-16"`. */
+  headerClassName?: string
   cell: (row: T) => ReactNode
 }
 
@@ -59,28 +61,32 @@ function ReviewTable<T>({
   }
 
   return (
-    <Table className={className}>
-      <Table.Header>
-        <Table.Row>
-          {columns.map((column) => (
-            <Table.HeaderCell key={column.header}>{column.headerCell ?? column.header}</Table.HeaderCell>
-          ))}
-        </Table.Row>
-      </Table.Header>
-      <Table.Body>
-        {rows.map((row) => (
-          <Table.Row
-            key={rowKey(row)}
-            className={[onRowClick ? "cursor-pointer" : "", rowClassName?.(row) ?? ""].filter(Boolean).join(" ") || undefined}
-            onClick={() => onRowClick?.(row)}
-          >
+    <div className="overflow-x-auto">
+      <Table className={className}>
+        <Table.Header>
+          <Table.Row>
             {columns.map((column) => (
-              <Table.Cell key={column.header}>{column.cell(row)}</Table.Cell>
+              <Table.HeaderCell key={column.header} className={["whitespace-nowrap", column.headerClassName ?? ""].filter(Boolean).join(" ")}>
+                {column.headerCell ?? column.header}
+              </Table.HeaderCell>
             ))}
           </Table.Row>
-        ))}
-      </Table.Body>
-    </Table>
+        </Table.Header>
+        <Table.Body>
+          {rows.map((row) => (
+            <Table.Row
+              key={rowKey(row)}
+              className={[onRowClick ? "cursor-pointer" : "", rowClassName?.(row) ?? ""].filter(Boolean).join(" ") || undefined}
+              onClick={() => onRowClick?.(row)}
+            >
+              {columns.map((column) => (
+                <Table.Cell key={column.header}>{column.cell(row)}</Table.Cell>
+              ))}
+            </Table.Row>
+          ))}
+        </Table.Body>
+      </Table>
+    </div>
   )
 }
 

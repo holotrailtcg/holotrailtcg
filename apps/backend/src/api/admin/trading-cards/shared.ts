@@ -133,7 +133,25 @@ export const createCardFromInventoryRowBodySchema = z.object({
   specialTreatment: z.enum(Object.values(SPECIAL_TREATMENT) as [string, ...string[]]),
   finishConfirmed: z.literal(true, { message: "The finish must be explicitly confirmed before a card can be created." }),
   specialTreatmentConfirmed: z.literal(true, { message: "The special treatment must be explicitly confirmed before a card can be created." }),
+  illustrator: z.string().trim().min(1).max(255).nullish(),
+  illustratorConfirmed: z.boolean().optional(),
 }).strict()
+
+export const updateTradingCardIdentityBodySchema = z.object({
+  cardSetId: z.string().min(1).optional(),
+  name: z.string().trim().min(1).max(255).optional(),
+  searchName: z.string().trim().min(1).max(255).optional(),
+  slug: z.string().trim().max(255).nullish(),
+  cardNumber: z.string().trim().min(1).max(64).regex(CARD_NUMBER_PATTERN, "Card number is not a recognised format.").optional(),
+  illustrator: z.string().trim().min(1).max(255).nullish(),
+  illustratorConfirmed: z.boolean().optional(),
+  /** Optimistic-concurrency guard — see `updateTradingCardIdentity`'s `expectedUpdatedAt`. */
+  expectedUpdatedAt: z.string().datetime({ offset: true }).nullish(),
+  reason: z.string().max(500).optional(),
+}).strict().refine(
+  (body) => !(("illustrator" in body || "illustratorConfirmed" in body) && !body.expectedUpdatedAt),
+  { message: "expectedUpdatedAt is required when changing the illustrator — load the current card state first", path: ["expectedUpdatedAt"] },
+)
 
 export { CARD_GAME, CARD_LANGUAGE }
 

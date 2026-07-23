@@ -10,7 +10,7 @@ import type TradingCardInventoryModuleService from "../../modules/trading-card-i
 import { DuplicateSnapshotError, type ImportedSnapshotEntryInput } from "../../modules/trading-card-inventory/service"
 import { INVENTORY_AUDIT_ACTION, INVENTORY_PROVIDER_REFERENCE_TYPE, INVENTORY_SNAPSHOT_STATUS, INVENTORY_SOURCE_STATUS } from "../../modules/trading-card-inventory/types"
 import { decodeUtf8Strict, validateHeaders } from "../../modules/trading-card-inventory/pulse/csv-format"
-import { parsePulseRow, type PulseCsvRecord } from "../../modules/trading-card-inventory/pulse/row-parser"
+import { buildPulseCsvRecord, columnCountMismatchRow, parsePulseRow } from "../../modules/trading-card-inventory/pulse/row-parser"
 import {
   PULSE_FILE_LIMITS, PULSE_UPLOAD_FILENAME_SUFFIX, PULSE_UPLOAD_MIME_ALLOWLIST, type ParsedPulseRow,
 } from "../../modules/trading-card-inventory/pulse/types"
@@ -33,9 +33,10 @@ export class SourceArchivedError extends Error {
   }
 }
 
-function toImportedSnapshotEntryInput(row: ParsedPulseRow): ImportedSnapshotEntryInput {
+function toImportedSnapshotEntryInput(row: ParsedPulseRow, requiresSeparateListingDefault: boolean): ImportedSnapshotEntryInput {
   return {
     rowNumber: row.rowNumber,
+    requiresSeparateListing: requiresSeparateListingDefault,
     outcome: row.outcome,
     providerReference: row.providerReference,
     providerReferenceType: INVENTORY_PROVIDER_REFERENCE_TYPE.PULSE_PRODUCT_ID,
@@ -59,7 +60,38 @@ function toImportedSnapshotEntryInput(row: ParsedPulseRow): ImportedSnapshotEntr
   }
 }
 
-interface ValidatedFile { contentHash: string; headers: string[]; dataRows: string[][] }
+/** One row of raw cells paired with its true one-based physical line number in the original uploaded file. */
+export interface PhysicalCsvRow { lineNumber: number; cells: string[] }
+
+interface ValidatedFile { contentHash: string; headers: string[]; dataRows: PhysicalCsvRow[] }
+
+/**
+ * Parses with `skip_empty_lines: false`, `relax_column_count: true` and
+ * `info: true` so each record is paired with csv-parse's own cumulative
+ * physical-line count (`info.lines`). A quoted field spanning several
+ * physical lines is still exactly one *record*, but consumes several
+ * *lines* — `index + 1` would silently under-count every row after it, so
+ * the true one-based start line of each record is derived from the
+ * previous record's cumulative line count instead. Column-count
+ * enforcement is done per-row downstream (`row-parser.ts`) rather than
+ * here, so a single malformed row produces a clear, line-numbered
+ * validation error instead of aborting the whole file.
+ */
+export function parsePhysicalCsvRows(decodedText: string): PhysicalCsvRow[] {
+  const entries = parse(decodedText, {
+    skip_empty_lines: false, relax_column_count: true, bom: false, info: true,
+  }) as { record: string[]; info: { lines: number } }[]
+  let linesConsumed = 0
+  return entries.map(({ record, info }) => {
+    const lineNumber = linesConsumed + 1
+    linesConsumed = info.lines
+    return { lineNumber, cells: record }
+  })
+}
+
+function isBlankCells(cells: string[]): boolean {
+  return cells.every((cell) => !cell || cell.trim() === "")
+}
 
 /** Pure, in-memory, no DB. Fatal failures here must never reach even a DRAFT row — they are pre-existence facts. */
 function validatePulseFile(input: ImportPulseCsvSnapshotInput): ValidatedFile {
@@ -80,14 +112,15 @@ function validatePulseFile(input: ImportPulseCsvSnapshotInput): ValidatedFile {
   } catch (error) {
     throw new ValidationFailedError(error instanceof Error ? error.message : "File could not be decoded as UTF-8")
   }
-  let records: string[][]
+  let allRows: PhysicalCsvRow[]
   try {
-    records = parse(decodedText, { skip_empty_lines: true, relax_column_count: true, bom: false }) as string[][]
+    allRows = parsePhysicalCsvRows(decodedText)
   } catch {
     throw new ValidationFailedError("File could not be parsed as CSV")
   }
-  if (records.length === 0) throw new ValidationFailedError("File has no header row")
-  const headerResult = validateHeaders(records[0])
+  if (allRows.length === 0) throw new ValidationFailedError("File has no header row")
+  const headerRow = allRows[0]
+  const headerResult = validateHeaders(headerRow.cells)
   if (!headerResult.ok) {
     const parts: string[] = []
     if (headerResult.missing.length) parts.push(`missing: ${headerResult.missing.join(", ")}`)
@@ -95,7 +128,9 @@ function validatePulseFile(input: ImportPulseCsvSnapshotInput): ValidatedFile {
     if (headerResult.unsupported.length) parts.push(`unsupported: ${headerResult.unsupported.join(", ")}`)
     throw new ValidationFailedError(`Invalid CSV headers (${parts.join("; ")})`)
   }
-  const dataRows = records.slice(1)
+  // Blank physical lines are preserved for line-number provenance but never
+  // counted as data rows — do not renumber after filtering them out.
+  const dataRows = allRows.slice(1).filter((row) => !isBlankCells(row.cells))
   if (dataRows.length === 0) throw new ValidationFailedError("File has no data rows")
   if (dataRows.length > PULSE_FILE_LIMITS.MAX_ROWS) throw new ValidationFailedError("File exceeds the maximum allowed row count")
   return { contentHash, headers: headerResult.normalizedHeaders, dataRows }
@@ -109,15 +144,24 @@ async function resolveInventorySource(
     const source = await inventory.retrieveInventorySource(input.inventorySourceId).catch(() => null)
     if (!source) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory source not found")
     if (source.status === INVENTORY_SOURCE_STATUS.ARCHIVED) throw new SourceArchivedError()
-    return { inventorySourceId: source.id as string, sourceLanguage: (source.language as string | null) ?? null }
+    const sourceLanguage = (source.language as string | null) ?? null
+    if (!sourceLanguage) {
+      throw new ValidationFailedError(
+        "This inventory source has no card language configured. Set a language on the source before importing.",
+      )
+    }
+    return { inventorySourceId: source.id as string, sourceLanguage }
   }
   if (!input.newSourceDisplayName || !input.newSourceProvider) {
     throw new MedusaError(MedusaError.Types.INVALID_DATA, "Either inventorySourceId or newSourceDisplayName and newSourceProvider is required")
   }
+  if (!input.newSourceLanguage) {
+    throw new ValidationFailedError("A card language (EN, JA or ZH) must be explicitly selected when creating a new inventory source")
+  }
   const { source } = await inventory.createOrGetInventorySource({
     actor: input.actor, source: input.source, reason: input.reason,
     displayName: input.newSourceDisplayName, provider: input.newSourceProvider,
-    language: input.newSourceLanguage ?? null, defaultCurrencyCode: input.newSourceDefaultCurrencyCode ?? null,
+    language: input.newSourceLanguage, defaultCurrencyCode: input.newSourceDefaultCurrencyCode ?? null,
   }).catch((error) => {
     if (error instanceof MedusaError && error.type === MedusaError.Types.NOT_ALLOWED) throw new SourceArchivedError()
     throw error
@@ -168,14 +212,14 @@ async function parseAndPersistEntries(
   file: ValidatedFile,
   sourceLanguage: string | null,
 ): Promise<{ rows: ParsedPulseRow[]; entryIds: string[] }> {
-  const rows = file.dataRows.map((cells, index) => {
-    const record: PulseCsvRecord = {}
-    file.headers.forEach((header, columnIndex) => { record[header] = cells[columnIndex] })
-    return parsePulseRow(record, index + 1, sourceLanguage)
+  const rows = file.dataRows.map((row) => {
+    const record = buildPulseCsvRecord(file.headers, row.cells)
+    if (!record) return columnCountMismatchRow(row.lineNumber, file.headers.length, row.cells.length, sourceLanguage)
+    return parsePulseRow(record, row.lineNumber, sourceLanguage)
   })
   const persisted = await inventory.addInventorySnapshotEntriesWithDiagnostics({
     actor: input.actor, source: input.source, reason: input.reason,
-    snapshotId, rows: rows.map(toImportedSnapshotEntryInput),
+    snapshotId, rows: rows.map((row) => toImportedSnapshotEntryInput(row, Boolean(input.requiresSeparateListingDefault))),
   })
   await inventory.recordImportLifecycleAudit({
     actor: input.actor, source: input.source, reason: input.reason,
@@ -246,6 +290,9 @@ export async function importPulseCsvSnapshot(
       sourceLanguage = resolved.sourceLanguage
     }
   } catch (error) {
+    if (error instanceof ValidationFailedError) {
+      return { kind: "VALIDATION_FAILED", reason: error.message, diagnostics: [] }
+    }
     if (error instanceof SourceArchivedError || (MedusaError.isMedusaError(error) && error.type === MedusaError.Types.NOT_ALLOWED)) {
       return { kind: "SOURCE_ARCHIVED", inventorySourceId: input.inventorySourceId }
     }

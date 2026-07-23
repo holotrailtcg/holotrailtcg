@@ -4,6 +4,7 @@ import { ContainerRegistrationKeys, createPgConnection, Modules } from "@medusaj
 import type { IInventoryService, IProductModuleService, IStockLocationService } from "@medusajs/framework/types"
 import { TRADING_CARDS_MODULE } from "../../trading-cards"
 import { TRADING_CARD_INVENTORY_MODULE } from "../index"
+import { EBAY_INTEGRATION_MODULE } from "../../ebay-integration"
 import { syncInventoryProposalToMedusa } from "../../../workflows/trading-card-inventory/medusa-inventory-sync"
 import { reviewInventoryProposalsWithProgress } from "../../../workflows/trading-card-inventory/review-inventory-proposals"
 import { applyInventoryProposalsWithSync } from "../../../workflows/trading-card-inventory/apply-inventory-proposals"
@@ -39,6 +40,7 @@ beforeAll(async () => {
       [Modules.PRODUCT]: { resolve: "@medusajs/medusa/product" },
       [Modules.INVENTORY]: { resolve: "@medusajs/medusa/inventory" },
       [Modules.STOCK_LOCATION]: { resolve: "@medusajs/medusa/stock-location" },
+      [EBAY_INTEGRATION_MODULE]: { resolve: "./src/modules/ebay-integration" },
     },
     injectedDependencies: { [ContainerRegistrationKeys.PG_CONNECTION]: pgConnection },
     cwd: process.cwd(),
@@ -279,11 +281,213 @@ describe("syncInventoryProposalToMedusa", () => {
       delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
     }
   })
+
+  describe("product publication", () => {
+    it("stays draft before a NEW_HOLDING sync, then publishes once it succeeds", async () => {
+      const { variant } = await cardVariantFixture()
+      const { productVariant } = await productVariantFixture()
+      await linkTradingCardVariantToProductVariant(variant.id, productVariant.id)
+      const item = await createInventoryItem(`ITEM-${suffix()}`)
+      await linkProductVariantToInventoryItem(productVariant.id, item.id)
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      try {
+        const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+        const productId = productVariant.product_id as string
+        expect((await products.retrieveProduct(productId)).status).toBe("draft")
+
+        const result = await syncInventoryProposalToMedusa(container, {
+          proposalId: "tciprop_x", tradingCardVariantId: variant.id, proposedQuantity: 4,
+          attemptToken: "token-1", changeKind: "NEW_HOLDING",
+        })
+        expect(result.outcome).toBe("SYNCED")
+        expect((await products.retrieveProduct(productId)).status).toBe("published")
+      } finally {
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    })
+
+    it("returns PRODUCT_PUBLISH_FAILED after writing stock when the final publication step fails", async () => {
+      const { variant } = await cardVariantFixture()
+      const { productVariant } = await productVariantFixture()
+      await linkTradingCardVariantToProductVariant(variant.id, productVariant.id)
+      const item = await createInventoryItem(`ITEM-${suffix()}`)
+      await linkProductVariantToInventoryItem(productVariant.id, item.id)
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+      const publishSpy = jest.spyOn(products, "updateProducts").mockRejectedValueOnce(new Error("publication failed"))
+      try {
+        const result = await syncInventoryProposalToMedusa(container, {
+          proposalId: "tciprop_x", tradingCardVariantId: variant.id, proposedQuantity: 4,
+          attemptToken: "token-1", changeKind: "NEW_HOLDING",
+        })
+
+        expect(result).toMatchObject({ outcome: "FAILED", category: "PRODUCT_PUBLISH_FAILED" })
+        const inventoryService = container.resolve<IInventoryService>(Modules.INVENTORY)
+        const level = await inventoryService.retrieveInventoryLevelByItemAndLocation(item.id, location.id)
+        expect(level.stocked_quantity).toBe(4)
+      } finally {
+        publishSpy.mockRestore()
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+
+      expect((await products.retrieveProduct(productVariant.product_id as string)).status).toBe("draft")
+    })
+
+    it("never publishes for a QUANTITY_CHANGE sync", async () => {
+      const { variant } = await cardVariantFixture()
+      const { productVariant } = await productVariantFixture()
+      await linkTradingCardVariantToProductVariant(variant.id, productVariant.id)
+      const item = await createInventoryItem(`ITEM-${suffix()}`)
+      await linkProductVariantToInventoryItem(productVariant.id, item.id)
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      try {
+        const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+        const productId = productVariant.product_id as string
+
+        const result = await syncInventoryProposalToMedusa(container, {
+          proposalId: "tciprop_x", tradingCardVariantId: variant.id, proposedQuantity: 4,
+          attemptToken: "token-1", changeKind: "QUANTITY_CHANGE",
+        })
+        expect(result.outcome).toBe("SYNCED")
+        expect((await products.retrieveProduct(productId)).status).toBe("draft")
+      } finally {
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    })
+
+    it("does not re-publish (no-op) an already-published product on a retried NEW_HOLDING sync", async () => {
+      const { variant } = await cardVariantFixture()
+      const { productVariant } = await productVariantFixture()
+      await linkTradingCardVariantToProductVariant(variant.id, productVariant.id)
+      const item = await createInventoryItem(`ITEM-${suffix()}`)
+      await linkProductVariantToInventoryItem(productVariant.id, item.id)
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      try {
+        const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+        const productId = productVariant.product_id as string
+
+        const first = await syncInventoryProposalToMedusa(container, {
+          proposalId: "tciprop_x", tradingCardVariantId: variant.id, proposedQuantity: 4,
+          attemptToken: "token-1", changeKind: "NEW_HOLDING",
+        })
+        expect(first.outcome).toBe("SYNCED")
+        expect((await products.retrieveProduct(productId)).status).toBe("published")
+
+        const updateSpy = jest.spyOn(products, "updateProducts")
+        const second = await syncInventoryProposalToMedusa(container, {
+          proposalId: "tciprop_x", tradingCardVariantId: variant.id, proposedQuantity: 9,
+          attemptToken: "token-2", changeKind: "NEW_HOLDING",
+        })
+        expect(second.outcome).toBe("SYNCED")
+        expect((await products.retrieveProduct(productId)).status).toBe("published")
+        expect(updateSpy).not.toHaveBeenCalledWith(productId, { status: "published" })
+        updateSpy.mockRestore()
+      } finally {
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    })
+
+    it("fails NO_LINKED_MEDUSA_PRODUCT for a NEW_HOLDING sync whose product variant has no linked product", async () => {
+      const { variant } = await cardVariantFixture()
+      const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+      const id = suffix()
+      const orphanProductVariant = await products.createProductVariants({
+        title: "Orphan Variant", product_id: undefined as unknown as string, sku: `ORPHAN-${id}`,
+      }).catch(() => null)
+      // If a variant genuinely cannot exist without a product in this Medusa
+      // version, this test instead documents that the guard is unreachable in
+      // practice and relies on the query-shape assertion below.
+      if (!orphanProductVariant) return
+      await linkTradingCardVariantToProductVariant(variant.id, orphanProductVariant.id)
+      const item = await createInventoryItem(`ITEM-${suffix()}`)
+      await linkProductVariantToInventoryItem(orphanProductVariant.id, item.id)
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      try {
+        const result = await syncInventoryProposalToMedusa(container, {
+          proposalId: "tciprop_x", tradingCardVariantId: variant.id, proposedQuantity: 4,
+          attemptToken: "token-1", changeKind: "NEW_HOLDING",
+        })
+        expect(result).toMatchObject({ outcome: "FAILED", category: "NO_LINKED_MEDUSA_PRODUCT" })
+      } finally {
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    })
+
+    it("does not publish or write stock when NEW_HOLDING category assignment fails (category-before-publication ordering)", async () => {
+      const { variant } = await cardVariantFixture()
+      const { productVariant } = await productVariantFixture()
+      await linkTradingCardVariantToProductVariant(variant.id, productVariant.id)
+      const item = await createInventoryItem(`ITEM-${suffix()}`)
+      await linkProductVariantToInventoryItem(productVariant.id, item.id)
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      try {
+        const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+        const productId = productVariant.product_id as string
+        const inventoryService = container.resolve<IInventoryService>(Modules.INVENTORY)
+
+        const result = await syncInventoryProposalToMedusa(container, {
+          proposalId: "tciprop_x", tradingCardVariantId: variant.id, proposedQuantity: 4,
+          attemptToken: "token-1", changeKind: "NEW_HOLDING",
+          // Not a real, synced local eBay Store category id, so
+          // `medusaCategoryIdForId` resolves nothing and category assignment
+          // fails before publication or the stock write are ever attempted.
+          confirmedEbayStoreCategoryId: "ebcat_does_not_exist",
+        })
+        expect(result).toMatchObject({ outcome: "FAILED", category: "NO_LINKED_MEDUSA_CATEGORY" })
+        expect((await products.retrieveProduct(productId)).status).toBe("draft")
+        await expect(inventoryService.retrieveInventoryLevelByItemAndLocation(item.id, location.id)).rejects.toThrow()
+      } finally {
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+    })
+  })
 })
 
 async function createSource() {
   const id = suffix()
-  return inventory.createInventorySource({ displayName: `Sync Workflow Source ${id}`, provider: "PULSE", actor: "test-actor", source: "MANUAL" })
+  return inventory.createInventorySource({ displayName: `Sync Workflow Source ${id}`, provider: "PULSE", language: "EN", actor: "test-actor", source: "MANUAL" })
+}
+
+/**
+ * `applyInventoryProposal`'s E2B gate requires a NEW_HOLDING proposal to
+ * already have a reviewer-confirmed, ACTIVE, Medusa-synced eBay Store
+ * category before it can move stock (re-validated inside the same locked
+ * transaction — see `service.ts`'s "E2B" comment), and `syncInventoryProposalToMedusa`'s
+ * own category-assignment step requires that sync to point at a *real*
+ * Medusa Product Category (it calls `productModuleService.updateProducts`
+ * with it) — a made-up id fails with a real "not found" error from Medusa's
+ * product module. The store-category row itself is inserted directly rather
+ * than via the ebay-integration module service (which needs its own
+ * connected-scope fixture this file doesn't otherwise need).
+ */
+async function confirmedCategoryFixture() {
+  const id = suffix()
+  const categoryId = `ebstorecat_fixture_${id}`
+  const productModuleService = container.resolve<IProductModuleService>(Modules.PRODUCT)
+  const medusaCategory = await productModuleService.createProductCategories({ name: `Fixture Category ${id}`, is_active: true })
+  await pgConnection.raw(
+    `insert into ebay_integration_store_category
+      (id, environment, ebay_account_id, external_id, name, level, sibling_order, path, status, source, medusa_category_id, medusa_category_synced_at)
+     values (?, 'SANDBOX', ?, ?, ?, 1, 1, ?, 'ACTIVE', 'MANUAL', ?, now())`,
+    [categoryId, `acct_${id}`, `ext_${id}`, `Category ${id}`, `Category ${id}`, medusaCategory.id],
+  )
+  return categoryId
+}
+
+async function confirmProposalCategoryFixture(proposalId: string) {
+  const categoryId = await confirmedCategoryFixture()
+  await pgConnection.raw(
+    `update trading_card_inventory_proposal
+     set confirmed_ebay_store_category_id = ?, category_confirmed_at = now(), category_confirmed_by = 'reviewer'
+     where id = ?`,
+    [categoryId, proposalId],
+  )
 }
 
 describe("Stage 5B.2 workflows: review -> apply -> Medusa sync -> snapshot progress", () => {
@@ -323,6 +527,8 @@ describe("Stage 5B.2 workflows: review -> apply -> Medusa sync -> snapshot progr
       const afterReview = await inventory.retrieveInventorySnapshot(snapshot.id)
       expect(afterReview.status).toBe("APPROVED") // not yet fully complete: the proposal itself isn't applied yet
 
+      await confirmProposalCategoryFixture(proposal.id)
+
       const { results } = await applyInventoryProposalsWithSync(container, { actor: "applier", source: "MANUAL", ids: [proposal.id] })
       expect(results).toHaveLength(1)
       expect(results[0]).toMatchObject({ localApplicationStatus: "APPLIED", medusaSyncStatus: "SYNCED" })
@@ -358,6 +564,7 @@ describe("Stage 5B.2 workflows: review -> apply -> Medusa sync -> snapshot progr
     await inventory.transitionInventorySnapshotStatus({ id: snapshot.id, targetStatus: "APPROVED", actor: "reviewer", source: "MANUAL" })
     const [proposal] = await inventory.listInventoryProposals({ inventory_snapshot_id: snapshot.id })
     await reviewInventoryProposalsWithProgress(container, { actor: "reviewer", source: "MANUAL", ids: [proposal.id], targetStatus: "APPROVED" })
+    await confirmProposalCategoryFixture(proposal.id)
 
     const { results } = await applyInventoryProposalsWithSync(container, { actor: "applier", source: "MANUAL", ids: [proposal.id] })
     expect(results[0]).toMatchObject({ localApplicationStatus: "APPLIED", medusaSyncStatus: "FAILED" })

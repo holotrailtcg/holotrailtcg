@@ -78,6 +78,10 @@ const TRADING_CARDS_MEDUSA_APP_SPEC_PATTERNS = [
   "src/modules/trading-cards/__tests__/trading-card-image-expiry-sweep\\.spec\\.ts$",
   "src/modules/trading-cards/__tests__/trading-card-image-orphan-reconciliation\\.spec\\.ts$",
   "src/modules/trading-cards/__tests__/trading-card-product-media-reconcile\\.integration\\.spec\\.ts$",
+  "src/modules/trading-cards/__tests__/retry-tcgdex-lookup-candidate\\.integration\\.spec\\.ts$",
+  "src/modules/trading-cards/__tests__/resolve-ambiguous-tcgdex-lookup-candidate\\.integration\\.spec\\.ts$",
+  "src/modules/trading-cards/__tests__/update-trading-card-illustrator\\.integration\\.spec\\.ts$",
+  "src/modules/trading-cards/__tests__/ensure-product-taxonomy\\.integration\\.spec\\.ts$",
 ];
 
 // Stage 5B.1 Slice 2: the same `MedusaApp`-loader-registry conflict
@@ -94,6 +98,11 @@ const TRADING_CARD_INVENTORY_MEDUSA_APP_SPEC_PATTERNS = [
   "src/modules/trading-card-inventory/__tests__/import-pulse-csv-snapshot\\.integration\\.spec\\.ts$",
   "src/modules/trading-card-inventory/__tests__/medusa-inventory-sync\\.integration\\.spec\\.ts$",
   "src/modules/trading-cards/__tests__/create-card-from-inventory-row\\.integration\\.spec\\.ts$",
+  "src/modules/trading-card-inventory/__tests__/select-alternative-tcgdex-match\\.integration\\.spec\\.ts$",
+  "src/modules/trading-card-inventory/__tests__/set-requires-separate-listing-override\\.integration\\.spec\\.ts$",
+  "src/modules/trading-card-inventory/__tests__/split-inventory-proposal\\.integration\\.spec\\.ts$",
+  "src/modules/trading-card-inventory/__tests__/category-assignment-apply-gate\\.integration\\.spec\\.ts$",
+  "src/modules/trading-card-inventory/__tests__/medusa-inventory-sync-category-assignment\\.integration\\.spec\\.ts$",
 ];
 
 if (process.env.TEST_TYPE === "integration:http") {

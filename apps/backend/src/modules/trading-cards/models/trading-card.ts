@@ -17,6 +17,14 @@ const TradingCard = model
     rarity: model.enum(Object.values(RARITY)).nullable(),
     rarity_icon_key: model.enum(Object.values(RARITY_ICON_KEY)).nullable(),
     origin: model.enum(Object.values(RECORD_ORIGIN)).default(RECORD_ORIGIN.MANUAL),
+    /**
+     * Stage 1: optional canonical-card metadata — never part of saleable
+     * identity/grouping. `illustrator_confirmed` guards against an
+     * unapproved provider value silently overwriting a reviewer's manual
+     * correction — see `updateTradingCardIdentity`.
+     */
+    illustrator: model.text().nullable(),
+    illustrator_confirmed: model.boolean().default(false),
   })
   .indexes([{
     name: "IDX_trading_card_identity",
@@ -33,6 +41,9 @@ const TradingCard = model
     expression: (columns) =>
       `(${columns.rarity_raw} is null and ${columns.rarity_comparison} is null) or ` +
       `(${columns.rarity_raw} is not null and ${columns.rarity_comparison} is not null)`,
+  }, {
+    name: "CK_trading_card_illustrator_length",
+    expression: (columns) => `length(${columns.illustrator}) <= 255`,
   }])
 
 export default TradingCard

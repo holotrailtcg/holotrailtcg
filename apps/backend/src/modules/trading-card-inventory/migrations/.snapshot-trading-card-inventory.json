@@ -119,7 +119,12 @@
             "IMPORT_RECONCILIATION_COMPLETED",
             "IMPORT_PROPOSALS_REFRESHED",
             "IMPORT_FAILED",
-            "PROPOSAL_VARIANT_RESOLVED"
+            "PROPOSAL_VARIANT_RESOLVED",
+            "PROPOSAL_CATEGORY_PROPOSED",
+            "PROPOSAL_CATEGORY_CONFIRMED",
+            "PROPOSAL_SPLIT",
+            "ENTRY_MATCH_REMATCHED",
+            "PROPOSAL_SEPARATE_LISTING_OVERRIDDEN"
           ],
           "mappedType": "enum"
         },
@@ -1333,6 +1338,22 @@
           "enumItems": [],
           "mappedType": "boolean"
         },
+        "requires_separate_listing": {
+          "name": "requires_separate_listing",
+          "type": "boolean",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": "false",
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "boolean"
+        },
         "raw_fields": {
           "name": "raw_fields",
           "type": "jsonb",
@@ -1543,6 +1564,231 @@
             "inventory_snapshot_id"
           ],
           "localTableName": "public.trading_card_inventory_snapshot_entry",
+          "referencedColumnNames": [
+            "id"
+          ],
+          "referencedTableName": "public.trading_card_inventory_snapshot",
+          "updateRule": "cascade"
+        }
+      },
+      "nativeEnums": {}
+    },
+    {
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": true,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "snapshot_entry_id": {
+          "name": "snapshot_entry_id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "inventory_snapshot_id": {
+          "name": "inventory_snapshot_id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "split_group_key": {
+          "name": "split_group_key",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "requires_separate_listing_override": {
+          "name": "requires_separate_listing_override",
+          "type": "boolean",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "boolean"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": "now()",
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": "now()",
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
+        "deleted_at": {
+          "name": "deleted_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        }
+      },
+      "name": "trading_card_inventory_snapshot_entry_override",
+      "schema": "public",
+      "indexes": [
+        {
+          "keyName": "IDX_trading_card_inventory_snapshot_entry_override_snapshot_entry_id",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE INDEX IF NOT EXISTS \"IDX_trading_card_inventory_snapshot_entry_override_snapshot_entry_id\" ON \"trading_card_inventory_snapshot_entry_override\" (\"snapshot_entry_id\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "IDX_trading_card_inventory_snapshot_entry_override_inventory_snapshot_id",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE INDEX IF NOT EXISTS \"IDX_trading_card_inventory_snapshot_entry_override_inventory_snapshot_id\" ON \"trading_card_inventory_snapshot_entry_override\" (\"inventory_snapshot_id\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "IDX_trading_card_inventory_snapshot_entry_override_deleted_at",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE INDEX IF NOT EXISTS \"IDX_trading_card_inventory_snapshot_entry_override_deleted_at\" ON \"trading_card_inventory_snapshot_entry_override\" (\"deleted_at\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "IDX_tci_snapshot_entry_override_entry",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE UNIQUE INDEX IF NOT EXISTS \"IDX_tci_snapshot_entry_override_entry\" ON \"trading_card_inventory_snapshot_entry_override\" (\"snapshot_entry_id\") WHERE deleted_at is null"
+        },
+        {
+          "keyName": "IDX_tci_snapshot_entry_override_snapshot",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE INDEX IF NOT EXISTS \"IDX_tci_snapshot_entry_override_snapshot\" ON \"trading_card_inventory_snapshot_entry_override\" (\"inventory_snapshot_id\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "trading_card_inventory_snapshot_entry_override_pkey",
+          "columnNames": [
+            "id"
+          ],
+          "composite": false,
+          "constraint": true,
+          "primary": true,
+          "unique": true
+        }
+      ],
+      "checks": [
+        {
+          "name": "CK_tci_snapshot_entry_override_split_key_length",
+          "expression": "length(split_group_key) <= 64",
+          "definition": "check ((length(split_group_key) <= 64))"
+        }
+      ],
+      "foreignKeys": {
+        "trading_card_inventory_snapshot_entry_override_s_a2a40_foreign": {
+          "constraintName": "trading_card_inventory_snapshot_entry_override_s_a2a40_foreign",
+          "columnNames": [
+            "snapshot_entry_id"
+          ],
+          "localTableName": "public.trading_card_inventory_snapshot_entry_override",
+          "referencedColumnNames": [
+            "id"
+          ],
+          "referencedTableName": "public.trading_card_inventory_snapshot_entry",
+          "updateRule": "cascade"
+        },
+        "trading_card_inventory_snapshot_entry_override_i_4e903_foreign": {
+          "constraintName": "trading_card_inventory_snapshot_entry_override_i_4e903_foreign",
+          "columnNames": [
+            "inventory_snapshot_id"
+          ],
+          "localTableName": "public.trading_card_inventory_snapshot_entry_override",
           "referencedColumnNames": [
             "id"
           ],
@@ -2846,6 +3092,118 @@
           "enumItems": [],
           "mappedType": "datetime"
         },
+        "proposed_ebay_store_category_id": {
+          "name": "proposed_ebay_store_category_id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "proposed_category_reason": {
+          "name": "proposed_category_reason",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "proposed_category_rule_id": {
+          "name": "proposed_category_rule_id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "confirmed_ebay_store_category_id": {
+          "name": "confirmed_ebay_store_category_id",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "category_confirmed_at": {
+          "name": "category_confirmed_at",
+          "type": "timestamptz",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
+        "category_confirmed_by": {
+          "name": "category_confirmed_by",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "requires_separate_listing": {
+          "name": "requires_separate_listing",
+          "type": "boolean",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": "false",
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "boolean"
+        },
         "raw_proposed_unit_acquisition_cost": {
           "name": "raw_proposed_unit_acquisition_cost",
           "type": "jsonb",
@@ -3142,6 +3500,11 @@
           "name": "CK_tci_proposal_medusa_attempt_token_scope",
           "expression": "medusa_sync_attempt_token is null or (review_status = 'APPLIED' and medusa_sync_status = 'PENDING')",
           "definition": "check ((medusa_sync_attempt_token is null or (review_status = 'APPLIED' and medusa_sync_status = 'PENDING')))"
+        },
+        {
+          "name": "CK_tci_proposal_category_confirmation_consistency",
+          "expression": "(confirmed_ebay_store_category_id is null and category_confirmed_at is null and category_confirmed_by is null) or (confirmed_ebay_store_category_id is not null and category_confirmed_at is not null and category_confirmed_by is not null)",
+          "definition": "check (((confirmed_ebay_store_category_id is null and category_confirmed_at is null and category_confirmed_by is null) or (confirmed_ebay_store_category_id is not null and category_confirmed_at is not null and category_confirmed_by is not null)))"
         }
       ],
       "foreignKeys": {

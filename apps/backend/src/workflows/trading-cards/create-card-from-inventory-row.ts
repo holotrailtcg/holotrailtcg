@@ -73,6 +73,15 @@ export interface CreateCardFromInventoryRowInput {
   specialTreatmentConfirmed: boolean
   /** E2B: the linked Medusa Product Category id for the reviewer-confirmed eBay Store category, if one was assigned. Applied only when a new Product is actually created — see `ensureProductChainForTradingCard`. */
   categoryId?: string | null
+  /**
+   * Stage 1: optional canonical illustrator metadata — from approved TCGdex
+   * enrichment data when available, or reviewer-entered. Only applied when
+   * this step actually creates a brand-new TradingCard (an existing card's
+   * illustrator is never touched here — see `updateTradingCardIdentity` for
+   * correcting it after the fact). Never part of saleable identity/grouping.
+   */
+  illustrator?: string | null
+  illustratorConfirmed?: boolean
 }
 
 type VariantDimensions = { condition: CardCondition; finish: CardFinish; specialTreatment: SpecialTreatment }
@@ -520,6 +529,7 @@ const resolveOrCreateCardStep = createStep(
           card_number: numberForms.original, card_number_normalised: numberForms.normalised,
           rarity_raw: input.rarityRaw, rarity_comparison: input.rarityRaw == null ? null : rarityComparisonForm(input.rarityRaw),
           origin: RECORD_ORIGIN.PULSE,
+          illustrator: input.illustrator ?? null, illustrator_confirmed: Boolean(input.illustratorConfirmed),
         })
         tradingCardId = created.id
       } catch (error) {

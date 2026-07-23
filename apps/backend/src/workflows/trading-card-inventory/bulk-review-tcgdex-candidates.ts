@@ -61,11 +61,18 @@ export async function bulkReviewTcgdexCandidates(
 ): Promise<BulkReviewTcgdexCandidatesResult> {
     const inventory = container.resolve<TradingCardInventoryModuleService>(TRADING_CARD_INVENTORY_MODULE)
     const cards = container.resolve<TradingCardsModuleService>(TRADING_CARDS_MODULE)
+    // Two duplicate CSV rows for the same physical card share one canonical
+    // TCGdex lookup candidate — a client selecting "every selectable row"
+    // (rather than every distinct candidate) can submit the same id twice.
+    // Processing it a second time would find review_status already flipped
+    // to ACCEPTED and misreport it as "no longer pending review", so dedupe
+    // once here regardless of what the caller sent.
+    const candidateIds = [...new Set(input.candidateIds)]
 
     if (input.action === "REJECT") {
-      await cards.reviewTcgdexLookupCandidates({ ids: input.candidateIds, reviewStatus: "REJECTED" })
+      await cards.reviewTcgdexLookupCandidates({ ids: candidateIds, reviewStatus: "REJECTED" })
       return {
-        results: input.candidateIds.map((candidateId) => ({ candidateId, createdVariantCount: 0, skippedRowCount: 0, errors: [] })),
+        results: candidateIds.map((candidateId) => ({ candidateId, createdVariantCount: 0, skippedRowCount: 0, errors: [] })),
       }
     }
 
@@ -73,15 +80,23 @@ export async function bulkReviewTcgdexCandidates(
     const language = (summary.inventorySourceLanguage as CardLanguage | null) ?? null
     if (!language) {
       return {
-        results: input.candidateIds.map((candidateId) => ({ candidateId, createdVariantCount: 0, skippedRowCount: 0, errors: ["This inventory source has no configured language."] })),
+        results: candidateIds.map((candidateId) => ({ candidateId, createdVariantCount: 0, skippedRowCount: 0, errors: ["This inventory source has no configured language."] })),
       }
     }
 
     const unmatchedEntries = await inventory.listUnmatchedSnapshotEntriesForAdmin(input.snapshotId)
 
     const results: CandidateReviewResult[] = []
-    for (const candidateId of input.candidateIds) {
+    for (const candidateId of candidateIds) {
       const candidate = await cards.retrieveTcgdexLookupCandidateById(candidateId)
+      // Already accepted (e.g. a concurrent request for the same candidate —
+      // two admins, or a client retry — got there first) is a benign no-op,
+      // not a failure: the candidate is exactly where this request wanted it
+      // to end up, so reporting it as an "error" would be misleading noise.
+      if (candidate && candidate.match_outcome === "MATCHED" && candidate.review_status === "ACCEPTED") {
+        results.push({ candidateId, createdVariantCount: 0, skippedRowCount: 0, errors: [] })
+        continue
+      }
       if (!candidate || candidate.match_outcome !== "MATCHED" || candidate.review_status !== "PENDING") {
         results.push({ candidateId, createdVariantCount: 0, skippedRowCount: 0, errors: ["This match is no longer pending review."] })
         continue

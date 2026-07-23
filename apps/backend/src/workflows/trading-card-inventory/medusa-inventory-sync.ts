@@ -49,8 +49,11 @@ function isConflict(error: unknown): boolean {
  * Reflects one locally-APPLIED proposal's authoritative resulting quantity
  * into Medusa's own inventory system — always writing the absolute
  * `stocked_quantity`, never a relative delta, per the confirmed Stage 5B.2
- * design. Never creates, publishes, or alters anything beyond the inventory
- * level itself: no products, prices, images, metadata or sales channels.
+ * design. Never creates a product, price, image, or sales channel. It does,
+ * however, own two other NEW_HOLDING-only, one-time, idempotent side effects
+ * on the already-existing (draft) product: publishing it (see the "Publish"
+ * block below) and assigning its Medusa Product Category (see the "E2B"
+ * block below) — both no-ops on every later QUANTITY_CHANGE apply.
  *
  * Every failure path returns a categorized, Admin-safe result — the raw
  * Medusa/driver exception is never persisted or returned, only logged here
@@ -63,6 +66,7 @@ export async function syncInventoryProposalToMedusa(
   const { attemptToken } = input
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
   const inventoryService = container.resolve<IInventoryService>(Modules.INVENTORY)
+  const productModuleService = container.resolve<IProductModuleService>(Modules.PRODUCT)
 
   const locationResolution = await resolveMedusaStockLocationId(container)
   if (locationResolution.outcome === "FAILED") {
@@ -81,7 +85,7 @@ export async function syncInventoryProposalToMedusa(
       entity: "trading_card_variant",
       fields: [
         "id", "product_variant.id", "product_variant.inventory_items.inventory_item_id",
-        "product_variant.product.id", "product_variant.product.categories.id",
+        "product_variant.product.id", "product_variant.product.status", "product_variant.product.categories.id",
       ],
       filters: { id: input.tradingCardVariantId },
     })
@@ -94,7 +98,7 @@ export async function syncInventoryProposalToMedusa(
     | {
         id?: string
         inventory_items?: Array<{ inventory_item_id?: string }> | null
-        product?: { id?: string; categories?: Array<{ id?: string }> | null } | null
+        product?: { id?: string; status?: string; categories?: Array<{ id?: string }> | null } | null
       }
     | null
   if (!productVariant?.id) {
@@ -104,6 +108,57 @@ export async function syncInventoryProposalToMedusa(
   const inventoryItemId = productVariant.inventory_items?.[0]?.inventory_item_id
   if (!inventoryItemId) {
     return failed(attemptToken, MEDUSA_SYNC_ERROR_CATEGORY.NO_INVENTORY_ITEM_LINK, "This product variant has no linked Medusa inventory item.")
+  }
+
+  // A NEW_HOLDING sync is required to publish its product — fail clearly
+  // rather than silently returning SYNCED without publishing anything if the
+  // product variant somehow has no linked product at all.
+  const productId = productVariant.product?.id
+  if (input.changeKind === INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING && !productId) {
+    return failed(
+      attemptToken, MEDUSA_SYNC_ERROR_CATEGORY.NO_LINKED_MEDUSA_PRODUCT,
+      "This product variant has no linked Medusa product to publish.",
+    )
+  }
+
+  // E2B: assign the linked Medusa Product Category the very first time this
+  // product is ever getting stock (NEW_HOLDING) — never for QUANTITY_CHANGE,
+  // and never touching a product that already has a category, so an
+  // existing approved product is never recategorised merely because this
+  // feature was deployed (no backfill). Covers both the brand-new-card path
+  // (handled at Product creation in `create-card-from-inventory-row.ts`,
+  // where the product already has no categories yet) and a NEW_HOLDING that
+  // resolves to an already-existing canonical TradingCard/Product that has
+  // simply never been categorised before.
+  //
+  // Deliberately runs before publication and before the stock write below:
+  // if category assignment fails, the product must not end up published
+  // with live stock and no category — publication is the last, customer-
+  // visibility-changing step, only reached once every prerequisite here has
+  // already succeeded.
+  if (input.changeKind === INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING && input.confirmedEbayStoreCategoryId) {
+    const alreadyCategorised = (productVariant.product?.categories?.length ?? 0) > 0
+    if (productId && !alreadyCategorised) {
+      const ebayIntegration = container.resolve<EbayIntegrationModuleService>(EBAY_INTEGRATION_MODULE)
+      const medusaCategoryId = await ebayIntegration.medusaCategoryIdForId(input.confirmedEbayStoreCategoryId)
+      if (!medusaCategoryId) {
+        // `applyInventoryProposal`'s own gate already requires the confirmed
+        // category to be synced before local application succeeds — reaching
+        // this means it was desynced in the narrow window since. Fail
+        // clearly rather than silently leaving the product uncategorised;
+        // this is retried the same way as any other Medusa sync failure.
+        return failed(
+          attemptToken, MEDUSA_SYNC_ERROR_CATEGORY.NO_LINKED_MEDUSA_CATEGORY,
+          "The confirmed eBay Store category has no linked, synchronised Medusa Product Category.",
+        )
+      }
+      try {
+        await productModuleService.updateProducts(productId, { category_ids: [medusaCategoryId] })
+      } catch (error) {
+        console.error(`[trading-card-inventory] failed to assign Medusa product category for product ${productId}`, error)
+        return failed(attemptToken, MEDUSA_SYNC_ERROR_CATEGORY.CATEGORY_ASSIGNMENT_FAILED, "Failed to assign the Medusa Product Category.")
+      }
+    }
   }
 
   let levelExists: boolean
@@ -151,38 +206,27 @@ export async function syncInventoryProposalToMedusa(
     )
   }
 
-  // E2B: assign the linked Medusa Product Category the very first time this
-  // product is ever getting stock (NEW_HOLDING) — never for QUANTITY_CHANGE,
-  // and never touching a product that already has a category, so an
-  // existing approved product is never recategorised merely because this
-  // feature was deployed (no backfill). Covers both the brand-new-card path
-  // (handled at Product creation in `create-card-from-inventory-row.ts`,
-  // where the product already has no categories yet) and a NEW_HOLDING that
-  // resolves to an already-existing canonical TradingCard/Product that has
-  // simply never been categorised before.
-  if (input.changeKind === INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING && input.confirmedEbayStoreCategoryId) {
-    const productId = productVariant.product?.id
-    const alreadyCategorised = (productVariant.product?.categories?.length ?? 0) > 0
-    if (productId && !alreadyCategorised) {
-      const ebayIntegration = container.resolve<EbayIntegrationModuleService>(EBAY_INTEGRATION_MODULE)
-      const medusaCategoryId = await ebayIntegration.medusaCategoryIdForId(input.confirmedEbayStoreCategoryId)
-      if (!medusaCategoryId) {
-        // `applyInventoryProposal`'s own gate already requires the confirmed
-        // category to be synced before local application succeeds — reaching
-        // this means it was desynced in the narrow window since. Fail
-        // clearly rather than silently leaving the product uncategorised;
-        // this is retried the same way as any other Medusa sync failure.
-        return failed(
-          attemptToken, MEDUSA_SYNC_ERROR_CATEGORY.NO_LINKED_MEDUSA_CATEGORY,
-          "The confirmed eBay Store category has no linked, synchronised Medusa Product Category.",
-        )
-      }
+  // Publish the linked Medusa Product the first time this variant's stock is
+  // genuinely applied (NEW_HOLDING) — the product is created as `draft` back
+  // at Step 2 match/create time (see `create-card-from-inventory-row.ts`),
+  // deliberately not customer-visible until a reviewer has actually approved
+  // and applied real stock for it here in Step 4. Idempotent: never re-touches
+  // a product that's already published, so this is a no-op on every later
+  // QUANTITY_CHANGE apply for the same card.
+  //
+  // Deliberately the last step in this function: it is the one operation
+  // that actually makes the product customer-visible, so it only runs once
+  // category assignment and the real stock quantity have both already
+  // succeeded — a failure here can never leave a published product with a
+  // missing category or stale (zero) stock.
+  if (input.changeKind === INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING) {
+    const alreadyPublished = productVariant.product?.status === "published"
+    if (productId && !alreadyPublished) {
       try {
-        const productModuleService = container.resolve<IProductModuleService>(Modules.PRODUCT)
-        await productModuleService.updateProducts(productId, { category_ids: [medusaCategoryId] })
+        await productModuleService.updateProducts(productId, { status: "published" })
       } catch (error) {
-        console.error(`[trading-card-inventory] failed to assign Medusa product category for product ${productId}`, error)
-        return failed(attemptToken, MEDUSA_SYNC_ERROR_CATEGORY.CATEGORY_ASSIGNMENT_FAILED, "Failed to assign the Medusa Product Category.")
+        console.error(`[trading-card-inventory] failed to publish Medusa product ${productId}`, error)
+        return failed(attemptToken, MEDUSA_SYNC_ERROR_CATEGORY.PRODUCT_PUBLISH_FAILED, "Failed to publish the Medusa product.")
       }
     }
   }

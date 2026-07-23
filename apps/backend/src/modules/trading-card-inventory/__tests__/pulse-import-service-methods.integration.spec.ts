@@ -35,7 +35,7 @@ afterAll(async () => {
 async function createSource(overrides: Record<string, unknown> = {}) {
   const id = suffix()
   return service.createInventorySource({
-    displayName: `Pulse Import Test Source ${id}`, provider: "PULSE", actor: "test-actor", source: "MANUAL", ...overrides,
+    displayName: `Pulse Import Test Source ${id}`, provider: "PULSE", language: "EN", actor: "test-actor", source: "MANUAL", ...overrides,
   })
 }
 
@@ -43,7 +43,7 @@ describe("createOrGetInventorySource", () => {
   it("creates a new source when no equivalent name exists", async () => {
     const id = suffix()
     const result = await service.createOrGetInventorySource({
-      displayName: `Fresh Source ${id}`, provider: "PULSE", actor: "test-actor", source: "PULSE",
+      displayName: `Fresh Source ${id}`, provider: "PULSE", language: "EN", actor: "test-actor", source: "PULSE",
     })
     expect(result.created).toBe(true)
     expect(result.source.status).toBe("ACTIVE")
@@ -52,8 +52,8 @@ describe("createOrGetInventorySource", () => {
   it("returns the existing active source instead of throwing on a repeat call", async () => {
     const id = suffix()
     const displayName = `Repeat Source ${id}`
-    const first = await service.createOrGetInventorySource({ displayName, provider: "PULSE", actor: "test-actor", source: "PULSE" })
-    const second = await service.createOrGetInventorySource({ displayName, provider: "PULSE", actor: "test-actor", source: "PULSE" })
+    const first = await service.createOrGetInventorySource({ displayName, provider: "PULSE", language: "EN", actor: "test-actor", source: "PULSE" })
+    const second = await service.createOrGetInventorySource({ displayName, provider: "PULSE", language: "EN", actor: "test-actor", source: "PULSE" })
     expect(second.created).toBe(false)
     expect(second.source.id).toBe(first.source.id)
   })
@@ -62,7 +62,7 @@ describe("createOrGetInventorySource", () => {
     const source = await createSource()
     await service.archiveInventorySource({ id: source.id, actor: "test-actor", source: "MANUAL" })
     await expect(service.createOrGetInventorySource({
-      displayName: source.display_name, provider: "PULSE", actor: "test-actor", source: "PULSE",
+      displayName: source.display_name, provider: "PULSE", language: "EN", actor: "test-actor", source: "PULSE",
     })).rejects.toThrow(/archived/i)
   })
 })
@@ -211,9 +211,12 @@ describe("recordSnapshotEntryMatches", () => {
     const after = await pgConnection("trading_card_inventory_proposal")
       .where({ inventory_snapshot_id: snapshot.id }).whereNull("deleted_at").orderBy("reconciliation_key")
     expect(after).toHaveLength(2)
-    expect(after.find((proposal) => proposal.id === affected.id)).toMatchObject({
-      id: affected.id, trading_card_variant_id: "tcvar_retry_1", change_kind: "NEW_HOLDING", review_status: "PENDING",
+    const refreshedAffected = after.find((proposal) => proposal.trading_card_variant_id === "tcvar_retry_1")!
+    expect(refreshedAffected).toMatchObject({
+      trading_card_variant_id: "tcvar_retry_1", change_kind: "NEW_HOLDING", review_status: "PENDING",
     })
+    expect(refreshedAffected.id).not.toBe(affected.id)
+    expect(await pgConnection("trading_card_inventory_proposal").where({ id: affected.id }).whereNotNull("deleted_at")).toHaveLength(1)
     expect(after.find((proposal) => proposal.id === unaffected.id)).toEqual(unaffected)
     expect(await pgConnection("trading_card_inventory_snapshot_entry_diagnostic")
       .where({ snapshot_entry_id: entryIds[0], code: "MATCH_RETRY_RESOLVED" }).whereNull("deleted_at")).toHaveLength(1)
@@ -224,7 +227,7 @@ describe("recordSnapshotEntryMatches", () => {
     expect(holdingsAfter).toBe(holdingsBefore)
 
     await service.transitionInventoryProposalStatus({
-      id: affected.id, targetStatus: "REJECTED", rejectionReason: "reviewed", actor: "reviewer", source: "MANUAL",
+      id: refreshedAffected.id, targetStatus: "REJECTED", rejectionReason: "reviewed", actor: "reviewer", source: "MANUAL",
     })
     await expect(service.recordSnapshotEntryMatches({
       actor: "test-actor", source: "PULSE", inventorySnapshotId: snapshot.id, refreshPendingProposals: true,

@@ -56,7 +56,8 @@
             "TRADING_CARD_VARIANT",
             "EXTERNAL_CARD_REFERENCE",
             "ENRICHMENT_PROPOSAL",
-            "CARD_IMAGE"
+            "CARD_IMAGE",
+            "TCGDEX_LOOKUP_CANDIDATE"
           ],
           "mappedType": "enum"
         },
@@ -113,7 +114,12 @@
             "IMAGE_REORDERED",
             "IMAGE_FOCAL_CHANGED",
             "IMAGE_ARCHIVED",
-            "IMAGE_RESTORED"
+            "IMAGE_RESTORED",
+            "TCGDEX_LOOKUP_RETRIED",
+            "TCGDEX_MANUAL_REFERENCE_REVERTED",
+            "TCGDEX_MANUAL_REFERENCE_COMPENSATION_SKIPPED_STALE",
+            "TCGDEX_MANUAL_REFERENCE_COMPENSATION_FAILED",
+            "TCGDEX_AMBIGUOUS_CANDIDATE_RESOLVED"
           ],
           "mappedType": "enum"
         },
@@ -1077,6 +1083,7 @@
           "comment": null,
           "enumItems": [
             "MATCHED",
+            "AMBIGUOUS",
             "NO_MATCH",
             "UNRESOLVED_SET",
             "IDENTITY_MISMATCH"
@@ -1085,6 +1092,22 @@
         },
         "enrichment": {
           "name": "enrichment",
+          "type": "jsonb",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "json"
+        },
+        "candidate_options": {
+          "name": "candidate_options",
           "type": "jsonb",
           "unsigned": false,
           "autoincrement": false,
@@ -1203,8 +1226,8 @@
       "checks": [
         {
           "name": "CK_tcgdex_lookup_candidate_review_status_pair",
-          "expression": "(match_outcome = 'MATCHED' and review_status is not null and enrichment is not null) or (match_outcome <> 'MATCHED' and review_status is null and enrichment is null)",
-          "definition": "check (((match_outcome = 'MATCHED' and review_status is not null and enrichment is not null) or (match_outcome <> 'MATCHED' and review_status is null and enrichment is null)))"
+          "expression": "(match_outcome = 'MATCHED' and review_status is not null and enrichment is not null and candidate_options is null) or (match_outcome = 'AMBIGUOUS' and review_status is not null and enrichment is null and candidate_options is not null) or (match_outcome not in ('MATCHED', 'AMBIGUOUS') and review_status is null and enrichment is null and candidate_options is null)",
+          "definition": "check (((match_outcome = 'MATCHED' and review_status is not null and enrichment is not null and candidate_options is null) or (match_outcome = 'AMBIGUOUS' and review_status is not null and enrichment is null and candidate_options is not null) or (match_outcome not in ('MATCHED', 'AMBIGUOUS') and review_status is null and enrichment is null and candidate_options is null)))"
         }
       ],
       "foreignKeys": {},
@@ -1439,6 +1462,38 @@
           ],
           "mappedType": "enum"
         },
+        "illustrator": {
+          "name": "illustrator",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "illustrator_confirmed": {
+          "name": "illustrator_confirmed",
+          "type": "boolean",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": "false",
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "boolean"
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamptz",
@@ -1539,6 +1594,11 @@
           "name": "CK_trading_card_rarity_raw_pair",
           "expression": "(rarity_raw is null and rarity_comparison is null) or (rarity_raw is not null and rarity_comparison is not null)",
           "definition": "check (((rarity_raw is null and rarity_comparison is null) or (rarity_raw is not null and rarity_comparison is not null)))"
+        },
+        {
+          "name": "CK_trading_card_illustrator_length",
+          "expression": "length(illustrator) <= 255",
+          "definition": "check ((length(illustrator) <= 255))"
         }
       ],
       "foreignKeys": {
@@ -2297,6 +2357,7 @@
             "MASTER_BALL",
             "STARLIGHT_HOLO",
             "COSMOS_HOLO",
+            "TINSEL_HOLO",
             "GALAXY_HOLO",
             "CRACKED_ICE",
             "STAMPED",
