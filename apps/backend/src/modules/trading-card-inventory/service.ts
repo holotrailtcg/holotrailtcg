@@ -892,10 +892,13 @@ class TradingCardInventoryModuleService extends MedusaService({
           const chunk = input.entries.slice(offset, offset + 250)
           const entryIds = chunk.map((entry) => entry.snapshotEntryId)
           const currentRows = await manager.execute<Record<string, unknown>>(
-            `select e.id, e.provider_reference, e.provider_reference_type,
+            `select e.id, e.provider_reference, e.provider_reference_type, e.condition_candidate, e.finish_candidate,
+                    e.special_treatment_candidate, e.requires_separate_listing, e.trading_card_variant_id as row_trading_card_variant_id,
+                    o.split_group_key as override_split_group_key, o.requires_separate_listing_override,
                     m.matching_status, m.trading_card_variant_id, m.matched_via
              from trading_card_inventory_snapshot_entry e
              left join trading_card_inventory_snapshot_entry_match m on m.snapshot_entry_id = e.id and m.deleted_at is null
+             left join trading_card_inventory_snapshot_entry_override o on o.snapshot_entry_id = e.id and o.deleted_at is null
              where e.id in (${entryIds.map(() => "?").join(", ")})
                and e.inventory_snapshot_id = ? and e.deleted_at is null`,
             [...entryIds, input.inventorySnapshotId],
@@ -907,10 +910,27 @@ class TradingCardInventoryModuleService extends MedusaService({
             const nextVariantId = entry.matchingStatus === INVENTORY_SNAPSHOT_ENTRY_MATCHING_STATUS.MATCHED
               ? (entry.tradingCardVariantId ?? null)
               : null
+            const currentVariantId = (current.trading_card_variant_id ?? current.row_trading_card_variant_id ?? null) as string | null
             if ((current.matching_status ?? null) !== entry.matchingStatus ||
-              (current.trading_card_variant_id ?? null) !== nextVariantId ||
+              currentVariantId !== nextVariantId ||
               (current.matched_via ?? null) !== entry.matchedVia) {
-              affectedKeys.add(`${current.provider_reference_type}:${current.provider_reference}`)
+              const shared = {
+                providerReference: current.provider_reference as string,
+                providerReferenceType: current.provider_reference_type as string,
+                conditionCandidate: current.condition_candidate as string | null,
+                finishCandidate: current.finish_candidate as string | null,
+                specialTreatmentCandidate: current.special_treatment_candidate as string | null,
+                requiresSeparateListing: current.requires_separate_listing_override !== null && current.requires_separate_listing_override !== undefined
+                  ? Boolean(current.requires_separate_listing_override) : Boolean(current.requires_separate_listing),
+                splitGroupKey: (current.override_split_group_key as string | null) ?? null,
+                quantity: 0,
+              }
+              // A rematch can change *both* the group the entry leaves and the group it
+              // joins — both keys (old and new) may need a proposal refresh, since the old
+              // group's remaining rows still need a recomputed aggregate and the new group
+              // may not have an existing proposal at all yet.
+              affectedKeys.add(groupKey({ ...shared, tradingCardVariantId: currentVariantId }))
+              affectedKeys.add(groupKey({ ...shared, tradingCardVariantId: nextVariantId }))
             }
           }
         }
@@ -924,8 +944,7 @@ class TradingCardInventoryModuleService extends MedusaService({
              and deleted_at is null for update`,
           [input.inventorySnapshotId, ...affectedKeys],
         )
-        if (affectedProposals.length !== affectedKeys.size ||
-          affectedProposals.some((proposal) => proposal.review_status !== INVENTORY_PROPOSAL_REVIEW_STATUS.PENDING)) {
+        if (affectedProposals.some((proposal) => proposal.review_status !== INVENTORY_PROPOSAL_REVIEW_STATUS.PENDING)) {
           throw new MedusaError(
             MedusaError.Types.NOT_ALLOWED,
             "Matching cannot be retried because an affected reconciliation proposal has already been actioned",
@@ -1037,17 +1056,24 @@ class TradingCardInventoryModuleService extends MedusaService({
           priceLockedVariantIds: new Set(input.priceLockedVariantIds ?? []),
         }).map((proposal) => [proposal.reconciliationKey, proposal]))
         const comparedAt = new Date()
+        const affectedProposalsByKey = new Map(affectedProposals.map((proposal) => [proposal.reconciliation_key as string, proposal]))
+        const baselineSnapshotIdForInsert = (snapshot.reconciled_against_snapshot_id as string | null) ?? null
 
-        for (const currentProposal of affectedProposals) {
-          const key = currentProposal.reconciliation_key as string
+        for (const key of affectedKeys) {
+          const currentProposal = affectedProposalsByKey.get(key)
           const proposal = proposalsByKey.get(key)
           if (!proposal) {
-            await manager.execute(
-              `update trading_card_inventory_proposal set deleted_at = now(), updated_at = now()
-               where id = ? and review_status = 'PENDING' and deleted_at is null`,
-              [currentProposal.id],
-            )
-          } else {
+            if (currentProposal) {
+              await manager.execute(
+                `update trading_card_inventory_proposal set deleted_at = now(), updated_at = now()
+                 where id = ? and review_status = 'PENDING' and deleted_at is null`,
+                [currentProposal.id],
+              )
+              refreshedProposalCount += 1
+            }
+            continue
+          }
+          if (currentProposal) {
             await manager.execute(
               `update trading_card_inventory_proposal set
                  trading_card_variant_id = ?, proposed_quantity = ?, previous_quantity = ?, quantity_delta = ?, currency_code = ?,
@@ -1063,6 +1089,28 @@ class TradingCardInventoryModuleService extends MedusaService({
                 proposal.previousUnitSellingPrice, proposal.changeKind, proposal.reason,
                 JSON.stringify({ changedFields: proposal.changedFields.slice(0, 8), duplicateRowCount: proposal.duplicateRowCount, sellingPriceLocked: proposal.sellingPriceLocked }),
                 comparedAt, proposal.requiresSeparateListing, currentProposal.id,
+              ],
+            )
+          } else {
+            // No existing PENDING proposal has this key yet — the rematch created a
+            // brand-new group (e.g. the entry moved to a variant no other row shares).
+            await manager.execute(
+              `insert into trading_card_inventory_proposal
+               (id, inventory_source_id, inventory_snapshot_id, baseline_snapshot_id, reconciliation_key, trading_card_variant_id,
+                provider_reference, provider_reference_type, proposed_quantity, previous_quantity, quantity_delta, currency_code,
+                proposed_unit_acquisition_cost, previous_unit_acquisition_cost, proposed_unit_market_price, previous_unit_market_price,
+                proposed_unit_selling_price, previous_unit_selling_price, change_kind, reconciliation_reason,
+                reconciliation_diagnostics, compared_at, review_status, requires_separate_listing)
+               values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, 'PENDING', ?)`,
+              [
+                generateEntityId(undefined, "tciprop"), snapshot.inventory_source_id, input.inventorySnapshotId,
+                baselineSnapshotIdForInsert, proposal.reconciliationKey, proposal.tradingCardVariantId,
+                proposal.providerReference, proposal.providerReferenceType, proposal.proposedQuantity, proposal.previousQuantity,
+                proposal.quantityDelta, proposal.currencyCode, proposal.proposedUnitAcquisitionCost, proposal.previousUnitAcquisitionCost,
+                proposal.proposedUnitMarketPrice, proposal.previousUnitMarketPrice, proposal.proposedUnitSellingPrice,
+                proposal.previousUnitSellingPrice, proposal.changeKind, proposal.reason,
+                JSON.stringify({ changedFields: proposal.changedFields.slice(0, 8), duplicateRowCount: proposal.duplicateRowCount, sellingPriceLocked: proposal.sellingPriceLocked }),
+                comparedAt, proposal.requiresSeparateListing,
               ],
             )
           }
@@ -1224,7 +1272,7 @@ class TradingCardInventoryModuleService extends MedusaService({
   async retrieveSnapshotEntryForRematch(entryId: string): Promise<Record<string, unknown> | null> {
     idSchema.parse(entryId)
     const [row] = await this.manager_.execute<Record<string, unknown>>(
-      `select e.*, s.status as snapshot_status,
+      `select e.*, s.status as snapshot_status, src.language as inventory_source_language,
               coalesce(m.trading_card_variant_id, e.trading_card_variant_id) as effective_trading_card_variant_id,
               exists (
                 select 1 from trading_card_inventory_proposal p
@@ -1234,6 +1282,7 @@ class TradingCardInventoryModuleService extends MedusaService({
               ) as current_variant_applied
        from trading_card_inventory_snapshot_entry e
        inner join trading_card_inventory_snapshot s on s.id = e.inventory_snapshot_id
+       inner join trading_card_inventory_source src on src.id = s.inventory_source_id and src.deleted_at is null
        left join trading_card_inventory_snapshot_entry_match m on m.snapshot_entry_id = e.id and m.deleted_at is null
        where e.id = ? and e.deleted_at is null`,
       [entryId],
@@ -1253,6 +1302,7 @@ class TradingCardInventoryModuleService extends MedusaService({
    */
   async selectAlternativeMatchForEntry(input: AuditContext & {
     snapshotEntryId: string; tradingCardVariantId: string; priceLockedVariantIds?: string[]
+    previousTcgdexCardId?: string | null; newTcgdexSetId?: string; newTcgdexCardId?: string
   }): Promise<{ previousVariantId: string | null; snapshotId: string }> {
     idSchema.parse(input.snapshotEntryId)
     auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
@@ -1295,6 +1345,20 @@ class TradingCardInventoryModuleService extends MedusaService({
         }],
         refreshPendingProposals: entry.snapshot_status === INVENTORY_SNAPSHOT_STATUS.PENDING_REVIEW,
         priceLockedVariantIds: input.priceLockedVariantIds ?? [],
+      })
+
+      // Written inside the same transaction as the match itself — never a
+      // separate post-commit call — so the audit trail can never be absent
+      // or ordered inconsistently relative to the match it describes.
+      await this.writeAudit(manager, {
+        actor: input.actor, source: input.source, reason: input.reason,
+        entityType: INVENTORY_AUDIT_ENTITY_TYPE.INVENTORY_SNAPSHOT, entityId: entry.inventory_snapshot_id as string,
+        action: INVENTORY_AUDIT_ACTION.ENTRY_MATCH_REMATCHED,
+        newValue: {
+          snapshotEntryId: input.snapshotEntryId, previousVariantId, previousTcgdexCardId: input.previousTcgdexCardId ?? null,
+          newTcgdexSetId: input.newTcgdexSetId ?? null, newTcgdexCardId: input.newTcgdexCardId ?? null,
+          newTradingCardVariantId: input.tradingCardVariantId,
+        },
       })
 
       return { previousVariantId, snapshotId: entry.inventory_snapshot_id as string }
@@ -1891,6 +1955,19 @@ class TradingCardInventoryModuleService extends MedusaService({
     })
 
     return this.manager_.transactional(async (manager) => {
+      // Lock ordering must always be snapshot-before-proposal — the same
+      // order reconciliation and rematch already use — so a split/override
+      // can never deadlock against them. Reads the snapshot id with a plain
+      // (non-locking) select first, since which snapshot to lock is only
+      // known via the proposal.
+      const [preCheck] = await manager.execute<Record<string, unknown>>(
+        `select id, inventory_snapshot_id from trading_card_inventory_proposal where id = ? and deleted_at is null`, [input.proposalId]
+      )
+      if (!preCheck) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory proposal not found")
+      const snapshotId = (preCheck.inventory_snapshot_id as string | null) ?? null
+      if (!snapshotId) throw new MedusaError(MedusaError.Types.INVALID_DATA, "This proposal has no snapshot and cannot be split")
+      await this.lockAndAssertSnapshotNotDiscarded(manager, snapshotId)
+
       const [proposal] = await manager.execute<Record<string, unknown>>(
         `select * from trading_card_inventory_proposal where id = ? and deleted_at is null for update`, [input.proposalId]
       )
@@ -1898,9 +1975,6 @@ class TradingCardInventoryModuleService extends MedusaService({
       if (proposal.review_status !== INVENTORY_PROPOSAL_REVIEW_STATUS.PENDING) {
         throw new MedusaError(MedusaError.Types.NOT_ALLOWED, `Cannot split a ${proposal.review_status} proposal — only a PENDING proposal can be split`)
       }
-      const snapshotId = (proposal.inventory_snapshot_id as string | null) ?? null
-      if (!snapshotId) throw new MedusaError(MedusaError.Types.INVALID_DATA, "This proposal has no snapshot and cannot be split")
-      await this.lockAndAssertSnapshotNotDiscarded(manager, snapshotId)
       const reconciliationKey = proposal.reconciliation_key as string | null
       if (!reconciliationKey) throw new MedusaError(MedusaError.Types.INVALID_DATA, "This proposal has no grouping key and cannot be split")
 
@@ -1952,35 +2026,54 @@ class TradingCardInventoryModuleService extends MedusaService({
       const [remainingAgg] = [...aggregateSnapshotEntries(remainingInput).values()]
       const [movedAgg] = [...aggregateSnapshotEntries(movedInput).values()]
 
+      // The original proposal's `previous_quantity` (from the baseline
+      // comparison) describes the whole pre-split group — it has no
+      // per-row breakdown, so a split can only *allocate* it, not derive
+      // it. Allocating proportionally to each side's current quantity
+      // keeps the sum exact (remaining + moved === original) and avoids
+      // either side showing a misleadingly large NEW_HOLDING/QUANTITY_CHANGE
+      // delta purely as an artifact of the split.
+      const originalPrevious = Number(proposal.previous_quantity ?? 0)
+      const totalCurrent = remainingAgg.quantity + movedAgg.quantity
+      const remainingPrevious = totalCurrent > 0 ? Math.floor((originalPrevious * remainingAgg.quantity) / totalCurrent) : 0
+      const movedPrevious = originalPrevious - remainingPrevious
+
+      const deriveChangeKind = (unresolvedReason: string | null, previousQty: number, proposedQty: number) => {
+        if (unresolvedReason) return INVENTORY_PROPOSAL_CHANGE_KIND.UNRESOLVED_VARIANT
+        if (previousQty === 0) return INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING
+        if (previousQty !== proposedQty) return INVENTORY_PROPOSAL_CHANGE_KIND.QUANTITY_CHANGE
+        return INVENTORY_PROPOSAL_CHANGE_KIND.NO_CHANGE
+      }
+
       await manager.execute(
         `update trading_card_inventory_proposal set
-           trading_card_variant_id = ?, proposed_quantity = ?, quantity_delta = ?, currency_code = ?,
+           trading_card_variant_id = ?, proposed_quantity = ?, previous_quantity = ?, quantity_delta = ?, currency_code = ?,
            proposed_unit_acquisition_cost = ?, proposed_unit_market_price = ?, proposed_unit_selling_price = ?,
-           requires_separate_listing = ?, reconciliation_reason = ?, updated_at = now()
+           change_kind = ?, requires_separate_listing = ?, reconciliation_reason = ?, updated_at = now()
          where id = ?`,
         [
-          remainingAgg.tradingCardVariantId, remainingAgg.quantity,
-          remainingAgg.quantity - Number(proposal.previous_quantity ?? 0), remainingAgg.currencyCode,
+          remainingAgg.tradingCardVariantId, remainingAgg.quantity, remainingPrevious,
+          remainingAgg.quantity - remainingPrevious, remainingAgg.currencyCode,
           remainingAgg.unitAcquisitionCost, remainingAgg.unitMarketPrice, remainingAgg.unitSellingPrice,
+          deriveChangeKind(remainingAgg.unresolvedReason, remainingPrevious, remainingAgg.quantity),
           remainingAgg.requiresSeparateListing, "Some rows were split into a new proposal group", input.proposalId,
         ],
       )
 
       const newProposalId = generateEntityId(undefined, "tciprop")
-      const movedChangeKind = movedAgg.unresolvedReason
-        ? INVENTORY_PROPOSAL_CHANGE_KIND.UNRESOLVED_VARIANT
-        : INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING
+      const movedChangeKind = deriveChangeKind(movedAgg.unresolvedReason, movedPrevious, movedAgg.quantity)
       await manager.execute(
         `insert into trading_card_inventory_proposal
          (id, inventory_source_id, inventory_snapshot_id, baseline_snapshot_id, reconciliation_key, trading_card_variant_id,
           provider_reference, provider_reference_type, proposed_quantity, previous_quantity, quantity_delta, currency_code,
           proposed_unit_acquisition_cost, proposed_unit_market_price, proposed_unit_selling_price,
           change_kind, reconciliation_reason, review_status, requires_separate_listing)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)`,
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)`,
         [
           newProposalId, proposal.inventory_source_id, snapshotId, proposal.baseline_snapshot_id ?? null, newKey,
           movedAgg.tradingCardVariantId, movedAgg.providerReference, movedAgg.providerReferenceType, movedAgg.quantity,
-          movedAgg.quantity, movedAgg.currencyCode, movedAgg.unitAcquisitionCost, movedAgg.unitMarketPrice, movedAgg.unitSellingPrice,
+          movedPrevious, movedAgg.quantity - movedPrevious, movedAgg.currencyCode, movedAgg.unitAcquisitionCost,
+          movedAgg.unitMarketPrice, movedAgg.unitSellingPrice,
           movedChangeKind, "Split from an existing proposal group", movedAgg.requiresSeparateListing,
         ],
       )
@@ -2093,6 +2186,15 @@ class TradingCardInventoryModuleService extends MedusaService({
     })
 
     return this.manager_.transactional(async (manager) => {
+      // Snapshot-before-proposal lock ordering — see splitInventoryProposal.
+      const [preCheck] = await manager.execute<Record<string, unknown>>(
+        `select id, inventory_snapshot_id from trading_card_inventory_proposal where id = ? and deleted_at is null`, [input.proposalId]
+      )
+      if (!preCheck) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Inventory proposal not found")
+      const snapshotId = (preCheck.inventory_snapshot_id as string | null) ?? null
+      if (!snapshotId) throw new MedusaError(MedusaError.Types.INVALID_DATA, "This proposal has no snapshot")
+      await this.lockAndAssertSnapshotNotDiscarded(manager, snapshotId)
+
       const [proposal] = await manager.execute<Record<string, unknown>>(
         `select * from trading_card_inventory_proposal where id = ? and deleted_at is null for update`, [input.proposalId]
       )
@@ -2103,9 +2205,6 @@ class TradingCardInventoryModuleService extends MedusaService({
           `Cannot change separate-listing intent on a ${proposal.review_status} proposal — only a PENDING proposal can be changed`,
         )
       }
-      const snapshotId = (proposal.inventory_snapshot_id as string | null) ?? null
-      if (!snapshotId) throw new MedusaError(MedusaError.Types.INVALID_DATA, "This proposal has no snapshot")
-      await this.lockAndAssertSnapshotNotDiscarded(manager, snapshotId)
       const reconciliationKey = proposal.reconciliation_key as string | null
       if (!reconciliationKey) throw new MedusaError(MedusaError.Types.INVALID_DATA, "This proposal has no grouping key")
 
@@ -2161,29 +2260,47 @@ class TradingCardInventoryModuleService extends MedusaService({
         )
       } else {
         const [remainingAgg] = [...aggregateSnapshotEntries(unchanged).values()]
+        const [flippedAgg] = [...aggregateSnapshotEntries(flipped).values()]
+
+        // Same allocation policy as `splitInventoryProposal`: the pre-existing
+        // `previous_quantity` describes the whole pre-override group and has no
+        // per-row breakdown, so it is allocated proportionally to each side's
+        // current quantity rather than left wholly on one side.
+        const originalPrevious = Number(proposal.previous_quantity ?? 0)
+        const totalCurrent = remainingAgg.quantity + flippedAgg.quantity
+        const remainingPrevious = totalCurrent > 0 ? Math.floor((originalPrevious * remainingAgg.quantity) / totalCurrent) : 0
+        const flippedPrevious = originalPrevious - remainingPrevious
+        const deriveChangeKind = (unresolvedReason: string | null, previousQty: number, proposedQty: number) => {
+          if (unresolvedReason) return INVENTORY_PROPOSAL_CHANGE_KIND.UNRESOLVED_VARIANT
+          if (previousQty === 0) return INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING
+          if (previousQty !== proposedQty) return INVENTORY_PROPOSAL_CHANGE_KIND.QUANTITY_CHANGE
+          return INVENTORY_PROPOSAL_CHANGE_KIND.NO_CHANGE
+        }
+
         await manager.execute(
-          `update trading_card_inventory_proposal set proposed_quantity = ?, currency_code = ?,
+          `update trading_card_inventory_proposal set proposed_quantity = ?, previous_quantity = ?, quantity_delta = ?,
+             change_kind = ?, currency_code = ?,
              proposed_unit_acquisition_cost = ?, proposed_unit_market_price = ?, proposed_unit_selling_price = ?, updated_at = now()
            where id = ?`,
-          [remainingAgg.quantity, remainingAgg.currencyCode, remainingAgg.unitAcquisitionCost,
+          [remainingAgg.quantity, remainingPrevious, remainingAgg.quantity - remainingPrevious,
+            deriveChangeKind(remainingAgg.unresolvedReason, remainingPrevious, remainingAgg.quantity),
+            remainingAgg.currencyCode, remainingAgg.unitAcquisitionCost,
             remainingAgg.unitMarketPrice, remainingAgg.unitSellingPrice, input.proposalId],
         )
-        const [flippedAgg] = [...aggregateSnapshotEntries(flipped).values()]
         newProposalId = generateEntityId(undefined, "tciprop")
-        const changeKind = flippedAgg.unresolvedReason
-          ? INVENTORY_PROPOSAL_CHANGE_KIND.UNRESOLVED_VARIANT
-          : INVENTORY_PROPOSAL_CHANGE_KIND.NEW_HOLDING
+        const changeKind = deriveChangeKind(flippedAgg.unresolvedReason, flippedPrevious, flippedAgg.quantity)
         await manager.execute(
           `insert into trading_card_inventory_proposal
            (id, inventory_source_id, inventory_snapshot_id, baseline_snapshot_id, reconciliation_key, trading_card_variant_id,
             provider_reference, provider_reference_type, proposed_quantity, previous_quantity, quantity_delta, currency_code,
             proposed_unit_acquisition_cost, proposed_unit_market_price, proposed_unit_selling_price,
             change_kind, reconciliation_reason, review_status, requires_separate_listing)
-           values (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)`,
+           values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)`,
           [
             newProposalId, proposal.inventory_source_id, snapshotId, proposal.baseline_snapshot_id ?? null, newKey,
             flippedAgg.tradingCardVariantId, flippedAgg.providerReference, flippedAgg.providerReferenceType, flippedAgg.quantity,
-            flippedAgg.quantity, flippedAgg.currencyCode, flippedAgg.unitAcquisitionCost, flippedAgg.unitMarketPrice, flippedAgg.unitSellingPrice,
+            flippedPrevious, flippedAgg.quantity - flippedPrevious, flippedAgg.currencyCode, flippedAgg.unitAcquisitionCost,
+            flippedAgg.unitMarketPrice, flippedAgg.unitSellingPrice,
             changeKind, "Separate-listing override moved rows into a new proposal group", input.requiresSeparateListing,
           ],
         )
