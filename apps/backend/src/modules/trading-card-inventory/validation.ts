@@ -24,7 +24,7 @@ export const auditContextSchema = z.object({
 export const createInventorySourceSchema = z.object({
   displayName: displayNameSchema,
   provider: z.enum(Object.values(INVENTORY_PROVIDER) as [string, ...string[]]),
-  language: z.enum(Object.values(INVENTORY_SOURCE_LANGUAGE) as [string, ...string[]]).nullish(),
+  language: z.enum(Object.values(INVENTORY_SOURCE_LANGUAGE) as [string, ...string[]]),
   defaultCurrencyCode: currencyCodeSchema.nullish(),
   defaultPricingProfileKey: z.string().max(255).nullish(),
   defaultStorefrontCategoryId: z.string().max(255).nullish(),

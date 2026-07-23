@@ -202,3 +202,47 @@ describe("applyInventoryProposal — E2B category re-validation gate", () => {
     expect(result.localApplicationStatus).toBe("APPLIED")
   }, 60000)
 })
+
+describe("confirmProposalCategory — requireUnconfirmed compare-and-set", () => {
+  it("never overwrites a reviewer's manual confirmation with a stale automatic rule match (requireUnconfirmed: true)", async () => {
+    const { variant } = await cardVariantFixture()
+    const source = await sourceFixture()
+    const proposalId = await approvedProposalFixture({ sourceId: source.id, variantId: variant.id })
+
+    // A reviewer manually confirms category A first.
+    await inventory.confirmProposalCategory({
+      proposalId, storeCategoryId: `ebcat_manual_${suffix()}`, actor: "reviewer-1", source: "MANUAL",
+    })
+    const afterManual = (await pgConnection.raw(
+      `select confirmed_ebay_store_category_id from trading_card_inventory_proposal where id = ?`, [proposalId],
+    )).rows[0]
+
+    // The automatic rule-match path (`requireUnconfirmed: true`) then tries
+    // to confirm a *different* category — as if it had evaluated the ruleset
+    // before the reviewer's manual confirmation landed. It must not win.
+    const afterAuto = await inventory.confirmProposalCategory({
+      proposalId, storeCategoryId: `ebcat_auto_${suffix()}`, actor: "system:category-rule-auto-confirm",
+      source: "SYSTEM", requireUnconfirmed: true,
+    })
+
+    expect(afterAuto.confirmed_ebay_store_category_id).toBe(afterManual.confirmed_ebay_store_category_id)
+
+    const [finalRow] = (await pgConnection.raw(
+      `select confirmed_ebay_store_category_id from trading_card_inventory_proposal where id = ?`, [proposalId],
+    )).rows
+    expect(finalRow.confirmed_ebay_store_category_id).toBe(afterManual.confirmed_ebay_store_category_id)
+  })
+
+  it("still confirms normally with requireUnconfirmed: true when nothing has confirmed the proposal yet", async () => {
+    const { variant } = await cardVariantFixture()
+    const source = await sourceFixture()
+    const proposalId = await approvedProposalFixture({ sourceId: source.id, variantId: variant.id })
+
+    const storeCategoryId = `ebcat_auto_${suffix()}`
+    const result = await inventory.confirmProposalCategory({
+      proposalId, storeCategoryId, actor: "system:category-rule-auto-confirm", source: "SYSTEM", requireUnconfirmed: true,
+    })
+
+    expect(result.confirmed_ebay_store_category_id).toBe(storeCategoryId)
+  })
+})

@@ -150,6 +150,10 @@ export const MEDUSA_SYNC_ERROR_CATEGORY = {
   AMBIGUOUS_STOCK_LOCATION: "AMBIGUOUS_STOCK_LOCATION",
   NO_PRODUCT_VARIANT_LINK: "NO_PRODUCT_VARIANT_LINK",
   NO_INVENTORY_ITEM_LINK: "NO_INVENTORY_ITEM_LINK",
+  // A NEW_HOLDING sync is required to publish its Medusa product — if the
+  // product variant somehow has no linked product at all, fail clearly
+  // rather than silently returning SYNCED without publishing anything.
+  NO_LINKED_MEDUSA_PRODUCT: "NO_LINKED_MEDUSA_PRODUCT",
   MEDUSA_LEVEL_READ_FAILED: "MEDUSA_LEVEL_READ_FAILED",
   MEDUSA_LEVEL_CREATE_FAILED: "MEDUSA_LEVEL_CREATE_FAILED",
   MEDUSA_LEVEL_UPDATE_FAILED: "MEDUSA_LEVEL_UPDATE_FAILED",
@@ -157,6 +161,10 @@ export const MEDUSA_SYNC_ERROR_CATEGORY = {
   // E2B: category assignment, folded into this same Phase B sync/retry cycle.
   NO_LINKED_MEDUSA_CATEGORY: "NO_LINKED_MEDUSA_CATEGORY",
   CATEGORY_ASSIGNMENT_FAILED: "CATEGORY_ASSIGNMENT_FAILED",
+  // A card's Medusa product is created as `draft` at Step 2 match/create
+  // time (not yet customer-visible); this publishes it the first time real
+  // stock is actually applied for it (NEW_HOLDING), never earlier.
+  PRODUCT_PUBLISH_FAILED: "PRODUCT_PUBLISH_FAILED",
 } as const
 export type MedusaSyncErrorCategory = (typeof MEDUSA_SYNC_ERROR_CATEGORY)[keyof typeof MEDUSA_SYNC_ERROR_CATEGORY]
 
