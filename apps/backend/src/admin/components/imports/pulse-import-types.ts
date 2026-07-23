@@ -91,8 +91,10 @@ export interface SnapshotEntryListItem {
   card: InventoryProposalCardIdentity | null
   cardIdentityHint: string | null
   tcgdexCandidate: {
-    id: string; reviewStatus: "PENDING" | "ACCEPTED"; name: string; setName: string; seriesName: string | null
+    id: string; reviewStatus: "PENDING" | "ACCEPTED"; matchOutcome: "MATCHED" | "AMBIGUOUS"
+    name: string | null; setName: string; seriesName: string | null
     referenceArtworkUrl: string | null; providerRarity: string | null; illustrator: string | null
+    candidateOptions: Array<{ tcgdexCardId: string; localId: string; name: string; image: string | null }> | null
   } | null
 }
 

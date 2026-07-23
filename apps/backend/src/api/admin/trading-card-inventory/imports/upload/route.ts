@@ -25,7 +25,7 @@ export async function POST(req: AuthenticatedMedusaRequest, res: MedusaResponse)
       fileBuffer: file.buffer, originalFilename: file.originalname, mimeType: file.mimetype,
       inventorySourceId: body.inventorySourceId,
       newSourceDisplayName: body.newSourceDisplayName, newSourceProvider: body.newSourceProvider,
-      newSourceLanguage: body.newSourceLanguage ?? null, newSourceDefaultCurrencyCode: body.newSourceDefaultCurrencyCode ?? null,
+      newSourceLanguage: body.newSourceLanguage ?? undefined, newSourceDefaultCurrencyCode: body.newSourceDefaultCurrencyCode ?? null,
       previousApprovedSnapshotId: body.previousApprovedSnapshotId ?? null, reason: body.reason,
       requiresSeparateListingDefault: body.requiresSeparateListingDefault,
     },

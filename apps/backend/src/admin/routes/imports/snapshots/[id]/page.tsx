@@ -11,6 +11,7 @@ import { formatMoney } from "../../../../components/imports/format-money"
 import ImagePreviewModal from "../../../../components/imports/image-preview-modal"
 import ImportStepper from "../../../../components/imports/import-stepper"
 import MatchingStatusBadge from "../../../../components/imports/matching-status-badge"
+import { parseCardNumber } from "../../../../components/imports/parse-card-number"
 import PaginationBar from "../../../../components/imports/pagination-bar"
 import ReplaceCardImageDialog from "../../../../components/imports/replace-card-image-dialog"
 import ReviewTable, { type ReviewTableColumn } from "../../../../components/imports/review-table"
@@ -22,12 +23,21 @@ import type { VariantThumbnailsResponse } from "../../../../components/imports/i
 import type {
   ImageReadiness, ImportSummary, InventoryProposalListItem, InventoryProposalListResponse,
   SnapshotDiagnosticListItem, SnapshotDiagnosticListResponse,
-  SnapshotEntryListItem, SnapshotEntryListResponse, SnapshotProgress,
+  SnapshotEntryListItem, SnapshotEntryListResponse, SnapshotProgress, UploadCsvResult,
 } from "../../../../components/imports/pulse-import-types"
 import "../../../../styles/imports.css"
 
 const ENTRY_PAGE_SIZE = 20
 const DIAGNOSTIC_PAGE_SIZE = 20
+
+/** Mirrors `LookupProgress` in the dedicated tcgdex-lookup page — same `process-batch` response shape. */
+interface TcgdexLookupProgress {
+  totalCandidates: number
+  needsSetMappingCount: number
+  cachedCount: number
+  processedThisBatch: number
+  remaining: number
+}
 
 const OUTCOME_FILTER_OPTIONS = [
   { value: "VALID", label: "Valid" },
@@ -104,6 +114,18 @@ const ImportsSnapshotDetailPage = () => {
     placeholderData: keepPreviousData,
   })
 
+  // "Approve all card matches" must act on every MATCHED+PENDING candidate in
+  // the whole snapshot, not just the current page of `sortedEntries` — this
+  // dedicated, non-paginated endpoint (already used to compute per-candidate
+  // row counts) is the actual source of truth for that full set.
+  const allMatchedCandidatesQuery = useQuery({
+    queryKey: ["all-matched-tcgdex-candidates", snapshotId],
+    queryFn: () => fetchJson<{ candidates: Array<{ id: string }> }>(
+      `/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/tcgdex-lookup/candidates`,
+    ),
+    enabled: Boolean(snapshotId),
+  })
+
   const diagnosticsQuery = useQuery({
     queryKey: ["pulse-import-diagnostics", snapshotId, { diagnosticOffset, severityFilter }],
     queryFn: () => {
@@ -151,8 +173,13 @@ const ImportsSnapshotDetailPage = () => {
   // an accepted-but-skipped row waiting on "Create card" instead), it drops
   // out of the bulk accept/reject flow. Almost every not-yet-created row has
   // an unresolved proposal — that alone isn't the right signal.
+  // An `AMBIGUOUS` candidate is deliberately excluded — it's a shortlist,
+  // not something the accept/reject endpoint can act on directly; a reviewer
+  // must resolve it via "View matches" first (which promotes it to
+  // `MATCHED`), only then does it become selectable here.
   const isCandidateSelectable = (row: SnapshotEntryListItem) =>
-    Boolean(row.tcgdexCandidate) && !row.tradingCardVariantId && row.tcgdexCandidate!.reviewStatus !== "ACCEPTED"
+    Boolean(row.tcgdexCandidate) && row.tcgdexCandidate!.matchOutcome === "MATCHED"
+    && !row.tradingCardVariantId && row.tcgdexCandidate!.reviewStatus !== "ACCEPTED"
   const selection = useRangeSelection<SnapshotEntryListItem>(
     (row) => row.tcgdexCandidate!.id,
     isCandidateSelectable,
@@ -162,6 +189,7 @@ const ImportsSnapshotDetailPage = () => {
     queryClient.invalidateQueries({ queryKey: ["pulse-import-summary", snapshotId] })
     queryClient.invalidateQueries({ queryKey: ["pulse-import-entries", snapshotId] })
     queryClient.invalidateQueries({ queryKey: ["pulse-import-diagnostics", snapshotId] })
+    queryClient.invalidateQueries({ queryKey: ["all-matched-tcgdex-candidates", snapshotId] })
   }
 
   const reconcileMutation = useMutation({
@@ -174,19 +202,82 @@ const ImportsSnapshotDetailPage = () => {
     onError: () => toast.error("Reconciliation could not be started. Please try again."),
   })
 
-  const reviewCandidatesMutation = useMutation({
-    mutationFn: ({ candidateIds, action }: { candidateIds: string[]; action: "ACCEPT" | "REJECT" }) =>
-      postAction<{ results: Array<{ candidateId: string; createdVariantCount: number; skippedRowCount: number; errors: string[] }> }>(
-        `/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/tcgdex-lookup/review`,
-        { candidateIds, action },
-      ),
-    onSuccess: (response, variables) => {
-      if (variables.action === "REJECT") {
-        toast.success(`${response.results.length} match${response.results.length === 1 ? "" : "es"} rejected`)
+  // Re-runs the TCGdex lookup batch (the same one driven by the dedicated
+  // "Checking TCGdex" page) for every row that still needs one — the button
+  // for this lives in the summary panel so a reviewer who has just confirmed
+  // a provider-set-to-TCGdex mapping (via `SetMappingBanner`) can immediately
+  // pick up the rows that mapping was blocking, without leaving this page.
+  // This only creates/refreshes TCGdex lookup candidates for review below —
+  // it never talks to local trading-card-variant matching (that's the
+  // separate, narrower `retry-matching` route), so a row only becomes
+  // "Matched" once its candidate is explicitly accepted.
+  const [tcgdexSyncProgress, setTcgdexSyncProgress] = useState<TcgdexLookupProgress | null>(null)
+  const syncUnmatchedMutation = useMutation({
+    mutationFn: async () => {
+      let progress: TcgdexLookupProgress
+      for (;;) {
+        const response = await postAction<{ progress: TcgdexLookupProgress }>(
+          `/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/tcgdex-lookup/process-batch`,
+          { batchSize: 10 },
+        )
+        progress = response.progress
+        setTcgdexSyncProgress(progress)
+        if (progress.remaining <= 0) break
+      }
+      return progress
+    },
+    onSuccess: (progress) => {
+      if (progress.totalCandidates === 0) {
+        toast.success("Nothing needed a TCGdex lookup.")
       } else {
-        const created = response.results.reduce((sum, r) => sum + r.createdVariantCount, 0)
-        const skipped = response.results.reduce((sum, r) => sum + r.skippedRowCount, 0)
-        const failed = response.results.filter((r) => r.errors.length > 0)
+        const checked = progress.totalCandidates - progress.needsSetMappingCount
+        toast.success(
+          `TCGdex sync complete: ${checked} row${checked === 1 ? "" : "s"} checked` +
+            (progress.needsSetMappingCount ? `, ${progress.needsSetMappingCount} skipped (set not mapped yet)` : "") + ".",
+        )
+      }
+      setTcgdexSyncProgress(null)
+      refreshAfterAction()
+    },
+    onError: () => {
+      toast.error("Syncing unmatched cards against TCGdex failed. Please try again.")
+      setTcgdexSyncProgress(null)
+    },
+  })
+  const tcgdexSyncTotal = tcgdexSyncProgress?.totalCandidates ?? 0
+  const tcgdexSyncDone = Math.max(0, tcgdexSyncTotal - (tcgdexSyncProgress?.remaining ?? tcgdexSyncTotal))
+  const tcgdexSyncPercent = tcgdexSyncTotal > 0 ? Math.round((tcgdexSyncDone / tcgdexSyncTotal) * 100) : 0
+
+  type CandidateReviewResult = { candidateId: string; createdVariantCount: number; skippedRowCount: number; errors: string[] }
+  const REVIEW_CHUNK_SIZE = 5
+  const [reviewProgress, setReviewProgress] = useState<{ done: number; total: number } | null>(null)
+  const reviewCandidatesMutation = useMutation({
+    mutationFn: async ({ candidateIds, action }: { candidateIds: string[]; action: "ACCEPT" | "REJECT" }) => {
+      // Each candidate can create several card variants (one per duplicate CSV
+      // row) — chunking rather than sending everything in one request keeps a
+      // large batch visible in progress rather than looking hung for however
+      // long the whole thing takes.
+      const uniqueIds = [...new Set(candidateIds)]
+      setReviewProgress({ done: 0, total: uniqueIds.length })
+      const results: CandidateReviewResult[] = []
+      for (let i = 0; i < uniqueIds.length; i += REVIEW_CHUNK_SIZE) {
+        const chunk = uniqueIds.slice(i, i + REVIEW_CHUNK_SIZE)
+        const response = await postAction<{ results: CandidateReviewResult[] }>(
+          `/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/tcgdex-lookup/review`,
+          { candidateIds: chunk, action },
+        )
+        results.push(...response.results)
+        setReviewProgress({ done: Math.min(i + REVIEW_CHUNK_SIZE, uniqueIds.length), total: uniqueIds.length })
+      }
+      return { results, action }
+    },
+    onSuccess: ({ results, action }) => {
+      if (action === "REJECT") {
+        toast.success(`${results.length} match${results.length === 1 ? "" : "es"} rejected`)
+      } else {
+        const created = results.reduce((sum, r) => sum + r.createdVariantCount, 0)
+        const skipped = results.reduce((sum, r) => sum + r.skippedRowCount, 0)
+        const failed = results.filter((r) => r.errors.length > 0)
         const parts = [`${created} card variant${created === 1 ? "" : "s"} created`]
         if (skipped > 0) parts.push(`${skipped} row${skipped === 1 ? "" : "s"} skipped (finish/variant unclear)`)
         if (failed.length > 0) parts.push(`${failed.length} match${failed.length === 1 ? "" : "es"} had errors`)
@@ -204,12 +295,20 @@ const ImportsSnapshotDetailPage = () => {
       refreshAfterAction()
     },
     onError: () => toast.error("This action could not be completed. Please try again."),
+    onSettled: () => setReviewProgress(null),
   })
 
   const summary = summaryQuery.data?.summary
   const progress = summaryQuery.data?.progress
   const imageReadiness = summaryQuery.data?.imageReadiness
   const canReconcile = summary?.status === "VALIDATED"
+  // Mirrors the summary route's own `outstandingMatches` computation exactly
+  // (see summary/route.ts's `loadImageReadiness`) — a row still UNMATCHED,
+  // AMBIGUOUS (TCGdex found several candidates), or REVIEW_REQUIRED has no
+  // card to attach a photo to yet, so Step 3 must stay blocked until every
+  // row has a resolved match.
+  const outstandingMatchCount = ["UNMATCHED", "AMBIGUOUS", "REVIEW_REQUIRED"]
+    .reduce((sum, status) => sum + (summary?.byMatchingStatus[status] ?? 0), 0)
 
   const sortableHeader = (label: string, key: EntrySortKey) => {
     const isActive = entrySort.key === key
@@ -297,7 +396,7 @@ const ImportsSnapshotDetailPage = () => {
         // common case — almost every unresolved row has a proposal, that
         // alone isn't the signal) keeps showing the normal thumbnail.
         if (row.tcgdexCandidate && row.tcgdexCandidate.reviewStatus !== "ACCEPTED") {
-          return <CardImageThumbnail imageUrl={row.tcgdexCandidate.referenceArtworkUrl} alt={row.tcgdexCandidate.name} />
+          return <CardImageThumbnail imageUrl={row.tcgdexCandidate.referenceArtworkUrl} alt={row.tcgdexCandidate.name ?? "Card pending review"} />
         }
         const proposal = row.providerReference ? unresolvedProposalByReference.get(row.providerReference) : undefined
         return (
@@ -323,9 +422,15 @@ const ImportsSnapshotDetailPage = () => {
           )
         }
         if (row.tcgdexCandidate) {
+          const { cardNumber, totalNumber } = parseCardNumber(row.providerReference)
           return (
             <div className="flex flex-col">
               <Text size="small" weight="plus">{row.tcgdexCandidate.name}</Text>
+              {cardNumber && (
+                <Text size="xsmall" className="text-ui-fg-subtle">
+                  Card {cardNumber}{totalNumber ? ` / ${totalNumber}` : ""}
+                </Text>
+              )}
               <Text size="xsmall" className="text-ui-fg-subtle">
                 {[row.tcgdexCandidate.seriesName, row.tcgdexCandidate.setName].filter(Boolean).join(" · ")}
               </Text>
@@ -361,7 +466,22 @@ const ImportsSnapshotDetailPage = () => {
         : (importedRarity ?? row.card?.rarityRaw ?? row.tcgdexCandidate?.providerRarity ?? "—")
     } },
     { header: "Review status", headerCell: sortableHeader("Review status", "reviewStatus"), cell: (row) => (
-      <MatchingStatusBadge status={!row.tradingCardVariantId && row.tcgdexCandidate?.reviewStatus !== "ACCEPTED" ? "AWAITING_REVIEW" : row.matchingStatus} />
+      // A resolved variant takes priority over everything else: once a row
+      // has a real trading-card variant it's genuinely done, distinct from
+      // "Match found" (a TCGdex candidate exists but is still awaiting
+      // approval). Otherwise keyed off the candidate's own `matchOutcome`:
+      // `AMBIGUOUS` (a shortlist, not yet resolved) shows "Awaiting review";
+      // `MATCHED` and not yet accepted shows "Match found"; a row with no
+      // candidate at all falls back to its real `matchingStatus` (e.g. "Not matched").
+      <MatchingStatusBadge status={
+        row.tradingCardVariantId
+          ? "CARD_MATCHED"
+          : row.tcgdexCandidate?.matchOutcome === "AMBIGUOUS"
+            ? "TCGDEX_AMBIGUOUS"
+            : row.tcgdexCandidate?.matchOutcome === "MATCHED" && row.tcgdexCandidate.reviewStatus !== "ACCEPTED"
+              ? "MATCHED"
+              : row.matchingStatus
+      } />
     ) },
   ]
 
@@ -380,7 +500,7 @@ const ImportsSnapshotDetailPage = () => {
   return (
     <div className="ht-imports flex flex-col gap-6">
       <Container className="flex flex-col gap-4 p-6">
-        <Heading level="h1">Import preview</Heading>
+        <Heading level="h1">Import Stages</Heading>
         <ImportStepper compact />
         <Text size="small" className="text-ui-fg-subtle">
           This shows what is in the uploaded file before anything happens to your stock. Accept
@@ -398,9 +518,19 @@ const ImportsSnapshotDetailPage = () => {
                   </Button>
                 )
               : (
-                  <Button onClick={() => navigate(`/imports/images?snapshotId=${encodeURIComponent(snapshotId)}`)}>
-                    Next: Assign card images →
-                  </Button>
+                  <div className="flex flex-col items-end gap-1">
+                    <Button
+                      disabled={outstandingMatchCount > 0}
+                      onClick={() => navigate(`/imports/images?snapshotId=${encodeURIComponent(snapshotId)}`)}
+                    >
+                      Next: Assign card images →
+                    </Button>
+                    {outstandingMatchCount > 0 && (
+                      <Text size="xsmall" className="text-ui-fg-subtle">
+                        {outstandingMatchCount} row{outstandingMatchCount === 1 ? "" : "s"} still {outstandingMatchCount === 1 ? "needs" : "need"} a match before you can assign images.
+                      </Text>
+                    )}
+                  </div>
                 )
           )}
         </div>
@@ -421,7 +551,9 @@ const ImportsSnapshotDetailPage = () => {
 
       {summary && (
         <>
-          <Container className="flex flex-col gap-3 p-6">
+          <Container className="flex flex-col gap-3 p-0">
+            <div className="flex flex-col gap-3 p-6">
+            <Heading level="h2">Import overview</Heading>
             <div className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
               <div>
                 <Text size="xsmall" className="text-ui-fg-subtle">File</Text>
@@ -461,17 +593,39 @@ const ImportsSnapshotDetailPage = () => {
               </div>
             </div>
 
-            <div className="flex flex-wrap gap-3 pt-2">
-              {canReconcile && (
-                <Button
-                  variant="secondary"
-                  isLoading={reconcileMutation.isPending}
-                  onClick={() => reconcileMutation.mutate()}
-                >
-                  Trigger reconciliation
-                </Button>
-              )}
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+              <div className="flex flex-wrap gap-3">
+                {canReconcile && (
+                  <Button
+                    variant="secondary"
+                    isLoading={reconcileMutation.isPending}
+                    onClick={() => reconcileMutation.mutate()}
+                  >
+                    Trigger reconciliation
+                  </Button>
+                )}
+              </div>
+              <Button
+                variant="secondary"
+                isLoading={syncUnmatchedMutation.isPending}
+                onClick={() => syncUnmatchedMutation.mutate()}
+              >
+                Sync not yet matched cards
+              </Button>
             </div>
+            </div>
+            {syncUnmatchedMutation.isPending && (
+              <div
+                className="h-2 w-full bg-ui-bg-subtle"
+                role="progressbar"
+                aria-valuenow={tcgdexSyncPercent}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-label="Syncing not yet matched cards against TCGdex"
+              >
+                <div className="h-2 bg-ui-fg-interactive transition-[width]" style={{ width: `${tcgdexSyncPercent}%` }} />
+              </div>
+            )}
           </Container>
 
           <Container className="flex flex-col gap-3 p-0">
@@ -502,8 +656,8 @@ const ImportsSnapshotDetailPage = () => {
                   <option value="">All review statuses</option>
                   <option value="AWAITING_REVIEW">Awaiting review</option>
                   <option value="NOT_MATCHED">Not matched</option>
-                  <option value="MATCHED">Matched</option>
-                  <option value="AMBIGUOUS">Ambiguous</option>
+                  <option value="MATCHED">Match found</option>
+                  <option value="AMBIGUOUS">Ambiguous (local match)</option>
                 </select>
               </div>
               <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
@@ -514,8 +668,20 @@ const ImportsSnapshotDetailPage = () => {
                 )}
                 <Button
                   size="small"
+                  variant="secondary"
+                  disabled={reviewCandidatesMutation.isPending || !allMatchedCandidatesQuery.data?.candidates.length}
+                  isLoading={reviewCandidatesMutation.isPending || allMatchedCandidatesQuery.isLoading}
+                  onClick={() => reviewCandidatesMutation.mutate({
+                    candidateIds: (allMatchedCandidatesQuery.data?.candidates ?? []).map((candidate) => candidate.id),
+                    action: "ACCEPT",
+                  })}
+                >
+                  Approve all card matches
+                </Button>
+                <Button
+                  size="small"
                   variant="primary"
-                  disabled={selection.selected.size === 0}
+                  disabled={reviewCandidatesMutation.isPending || selection.selected.size === 0}
                   isLoading={reviewCandidatesMutation.isPending}
                   onClick={() => reviewCandidatesMutation.mutate({ candidateIds: [...selection.selected], action: "ACCEPT" })}
                 >
@@ -524,7 +690,7 @@ const ImportsSnapshotDetailPage = () => {
                 <Button
                   size="small"
                   variant="secondary"
-                  disabled={selection.selected.size === 0}
+                  disabled={reviewCandidatesMutation.isPending || selection.selected.size === 0}
                   isLoading={reviewCandidatesMutation.isPending}
                   onClick={() => reviewCandidatesMutation.mutate({ candidateIds: [...selection.selected], action: "REJECT" })}
                 >
@@ -532,6 +698,26 @@ const ImportsSnapshotDetailPage = () => {
                 </Button>
               </div>
             </div>
+            {reviewProgress && (
+              <Text size="xsmall" className="px-4 text-ui-fg-subtle">
+                Approving matches: {reviewProgress.done} of {reviewProgress.total} done…
+              </Text>
+            )}
+            {reviewProgress && (
+              <div
+                className="h-2 w-full bg-ui-bg-subtle"
+                role="progressbar"
+                aria-valuenow={reviewProgress.total > 0 ? Math.round((reviewProgress.done / reviewProgress.total) * 100) : 0}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-label={`Approving matches: ${reviewProgress.done} of ${reviewProgress.total} done`}
+              >
+                <div
+                  className="h-2 bg-ui-fg-interactive transition-[width]"
+                  style={{ width: `${reviewProgress.total > 0 ? Math.round((reviewProgress.done / reviewProgress.total) * 100) : 0}%` }}
+                />
+              </div>
+            )}
             <ReviewTable
               className="ht-imports-rows-table"
               columns={entryColumns}

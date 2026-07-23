@@ -155,10 +155,13 @@ async function resolveInventorySource(
   if (!input.newSourceDisplayName || !input.newSourceProvider) {
     throw new MedusaError(MedusaError.Types.INVALID_DATA, "Either inventorySourceId or newSourceDisplayName and newSourceProvider is required")
   }
+  if (!input.newSourceLanguage) {
+    throw new ValidationFailedError("A card language (EN, JA or ZH) must be explicitly selected when creating a new inventory source")
+  }
   const { source } = await inventory.createOrGetInventorySource({
     actor: input.actor, source: input.source, reason: input.reason,
     displayName: input.newSourceDisplayName, provider: input.newSourceProvider,
-    language: input.newSourceLanguage ?? null, defaultCurrencyCode: input.newSourceDefaultCurrencyCode ?? null,
+    language: input.newSourceLanguage, defaultCurrencyCode: input.newSourceDefaultCurrencyCode ?? null,
   }).catch((error) => {
     if (error instanceof MedusaError && error.type === MedusaError.Types.NOT_ALLOWED) throw new SourceArchivedError()
     throw error

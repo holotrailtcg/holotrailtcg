@@ -39,6 +39,30 @@ export function buildCategoryTree<T extends StoreCategoryLike>(categories: T[]):
   return roots;
 }
 
+/**
+ * Full breadcrumb ("Main Category - Sub Category - Third Category") for one
+ * category id, walked live from `parentExternalId` links rather than trusted
+ * from a stored `path` column — a `path` computed once at creation time can
+ * go stale if a category is ever reparented, so this is guaranteed correct
+ * regardless of that.
+ */
+export function categoryPathLabel<T extends StoreCategoryLike>(categories: T[], id: string | null, separator = " - "): string | null {
+  if (!id) return null
+  const byId = new Map(categories.map((category) => [category.id, category]))
+  const byExternalId = new Map(categories.map((category) => [category.externalId, category]))
+  const target = byId.get(id)
+  if (!target) return null
+  const names: string[] = []
+  let current: T | undefined = target
+  const seen = new Set<string>()
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id)
+    names.unshift(current.name)
+    current = current.parentExternalId ? byExternalId.get(current.parentExternalId) : undefined
+  }
+  return names.join(separator)
+}
+
 /** Flattens a category tree into the same top-to-bottom, parents-before-children order the hierarchy page renders, with a `depth` for indentation. */
 export function flattenCategoryTree<T extends StoreCategoryLike>(
   nodes: CategoryTreeNode<T>[],

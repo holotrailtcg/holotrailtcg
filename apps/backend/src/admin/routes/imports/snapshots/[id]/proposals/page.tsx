@@ -6,18 +6,20 @@ import CategoryAssignmentDialog from "../../../../../components/imports/category
 import CreateCardDialog from "../../../../../components/imports/create-card-dialog"
 import CardImageThumbnail from "../../../../../components/imports/card-image-thumbnail"
 import AlternativeMatchDialog from "../../../../../components/imports/alternative-match-dialog"
+import BadgeWithTooltip from "../../../../../components/imports/badge-with-tooltip"
 import EditIllustratorDialog from "../../../../../components/imports/edit-illustrator-dialog"
 import EntryDetailDrawer from "../../../../../components/imports/entry-detail-drawer"
 import FailedLookupsPanel from "../../../../../components/imports/failed-lookups-panel"
 import ManageGroupDialog from "../../../../../components/imports/manage-group-dialog"
 import { fetchJson, postAction } from "../../../../../components/imports/fetch-json"
 import ImportStepper from "../../../../../components/imports/import-stepper"
-import InventoryProposalStatusBadge from "../../../../../components/imports/inventory-proposal-status-badge"
 import PaginationBar from "../../../../../components/imports/pagination-bar"
 import ReviewTable, { type ReviewTableColumn } from "../../../../../components/imports/review-table"
 import SelectAllCheckbox from "../../../../../components/imports/select-all-checkbox"
 import { useRangeSelection } from "../../../../../components/imports/use-range-selection"
 import { formatEnumLabel } from "../../../../../components/imports/format-enum-label"
+import { categoryPathLabel } from "../../../../../components/ebay/category-tree"
+import type { StoreCategoryLike } from "../../../../../components/ebay/category-tree"
 import type { VariantThumbnailsResponse } from "../../../../../components/imports/image-types"
 import type {
   ApplyProposalItemResult, ImageReadiness, InventoryProposalDetailResponse, InventoryProposalListItem, InventoryProposalListResponse,
@@ -78,7 +80,6 @@ const InventoryProposalsPage = () => {
     (row) => row.id,
     (row) => selectionKind(row) !== null,
   )
-  const [expandedId, setExpandedId] = useState<string | null>(null)
   const [rejectReason, setRejectReason] = useState("")
   const [createCardRow, setCreateCardRow] = useState<InventoryProposalListItem | null>(null)
   const [selectedProposal, setSelectedProposal] = useState<InventoryProposalListItem | null>(null)
@@ -115,10 +116,13 @@ const InventoryProposalsPage = () => {
     placeholderData: keepPreviousData,
   })
 
+  // Moved from a separate "History"/"Hide history" row control into the
+  // drawer itself — one less click, and it sits alongside the rest of this
+  // row's detail instead of a separate expanding panel below the table.
   const historyQuery = useQuery({
-    queryKey: ["inventory-proposal-detail", expandedId],
-    queryFn: () => fetchJson<InventoryProposalDetailResponse>(`/admin/trading-card-inventory/proposals/${encodeURIComponent(expandedId ?? "")}`),
-    enabled: Boolean(expandedId),
+    queryKey: ["inventory-proposal-detail", selectedProposal?.id],
+    queryFn: () => fetchJson<InventoryProposalDetailResponse>(`/admin/trading-card-inventory/proposals/${encodeURIComponent(selectedProposal!.id)}`),
+    enabled: Boolean(selectedProposal?.id),
   })
 
   const refreshAfterAction = () => {
@@ -182,6 +186,143 @@ const InventoryProposalsPage = () => {
     onError: () => toast.error("The Medusa sync retry did not succeed. Please try again."),
   })
 
+  const EBAY_CATEGORY_SYNC_BATCH_SIZE = 20
+  const [ebayCategorySyncProgress, setEbayCategorySyncProgress] = useState<{ done: number; total: number } | null>(null)
+  interface SyncEbayCategoriesBatchResponse {
+    recomputedCount: number; totalEligibleCount: number; remainingCount: number; nextCursor: string | null
+    ruleMatchCount: number; fallbackCount: number; noMatchCount: number
+  }
+  const syncEbayCategoriesMutation = useMutation({
+    mutationFn: async () => {
+      // Chunked and resumable: every batch permanently persists its own
+      // results, so an accidental page refresh mid-sync loses nothing —
+      // clicking the button again just restarts from the beginning and
+      // safely re-processes (a fresh RULE_MATCH is already excluded from the
+      // next query once confirmed; anything else is harmless to recompute).
+      //
+      // The eligible set is recomputed on every request, and a FALLBACK or
+      // NO_MATCH row never leaves it (only a fresh RULE_MATCH auto-confirms
+      // and drops out), so we page by an id cursor rather than a numeric
+      // offset — a numeric offset would either loop forever reprocessing the
+      // same stuck rows or skip past ones that legitimately remain eligible.
+      let done = 0
+      let afterId: string | undefined
+      let totals = { ruleMatchCount: 0, fallbackCount: 0, noMatchCount: 0, recomputedCount: 0 }
+      let totalEligibleCount = 0
+      for (;;) {
+        const batch = await postAction<SyncEbayCategoriesBatchResponse>(
+          `/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/sync-ebay-categories`,
+          { limit: EBAY_CATEGORY_SYNC_BATCH_SIZE, afterId },
+        )
+        totalEligibleCount = batch.totalEligibleCount
+        totals = {
+          ruleMatchCount: totals.ruleMatchCount + batch.ruleMatchCount,
+          fallbackCount: totals.fallbackCount + batch.fallbackCount,
+          noMatchCount: totals.noMatchCount + batch.noMatchCount,
+          recomputedCount: totals.recomputedCount + batch.recomputedCount,
+        }
+        done += batch.recomputedCount
+        afterId = batch.nextCursor ?? afterId
+        setEbayCategorySyncProgress({ done, total: totalEligibleCount })
+        if (batch.remainingCount <= 0 || batch.recomputedCount === 0) break
+      }
+      return totals
+    },
+    onSuccess: (result) => {
+      if (result.recomputedCount === 0) {
+        toast.success("Nothing needed a category sync — every proposal already has one.")
+      } else {
+        const parts = [`${result.ruleMatchCount} auto-confirmed by rule`]
+        if (result.fallbackCount > 0) parts.push(`${result.fallbackCount} fell back (needs confirmation)`)
+        if (result.noMatchCount > 0) parts.push(`${result.noMatchCount} still need a category`)
+        toast.success(`Synced ${result.recomputedCount} proposal${result.recomputedCount === 1 ? "" : "s"}: ${parts.join(", ")}.`)
+      }
+      refreshAfterAction()
+    },
+    onError: (error: Error) => toast.error(error.message || "eBay categories could not be synced. Please try again."),
+    onSettled: () => setEbayCategorySyncProgress(null),
+  })
+
+  const PUBLISH_BATCH_SIZE = 20
+  const [publishProgress, setPublishProgress] = useState<{ done: number; total: number } | null>(null)
+  interface PublishBatchResponse {
+    processedCount: number; totalEligibleCount: number; remainingCount: number; nextCursor: string | null
+    approvedCount: number; appliedCount: number; skippedCount: number; errors: string[]
+  }
+  const publishMutation = useMutation({
+    mutationFn: async (ids?: string[]) => {
+      // Chunked and resumable, same reasoning as the eBay category sync: an
+      // accidental refresh mid-publish loses nothing — every batch's
+      // approve/apply calls are already durably committed. The eligible set
+      // is recomputed on every request, and a proposal that ends up skipped
+      // (still needs "Create card", still needs its eBay category, or
+      // errors) never leaves it, so we page by an id cursor rather than a
+      // numeric offset — a numeric offset would either loop forever
+      // reprocessing the same stuck rows or skip past ones that legitimately
+      // remain eligible.
+      let done = 0
+      let afterId: string | undefined
+      let totals = { approvedCount: 0, appliedCount: 0, skippedCount: 0, errors: [] as string[] }
+      let totalEligibleCount = 0
+      for (;;) {
+        const batch = await postAction<PublishBatchResponse>(
+          `/admin/trading-card-inventory/proposals/publish`,
+          { snapshotId, ids, limit: PUBLISH_BATCH_SIZE, afterId },
+        )
+        totalEligibleCount = batch.totalEligibleCount
+        totals = {
+          approvedCount: totals.approvedCount + batch.approvedCount,
+          appliedCount: totals.appliedCount + batch.appliedCount,
+          skippedCount: totals.skippedCount + batch.skippedCount,
+          errors: [...totals.errors, ...batch.errors],
+        }
+        done += batch.processedCount
+        afterId = batch.nextCursor ?? afterId
+        setPublishProgress({ done, total: totalEligibleCount })
+        if (batch.remainingCount <= 0 || batch.processedCount === 0) break
+      }
+      return { ...totals, totalEligibleCount }
+    },
+    onSuccess: (result) => {
+      if (result.totalEligibleCount === 0) {
+        toast.success("Nothing was ready to publish — approve or create cards for the remaining rows first.")
+      } else {
+        const parts = [`${result.appliedCount} applied`]
+        if (result.approvedCount > 0) parts.push(`${result.approvedCount} approved`)
+        if (result.skippedCount > 0) parts.push(`${result.skippedCount} skipped`)
+        const summary = `Published ${result.totalEligibleCount} proposal${result.totalEligibleCount === 1 ? "" : "s"}: ${parts.join(", ")}.`
+        if (result.errors.length > 0) toast.error(summary, { description: result.errors.join(" | ") })
+        else toast.success(summary)
+      }
+      refreshAfterAction()
+    },
+    onError: (error: Error) => toast.error(error.message || "Publishing could not be completed. Please try again."),
+    onSettled: () => setPublishProgress(null),
+  })
+
+  // Resolves an eBay Store category id to its full "Main - Sub - Third"
+  // breadcrumb for the "Synced"/"Needs confirmation" badge tooltip and the
+  // drawer's eBay category section — merges both environments since a
+  // category id from either could show up here and this is read-only
+  // display, not editing. Breadcrumb is walked live via `categoryPathLabel`
+  // rather than trusted from the stored `path` column, which can go stale if
+  // a category is ever reparented after creation.
+  const ebayCategoriesQuery = useQuery({
+    queryKey: ["ebay-store-categories-all-environments"],
+    queryFn: async () => {
+      const [sandbox, production] = await Promise.allSettled([
+        fetchJson<{ categories: StoreCategoryLike[] }>(`/admin/ebay/store-categories?environment=SANDBOX`),
+        fetchJson<{ categories: StoreCategoryLike[] }>(`/admin/ebay/store-categories?environment=PRODUCTION`),
+      ])
+      const categories: StoreCategoryLike[] = []
+      for (const outcome of [sandbox, production]) {
+        if (outcome.status === "fulfilled") categories.push(...outcome.value.categories)
+      }
+      return categories
+    },
+  })
+  const ebayCategoryName = (id: string | null) => (id ? categoryPathLabel(ebayCategoriesQuery.data ?? [], id) ?? id : null)
+
   const handleReject = async (id: string) => {
     const confirmed = await prompt({
       title: "Reject this proposal?",
@@ -219,7 +360,58 @@ const InventoryProposalsPage = () => {
   }
 
   const progress = summaryQuery.data?.progress
-  const visibleRows = proposalsQuery.data?.proposals ?? []
+
+  // Client-side sort over the current page only — Card/Set/eBay category
+  // values are resolved after the fetch (attachCardIdentities, the category
+  // catalogue lookup), so there's no single DB column to `ORDER BY` for them
+  // without a much larger backend change. Fine at this page size (20 rows).
+  const EBAY_CATEGORY_SORT_RANK: Record<string, number> = { CONFIRMED: 2, PROPOSED: 1, NONE: 0 }
+  const ebayCategorySortRank = (row: InventoryProposalListItem) => {
+    if (row.changeKind !== "NEW_HOLDING") return -1
+    if (row.confirmedEbayStoreCategoryId) return EBAY_CATEGORY_SORT_RANK.CONFIRMED
+    if (row.proposedEbayStoreCategoryId) return EBAY_CATEGORY_SORT_RANK.PROPOSED
+    return EBAY_CATEGORY_SORT_RANK.NONE
+  }
+  type ProposalSortKey = "uploadedImage" | "card" | "set" | "rarity" | "changeKind" | "quantity" | "ebayCategory"
+  const [proposalSort, setProposalSort] = useState<{ key: ProposalSortKey; direction: "asc" | "desc" } | null>(null)
+  const proposalSortValue = (row: InventoryProposalListItem, key: ProposalSortKey): string | number => {
+    switch (key) {
+      case "uploadedImage": return row.tradingCardVariantId && thumbnailsQuery.data?.thumbnails[row.tradingCardVariantId]?.photoUrl ? 1 : 0
+      case "card": return (row.card?.name ?? row.cardIdentityHint ?? "").toLowerCase()
+      case "set": return (row.card?.setDisplayName ?? "").toLowerCase()
+      case "rarity": return (row.card?.rarity ?? row.card?.rarityRaw ?? "").toLowerCase()
+      case "changeKind": return CHANGE_KIND_LABEL[row.changeKind] ?? row.changeKind
+      case "quantity": return row.proposedQuantity ?? 0
+      case "ebayCategory": return ebayCategorySortRank(row)
+    }
+  }
+  const sortableHeader = (label: string, key: ProposalSortKey) => {
+    const active = proposalSort?.key === key
+    const arrow = active ? (proposalSort!.direction === "asc" ? "↑" : "↓") : "↕"
+    return (
+      <button
+        type="button"
+        className="flex items-center gap-1 whitespace-nowrap"
+        aria-label={`Sort by ${label}`}
+        onClick={() => setProposalSort((current) => ({
+          key, direction: current?.key === key && current.direction === "asc" ? "desc" : "asc",
+        }))}
+      >
+        <span>{label}</span>
+        <span aria-hidden="true" className={active ? "text-ui-fg-base" : "text-ui-fg-muted"}>{arrow}</span>
+      </button>
+    )
+  }
+
+  const unsortedRows = proposalsQuery.data?.proposals ?? []
+  const visibleRows = proposalSort
+    ? [...unsortedRows].sort((a, b) => {
+        const va = proposalSortValue(a, proposalSort.key)
+        const vb = proposalSortValue(b, proposalSort.key)
+        const cmp = typeof va === "number" && typeof vb === "number" ? va - vb : String(va).localeCompare(String(vb))
+        return proposalSort.direction === "asc" ? cmp : -cmp
+      })
+    : unsortedRows
   const categoryProposalIndex = categoryProposalId ? visibleRows.findIndex((row) => row.id === categoryProposalId) : -1
   const nextCategoryProposalId = categoryProposalIndex >= 0
     ? visibleRows.slice(categoryProposalIndex + 1).find(needsCategoryConfirmation)?.id ?? null
@@ -297,13 +489,23 @@ const InventoryProposalsPage = () => {
     },
     {
       header: "Card",
+      headerCell: sortableHeader("Card", "uploadedImage"),
+      headerClassName: "max-w-16",
+      cell: (row) => {
+        const image = row.tradingCardVariantId ? thumbnailsQuery.data?.thumbnails[row.tradingCardVariantId] : undefined
+        return <CardImageThumbnail imageUrl={image?.photoUrl ?? null} alt={`Uploaded image for ${row.card?.name ?? row.cardIdentityHint ?? "unmatched card"}`} />
+      },
+    },
+    {
+      header: "Card name",
+      headerCell: sortableHeader("Card name", "card"),
       cell: (row) => {
         if (row.card) {
           return (
             <div className="flex flex-col">
               <Text size="small" weight="plus">{row.card.name}</Text>
               <Text size="xsmall" className="text-ui-fg-subtle">
-                {row.card.setDisplayName} · {row.card.cardNumber} · {formatEnumLabel(row.card.condition)} · {formatEnumLabel(row.card.finish)}
+                Card {row.card.cardNumber} · {formatEnumLabel(row.card.condition)} · {formatEnumLabel(row.card.finish)}
               </Text>
             </div>
           )
@@ -319,28 +521,39 @@ const InventoryProposalsPage = () => {
         return <Text size="small" className="text-ui-fg-subtle">Not yet matched</Text>
       },
     },
+    { header: "Set", headerCell: sortableHeader("Set", "set"), cell: (row) => row.card?.setDisplayName ?? "—" },
     {
-      header: "Uploaded image",
+      header: "Rarity",
+      headerCell: sortableHeader("Rarity", "rarity"),
+      cell: (row) => row.card?.rarity ? formatEnumLabel(row.card.rarity) : (row.card?.rarityRaw ?? "—"),
+    },
+    { header: "Change", headerCell: sortableHeader("Change", "changeKind"), cell: (row) => CHANGE_KIND_LABEL[row.changeKind] ?? formatEnumLabel(row.changeKind) },
+    {
+      header: "Quantity",
+      headerCell: sortableHeader("Quantity", "quantity"),
       cell: (row) => {
-        const image = row.tradingCardVariantId ? thumbnailsQuery.data?.thumbnails[row.tradingCardVariantId] : undefined
-        return <CardImageThumbnail imageUrl={image?.photoUrl ?? null} alt={`Uploaded image for ${row.card?.name ?? row.cardIdentityHint ?? "unmatched card"}`} />
+        const previous = row.previousQuantity ?? 0
+        const proposed = row.proposedQuantity ?? 0
+        const color = proposed > previous ? "green" : proposed < previous ? "red" : "grey"
+        return <Badge size="2xsmall" color={color}>{previous} → {proposed}</Badge>
       },
     },
-    {
-      header: "TCGDex image",
-      cell: (row) => {
-        const image = row.tradingCardVariantId ? thumbnailsQuery.data?.thumbnails[row.tradingCardVariantId] : undefined
-        return <CardImageThumbnail imageUrl={image?.tcgdexImageUrl ?? null} alt={`TCGDex image for ${row.card?.name ?? row.cardIdentityHint ?? "unmatched card"}`} />
-      },
-    },
-    { header: "Change", cell: (row) => CHANGE_KIND_LABEL[row.changeKind] ?? formatEnumLabel(row.changeKind) },
-    { header: "Quantity", cell: (row) => `${row.previousQuantity ?? 0} → ${row.proposedQuantity ?? 0}` },
-    { header: "Status", cell: (row) => <InventoryProposalStatusBadge reviewStatus={row.reviewStatus} medusaSyncStatus={row.medusaSyncStatus} /> },
     {
       header: "eBay category",
+      headerCell: sortableHeader("eBay category", "ebayCategory"),
       cell: (row) => {
         if (row.changeKind !== "NEW_HOLDING") return <Text size="small" className="text-ui-fg-subtle">—</Text>
-        if (row.confirmedEbayStoreCategoryId) return <Badge size="2xsmall" color="green">Confirmed</Badge>
+        if (row.confirmedEbayStoreCategoryId) {
+          const categoryLabel = ebayCategoryName(row.confirmedEbayStoreCategoryId) ?? "Synced"
+          const tooltip = row.categoryConfirmedBy === "system:category-rule-auto-confirm"
+            ? `${categoryLabel} (auto-synced by rule)`
+            : categoryLabel
+          return (
+            <BadgeWithTooltip color="green" tooltip={tooltip}>
+              Synced
+            </BadgeWithTooltip>
+          )
+        }
         if (row.proposedEbayStoreCategoryId) {
           return (
             <div className="flex flex-col items-start" onClick={(event) => event.stopPropagation()}>
@@ -397,9 +610,6 @@ const InventoryProposalsPage = () => {
               Retry sync
             </Button>
           )}
-          <Button size="small" variant="transparent" onClick={() => setExpandedId(expandedId === row.id ? null : row.id)}>
-            {expandedId === row.id ? "Hide history" : "History"}
-          </Button>
           {row.reviewStatus === "PENDING" && (
             <Button size="small" variant="transparent" onClick={() => setManageGroupProposalId(row.id)}>
               Manage group
@@ -427,9 +637,34 @@ const InventoryProposalsPage = () => {
           To act on several rows at once: tick their boxes (or hold Shift and click to select a
           range), then use the bulk action that appears above the table.
         </Text>
-        <Text size="small">
-          <Link to={`/imports/snapshots/${encodeURIComponent(snapshotId)}`}>Back to snapshot</Link>
-        </Text>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <Button variant="secondary" onClick={() => navigate(`/imports/images?snapshotId=${encodeURIComponent(snapshotId)}`)}>
+            Back: Assign card images
+          </Button>
+          <Button isLoading={publishMutation.isPending} onClick={() => publishMutation.mutate(undefined)}>
+            Publish all
+          </Button>
+        </div>
+        {publishProgress && (
+          <>
+            <Text size="xsmall" className="text-ui-fg-subtle">
+              Publishing {publishProgress.done} of {publishProgress.total}…
+            </Text>
+            <div
+              className="h-2 w-full bg-ui-bg-subtle"
+              role="progressbar"
+              aria-valuenow={publishProgress.total > 0 ? Math.round((publishProgress.done / publishProgress.total) * 100) : 0}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label={`Publishing: ${publishProgress.done} of ${publishProgress.total} done`}
+            >
+              <div
+                className="h-2 bg-ui-fg-interactive transition-[width]"
+                style={{ width: `${publishProgress.total > 0 ? Math.round((publishProgress.done / publishProgress.total) * 100) : 0}%` }}
+              />
+            </div>
+          </>
+        )}
       </Container>
 
       {progress && (
@@ -441,7 +676,7 @@ const InventoryProposalsPage = () => {
           <Badge size="2xsmall" color="orange">Applied, sync pending {progress.appliedSyncPending}</Badge>
           <Badge size="2xsmall" color="red">Applied, sync failed {progress.appliedSyncFailed}</Badge>
           {progress.blocked > 0 && <Badge size="2xsmall" color="red">Blocked — needs re-approval {progress.blocked}</Badge>}
-          {progress.fullyComplete && <Badge size="2xsmall" color="green">Snapshot fully applied</Badge>}
+          {progress.fullyComplete && <Badge size="2xsmall" color="green">Import status: Complete</Badge>}
         </Container>
       )}
 
@@ -475,31 +710,69 @@ const InventoryProposalsPage = () => {
               <option value="APPLIED">Applied</option>
             </select>
           </div>
-          {selection.selected.size > 0 && (
-            <div className="flex flex-wrap items-center gap-2">
-              <Text size="small" className="text-ui-fg-subtle">{selection.selected.size} selected</Text>
-              {selectedKind === "REVIEW" && (
-                <>
-                  <Button size="small" variant="primary" isLoading={bulkReviewMutation.isPending} onClick={() => handleBulkReview("APPROVED")}>
-                    Approve selected
+          <div className="flex flex-wrap items-center gap-2">
+            {selection.selected.size > 0 && (
+              <>
+                <Text size="small" className="text-ui-fg-subtle">{selection.selected.size} selected</Text>
+                {selectedKind === "REVIEW" && (
+                  <>
+                    <Button size="small" variant="primary" isLoading={bulkReviewMutation.isPending} onClick={() => handleBulkReview("APPROVED")}>
+                      Approve selected
+                    </Button>
+                    <Button size="small" variant="danger" isLoading={bulkReviewMutation.isPending} onClick={() => handleBulkReview("REJECTED")}>
+                      Reject selected
+                    </Button>
+                  </>
+                )}
+                {selectedKind === "APPLY" && (
+                  <Button size="small" variant="secondary" isLoading={bulkApplyMutation.isPending} onClick={handleBulkApply}>
+                    Apply selected
                   </Button>
-                  <Button size="small" variant="danger" isLoading={bulkReviewMutation.isPending} onClick={() => handleBulkReview("REJECTED")}>
-                    Reject selected
-                  </Button>
-                </>
-              )}
-              {selectedKind === "APPLY" && (
-                <Button size="small" variant="secondary" isLoading={bulkApplyMutation.isPending} onClick={handleBulkApply}>
-                  Apply selected
+                )}
+                <Button
+                  size="small"
+                  variant="primary"
+                  isLoading={publishMutation.isPending}
+                  onClick={() => publishMutation.mutate([...selection.selected])}
+                >
+                  Publish selected
                 </Button>
-              )}
-            </div>
-          )}
+              </>
+            )}
+            <Button
+              size="small"
+              variant="secondary"
+              isLoading={syncEbayCategoriesMutation.isPending}
+              onClick={() => syncEbayCategoriesMutation.mutate()}
+            >
+              Sync eBay categories
+            </Button>
+          </div>
         </div>
+        {ebayCategorySyncProgress && (
+          <>
+            <Text size="xsmall" className="px-4 text-ui-fg-subtle">
+              Syncing {ebayCategorySyncProgress.done} of {ebayCategorySyncProgress.total}…
+            </Text>
+            <div
+              className="h-2 w-full bg-ui-bg-subtle"
+              role="progressbar"
+              aria-valuenow={ebayCategorySyncProgress.total > 0 ? Math.round((ebayCategorySyncProgress.done / ebayCategorySyncProgress.total) * 100) : 0}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label={`Syncing eBay categories: ${ebayCategorySyncProgress.done} of ${ebayCategorySyncProgress.total} done`}
+            >
+              <div
+                className="h-2 bg-ui-fg-interactive transition-[width]"
+                style={{ width: `${ebayCategorySyncProgress.total > 0 ? Math.round((ebayCategorySyncProgress.done / ebayCategorySyncProgress.total) * 100) : 0}%` }}
+              />
+            </div>
+          </>
+        )}
 
         <ReviewTable
           columns={columns}
-          rows={proposalsQuery.data?.proposals ?? []}
+          rows={visibleRows}
           rowKey={(row) => row.id}
           onRowClick={(row) => setSelectedProposal(row)}
           isLoading={proposalsQuery.isLoading}
@@ -515,27 +788,6 @@ const InventoryProposalsPage = () => {
           />
         )}
       </Container>
-
-      {expandedId && (
-        <Container className="flex flex-col gap-3 p-6">
-          <Heading level="h2">History for {expandedId}</Heading>
-          {historyQuery.isLoading && <Text size="small" className="text-ui-fg-subtle">Loading…</Text>}
-          {historyQuery.data && historyQuery.data.history.length === 0 && (
-            <Text size="small" className="text-ui-fg-subtle">No history yet.</Text>
-          )}
-          {historyQuery.data && historyQuery.data.history.length > 0 && (
-            <ul className="flex flex-col gap-2">
-              {historyQuery.data.history.map((entry) => (
-                <li key={entry.id}>
-                  <Text size="small">
-                    {entry.action} · {entry.actor} · {new Date(entry.createdAt).toLocaleString()}
-                  </Text>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Container>
-      )}
 
       <Container className="flex flex-col gap-2 p-6">
         <Text size="small" weight="plus">Rejection reason (optional, applies to the next single reject)</Text>
@@ -612,6 +864,11 @@ const InventoryProposalsPage = () => {
               : undefined}
             onFindAlternativeMatch={() => setAlternativeMatchEntryId(entry.id)}
             onEditIllustrator={entry.card?.tradingCardId ? () => setEditIllustratorCardId(entry.card!.tradingCardId) : undefined}
+            proposal={selectedProposal}
+            ebayCategoryName={ebayCategoryName}
+            onCategoryConfirmed={refreshAfterAction}
+            history={historyQuery.data?.history}
+            historyLoading={historyQuery.isLoading}
           />
         )
       })()}

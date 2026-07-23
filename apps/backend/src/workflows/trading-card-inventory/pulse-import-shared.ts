@@ -287,6 +287,16 @@ export async function retryPulseSnapshotMatching(
   const inventorySourceId = snapshot.inventory_source_id as string
   const sourceRow = await inventory.retrieveInventorySource(inventorySourceId)
   const sourceLanguage = (sourceRow.language as string | null) ?? null
+  // A source created before language enforcement (or otherwise left
+  // language-less) must never be silently matched/reconciled with no
+  // language — that would generate unmatched-group identities and
+  // reconciliation keys missing a structural part of saleable identity.
+  if (!sourceLanguage) {
+    throw new MedusaError(
+      MedusaError.Types.INVALID_DATA,
+      "This inventory source has no card language configured. Set a language on the source before retrying matching.",
+    )
+  }
 
   if (![INVENTORY_SNAPSHOT_STATUS.DRAFT, INVENTORY_SNAPSHOT_STATUS.VALIDATED, INVENTORY_SNAPSHOT_STATUS.PENDING_REVIEW]
     .includes(snapshot.status as never)) {

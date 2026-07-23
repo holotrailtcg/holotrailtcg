@@ -87,11 +87,11 @@ const ManageGroupDialog = ({ proposalId, onClose, onChanged }: ManageGroupDialog
 
   return (
     <FocusModal open onOpenChange={(open) => { if (!open) onClose() }}>
-      <FocusModal.Content>
+      <FocusModal.Content className="!bottom-auto !left-1/2 !right-auto !top-1/2 h-[min(44rem,calc(100vh-4rem))] w-[min(48rem,calc(100vw-3rem))] -translate-x-1/2 -translate-y-1/2">
         <FocusModal.Header>
           <Text weight="plus">Manage group</Text>
         </FocusModal.Header>
-        <FocusModal.Body className="flex flex-col gap-4 p-6">
+        <FocusModal.Body className="flex flex-col gap-4 overflow-y-auto p-6">
           <Text size="small" className="text-ui-fg-subtle">
             Tick the rows that belong in a different group, then use Split. To change whether these
             cards need a separate listing, tick specific rows (or leave everything unticked to change

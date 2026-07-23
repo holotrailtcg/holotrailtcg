@@ -15,7 +15,8 @@ export interface ImportPulseCsvSnapshotInput extends AuditContext {
   /** Path B: create-or-get a source by display name. Both fields are required together. */
   newSourceDisplayName?: string
   newSourceProvider?: string
-  newSourceLanguage?: string | null
+  /** Required together with newSourceDisplayName/newSourceProvider — a new source must always have an explicit card language. */
+  newSourceLanguage?: string
   newSourceDefaultCurrencyCode?: string | null
   previousApprovedSnapshotId?: string | null
   /** When set, skips source/file/snapshot creation and resumes matching/reconciliation for an existing snapshot. */

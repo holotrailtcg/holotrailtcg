@@ -93,11 +93,15 @@ const CreateCardDialog = ({ row, onClose, onCreated }: CreateCardDialogProps) =>
     if (entry.finishCandidate) setFinish(entry.finishCandidate)
     if (entry.specialTreatmentCandidate) setSpecialTreatment(entry.specialTreatmentCandidate)
     if (entry.rarityRaw) setRarityRaw(entry.rarityRaw)
-    if (entry.tcgdexCandidate) {
-      setName((current) => current || entry.tcgdexCandidate!.name)
-      setCardSetDisplayName((current) => current || entry.tcgdexCandidate!.setName)
-      if (entry.tcgdexCandidate.illustrator) {
-        setIllustrator((current) => (illustratorTouched || current ? current : entry.tcgdexCandidate!.illustrator!))
+    // An `AMBIGUOUS` candidate has no resolved `name` yet (just a shortlist —
+    // see "View matches" in the row drawer) — this dialog only prefills from
+    // a genuine `MATCHED` candidate.
+    if (entry.tcgdexCandidate && entry.tcgdexCandidate.matchOutcome === "MATCHED" && entry.tcgdexCandidate.name) {
+      const matchedCandidate = entry.tcgdexCandidate
+      setName((current) => current || matchedCandidate.name!)
+      setCardSetDisplayName((current) => current || matchedCandidate.setName)
+      if (matchedCandidate.illustrator) {
+        setIllustrator((current) => (illustratorTouched || current ? current : matchedCandidate.illustrator!))
       }
     }
     const parsedCardNumber = (entry.providerReference.split("|")[1] ?? "").trim()

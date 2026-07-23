@@ -2,7 +2,7 @@
  * @jest-environment jsdom
  */
 import "@testing-library/jest-dom"
-import { render, screen, waitFor } from "@testing-library/react"
+import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
@@ -116,7 +116,11 @@ function renderPage(
     if (url.match(/\/proposals\/tciprop_\d+$/)) {
       const match = url.match(/\/proposals\/(tciprop_\d+)$/)
       const target = proposals.find((p) => p.id === match?.[1]) ?? proposals[0]
-      return mockResponse({ proposal: target, history: [] })
+      const history = target?.id === "tciprop_1" ? [{
+        id: "tciaudit_1", actor: "system:category-rule-auto-confirm", action: "PROPOSAL_CATEGORY_CONFIRMED",
+        oldValue: null, newValue: null, reason: null, source: "SYSTEM", createdAt: "2026-07-01T00:00:00.000Z",
+      }] : []
+      return mockResponse({ proposal: target, history })
     }
     throw new Error(`Unexpected fetch: ${url}`)
   })
@@ -146,10 +150,11 @@ describe("InventoryProposalsPage", () => {
     mockedUi.toast.info.mockClear()
   })
 
-  it("renders proposals with combined status badges and progress counts", async () => {
+  it("renders proposals with quantity-change badges and progress counts", async () => {
     renderPage()
-    expect(await screen.findByText("Pending review")).toBeInTheDocument()
-    expect(screen.getByText("Approved — not yet applied")).toBeInTheDocument()
+    expect(await screen.findAllByText("Pikachu")).toHaveLength(2)
+    // PENDING_PROPOSAL/APPROVED_PROPOSAL both go 0 -> 5, an increase, so both badges are green.
+    expect(screen.getAllByText("0 → 5")).toHaveLength(2)
     expect(screen.getByText("Pending 1")).toBeInTheDocument()
     expect(screen.getByText("Approved, unapplied 1")).toBeInTheDocument()
   })
@@ -161,7 +166,7 @@ describe("InventoryProposalsPage", () => {
     expect(await screen.findByText("Assign card images (redirected here)")).toBeInTheDocument()
   })
 
-  it("shows uploaded and TCGDex image columns and opens the row detail drawer", async () => {
+  it("shows the uploaded-image column and opens the row detail drawer", async () => {
     const user = userEvent.setup()
     const proposal = {
       ...PENDING_PROPOSAL,
@@ -179,19 +184,18 @@ describe("InventoryProposalsPage", () => {
       },
     })
 
-    expect(await screen.findByRole("columnheader", { name: "Uploaded image" })).toBeInTheDocument()
-    expect(screen.getByRole("columnheader", { name: "TCGDex image" })).toBeInTheDocument()
+    expect(await screen.findByRole("columnheader", { name: "Card" })).toBeInTheDocument()
+    expect(screen.queryByRole("columnheader", { name: "TCGDex image" })).not.toBeInTheDocument()
     expect(await screen.findByRole("img", { name: "Uploaded image for Pikachu" })).toHaveAttribute("src", "https://images.example/uploaded.jpg")
-    expect(screen.getByRole("img", { name: "TCGDex image for Pikachu" })).toHaveAttribute("src", "https://assets.tcgdex.net/pikachu.webp")
 
     await user.click(screen.getByText("Pikachu"))
-    expect(await screen.findByText("Import row 1")).toBeInTheDocument()
+    expect(await screen.findByRole("dialog")).toBeInTheDocument()
   })
 
   it("approves a single pending proposal", async () => {
     const user = userEvent.setup()
     const { fetchMock } = renderPage()
-    await screen.findByText("Pending review")
+    await screen.findAllByText("Pikachu")
 
     await user.click(screen.getByRole("button", { name: "Approve" }))
 
@@ -205,7 +209,7 @@ describe("InventoryProposalsPage", () => {
   it("applies a single approved proposal", async () => {
     const user = userEvent.setup()
     const { fetchMock } = renderPage()
-    await screen.findByText("Approved — not yet applied")
+    await screen.findByRole("button", { name: "Apply" })
 
     await user.click(screen.getByRole("button", { name: "Apply" }))
 
@@ -219,7 +223,7 @@ describe("InventoryProposalsPage", () => {
   it("selects rows and bulk-approves them", async () => {
     const user = userEvent.setup()
     const { fetchMock } = renderPage()
-    await screen.findByText("Pending review")
+    await screen.findAllByText("Pikachu")
 
     const checkboxes = screen.getAllByRole("checkbox")
     await user.click(checkboxes[0])
@@ -249,33 +253,30 @@ describe("InventoryProposalsPage", () => {
   it("shows a retry-sync action only for an applied proposal with a failed Medusa sync", async () => {
     const failedSyncProposal: InventoryProposalListItem = { ...APPROVED_PROPOSAL, id: "tciprop_3", reviewStatus: "APPLIED", medusaSyncStatus: "FAILED" }
     renderPage([failedSyncProposal])
-    expect(await screen.findByText("Inventory applied — Medusa sync failed")).toBeInTheDocument()
-    expect(screen.getByRole("button", { name: "Retry sync" })).toBeInTheDocument()
+    expect(await screen.findByRole("button", { name: "Retry sync" })).toBeInTheDocument()
   })
 
   it("does not offer Apply for an approved NEW_HOLDING proposal without a confirmed eBay Store category", async () => {
     const unconfirmedApproved = { ...APPROVED_PROPOSAL, confirmedEbayStoreCategoryId: null, categoryConfirmedAt: null, categoryConfirmedBy: null }
     renderPage([unconfirmedApproved])
-    await screen.findByText("Approved — not yet applied")
+    await screen.findByText("Confirm the eBay category before this can be applied")
 
     expect(screen.queryByRole("button", { name: "Apply" })).not.toBeInTheDocument()
-    expect(screen.getByText("Confirm the eBay category before this can be applied")).toBeInTheDocument()
     // Also excluded from bulk-select — selectionKind is null for it.
     expect(screen.getByRole("checkbox")).toBeDisabled()
   })
 
   it("offers Apply for an approved NEW_HOLDING proposal once its eBay Store category is confirmed", async () => {
     renderPage([APPROVED_PROPOSAL])
-    await screen.findByText("Approved — not yet applied")
 
-    expect(screen.getByRole("button", { name: "Apply" })).toBeInTheDocument()
+    expect(await screen.findByRole("button", { name: "Apply" })).toBeInTheDocument()
     expect(screen.queryByText("Confirm the eBay category before this can be applied")).not.toBeInTheDocument()
   })
 
   it("navigates to Inventory via 'View in Inventory →' once the snapshot is fully applied, not the Assign card images link", async () => {
     const user = userEvent.setup()
     renderPage([APPROVED_PROPOSAL], { progress: { fullyComplete: true, allApplicableApplied: true, allReviewed: true } })
-    await screen.findByText("Snapshot fully applied")
+    await screen.findByText("Import status: Complete")
 
     const viewInInventory = screen.getByRole("button", { name: "View in Inventory →" })
     expect(viewInInventory).toBeInTheDocument()
@@ -285,7 +286,7 @@ describe("InventoryProposalsPage", () => {
     // No route for /inventory is mounted in this test harness, so a
     // successful navigation away is observed as this page's own content
     // disappearing rather than by asserting on the (unmounted) destination.
-    await waitFor(() => expect(screen.queryByText("Snapshot fully applied")).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByText("Import status: Complete")).not.toBeInTheDocument())
   })
 
   it("auto-advances the category dialog's 'Next card →' to the next row still needing category confirmation", async () => {
@@ -299,7 +300,7 @@ describe("InventoryProposalsPage", () => {
       proposedEbayStoreCategoryId: "ebcat_1", confirmedEbayStoreCategoryId: null,
     }
     const { fetchMock } = renderPage([firstNeedsCategory, secondNeedsCategory])
-    await screen.findAllByText("Pending review")
+    await screen.findAllByRole("button", { name: "Review proposed category" })
 
     await user.click(screen.getAllByRole("button", { name: "Review proposed category" })[0])
     await screen.findByRole("dialog")
@@ -316,15 +317,22 @@ describe("InventoryProposalsPage", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument()
   })
 
-  it("expands and collapses the history panel for a proposal", async () => {
+  it("shows a readable (non-enum) history entry in the drawer, collapsed by default", async () => {
     const user = userEvent.setup()
     renderPage()
-    await screen.findByText("Pending review")
+    await screen.findAllByText("Pikachu")
 
-    await user.click(screen.getAllByRole("button", { name: "History" })[0])
-    expect(await screen.findByText(/History for tciprop_1/)).toBeInTheDocument()
+    await user.click(screen.getAllByText("Pikachu")[0])
+    const drawer = await screen.findByRole("dialog")
+    const historyToggle = within(drawer).getByRole("button", { name: "History" })
+    expect(within(drawer).queryByText(/Proposal Category Confirmed/)).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole("button", { name: "Hide history" }))
-    expect(screen.queryByText(/History for tciprop_1/)).not.toBeInTheDocument()
+    await user.click(historyToggle)
+    expect(await within(drawer).findByText(/Proposal Category Confirmed/)).toBeInTheDocument()
+    expect(within(drawer).getByText(/System \(Category Rule Auto Confirm\)/)).toBeInTheDocument()
+    expect(within(drawer).queryByText("PROPOSAL_CATEGORY_CONFIRMED")).not.toBeInTheDocument()
+
+    await user.click(historyToggle)
+    expect(within(drawer).queryByText(/Proposal Category Confirmed/)).not.toBeInTheDocument()
   })
 })

@@ -97,10 +97,21 @@ describe("importPulseCsvSnapshot", () => {
   it("creates a new source when no inventorySourceId is given", async () => {
     const inventory = fakeInventory()
     const cards = fakeCards()
-    const input = { ...baseInput, inventorySourceId: undefined, newSourceDisplayName: "Pulse Export", newSourceProvider: "PULSE" }
+    const input = {
+      ...baseInput, inventorySourceId: undefined, newSourceDisplayName: "Pulse Export", newSourceProvider: "PULSE", newSourceLanguage: "EN",
+    }
     const result = await importPulseCsvSnapshot(fakeContainer(inventory, cards), input)
     expect(result.kind).toBe("IMPORTED")
     expect(inventory.createOrGetInventorySource).toHaveBeenCalledTimes(1)
+  })
+
+  it("rejects creating a new source with no card language selected", async () => {
+    const inventory = fakeInventory()
+    const cards = fakeCards()
+    const input = { ...baseInput, inventorySourceId: undefined, newSourceDisplayName: "Pulse Export", newSourceProvider: "PULSE" }
+    const result = await importPulseCsvSnapshot(fakeContainer(inventory, cards), input)
+    expect(result.kind).toBe("VALIDATION_FAILED")
+    expect(inventory.createOrGetInventorySource).not.toHaveBeenCalled()
   })
 
   it("rejects source selection input that supplies neither an existing id nor a full new-source spec", async () => {
