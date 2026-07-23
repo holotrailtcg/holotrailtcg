@@ -145,6 +145,8 @@ export const updateTradingCardIdentityBodySchema = z.object({
   cardNumber: z.string().trim().min(1).max(64).regex(CARD_NUMBER_PATTERN, "Card number is not a recognised format.").optional(),
   illustrator: z.string().trim().min(1).max(255).nullish(),
   illustratorConfirmed: z.boolean().optional(),
+  /** Optimistic-concurrency guard — see `updateTradingCardIdentity`'s `expectedUpdatedAt`. */
+  expectedUpdatedAt: z.string().datetime({ offset: true }).nullish(),
   reason: z.string().max(500).optional(),
 }).strict()
 

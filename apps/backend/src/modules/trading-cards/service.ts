@@ -72,6 +72,8 @@ export interface UpdateTradingCardIdentityInput extends AuditContext {
    */
   illustrator?: string | null
   illustratorConfirmed?: boolean
+  /** Optimistic-concurrency guard: an ISO timestamp the caller read `updated_at` as before editing. A mismatch throws `MedusaError.Types.CONFLICT` rather than silently overwriting a change the caller never saw. */
+  expectedUpdatedAt?: string | null
 }
 
 export interface UpdateVariantConditionInput extends AuditContext {
@@ -267,10 +269,26 @@ class TradingCardsModuleService extends MedusaService({
   async updateTradingCardIdentity(input: UpdateTradingCardIdentityInput) {
     return this.manager_.transactional(async (manager) => {
       const [current] = await manager.execute<Record<string, unknown>>(
-        `select id, card_set_id, name, search_name, slug, card_number, card_number_normalised, illustrator, illustrator_confirmed
+        `select id, card_set_id, name, search_name, slug, card_number, card_number_normalised, illustrator, illustrator_confirmed, updated_at
          from trading_card where id = ? and deleted_at is null for update`, [input.id]
       )
       if (!current) throw new MedusaError(MedusaError.Types.NOT_FOUND, "Trading card not found")
+      // Optimistic concurrency: a caller that read the card's state before
+      // editing (e.g. the Admin illustrator-correction dialog) can supply
+      // the `updated_at` it saw. If the row has since changed — someone
+      // else's edit landed in between — this rejects with a distinct
+      // conflict rather than silently overwriting a change the caller never
+      // saw.
+      if (input.expectedUpdatedAt !== undefined && input.expectedUpdatedAt !== null) {
+        const currentUpdatedAt = new Date(current.updated_at as string).getTime()
+        const expected = new Date(input.expectedUpdatedAt).getTime()
+        if (!Number.isNaN(expected) && currentUpdatedAt !== expected) {
+          throw new MedusaError(
+            MedusaError.Types.CONFLICT,
+            "This card was changed by someone else since it was loaded — reload and try again",
+          )
+        }
+      }
       const numbers = input.cardNumber === undefined ? null : cardNumberForms(input.cardNumber)
       // A manually-confirmed illustrator is protected: an unconfirmed incoming
       // value (e.g. an automatic TCGdex re-sync) is silently ignored rather
@@ -310,6 +328,55 @@ class TradingCardsModuleService extends MedusaService({
       const reference = await this.upsertExternalReferenceInTransaction(manager, { ...input, tradingCardId: input.tradingCardId, provider: "TCGDEX", providerIdentifier: input.providerIdentifier, provenance: EXTERNAL_REFERENCE_PROVENANCE.TRUSTED_MANUAL }) as Record<string, unknown>
       await this.recordManualReferenceAudit(manager, input, reference.id as string)
       return reference
+    })
+  }
+
+  /**
+   * Same write as `recordTrustedTcgdexCardReference`, but also returns the
+   * row's exact prior state (or `null` if none existed) so a caller whose
+   * *own* subsequent, separate-module transaction then fails can compensate
+   * — reverting this reference to what it was before, rather than leaving a
+   * trusted reference committed for a rematch that never actually
+   * succeeded. Trading-cards and trading-card-inventory are separate
+   * Medusa modules with separate transactions; this saga-style compensation
+   * is the safe Stage 1 substitute for a true shared transaction, which
+   * this module system does not support.
+   */
+  async recordTrustedTcgdexCardReferenceWithPriorState(input: AuditContext & { tradingCardId: string; providerIdentifier: string; language?: CardLanguage | null }): Promise<{ referenceId: string; priorState: Record<string, unknown> | null }> {
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason }); tradingCardIdSchema.parse(input.tradingCardId); providerIdentifierSchema.parse(input.providerIdentifier)
+    return this.manager_.transactional(async (manager) => {
+      const [priorState] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_external_reference where provider = 'TCGDEX' and provider_identifier = ? and deleted_at is null`,
+        [input.providerIdentifier],
+      )
+      const reference = await this.upsertExternalReferenceInTransaction(manager, { ...input, tradingCardId: input.tradingCardId, provider: "TCGDEX", providerIdentifier: input.providerIdentifier, provenance: EXTERNAL_REFERENCE_PROVENANCE.TRUSTED_MANUAL }) as Record<string, unknown>
+      await this.recordManualReferenceAudit(manager, input, reference.id as string)
+      return { referenceId: reference.id as string, priorState: priorState ?? null }
+    })
+  }
+
+  /** Reverts a `recordTrustedTcgdexCardReferenceWithPriorState` write — restores the row's prior state, or soft-deletes it if it did not exist before. */
+  async compensateTrustedTcgdexCardReference(input: AuditContext & { referenceId: string; priorState: Record<string, unknown> | null }) {
+    auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+    return this.manager_.transactional(async (manager) => {
+      if (input.priorState) {
+        await manager.execute(
+          `update trading_card_external_reference
+           set trading_card_id = ?, card_set_id = ?, trading_card_variant_id = ?, provenance = ?, language = ?, region = ?, raw_payload_note = ?, deleted_at = null, updated_at = now()
+           where id = ?`,
+          [
+            input.priorState.trading_card_id, input.priorState.card_set_id, input.priorState.trading_card_variant_id,
+            input.priorState.provenance, input.priorState.language, input.priorState.region, input.priorState.raw_payload_note,
+            input.referenceId,
+          ],
+        )
+      } else {
+        await manager.execute(`update trading_card_external_reference set deleted_at = now(), updated_at = now() where id = ?`, [input.referenceId])
+      }
+      await this.writeAudit(manager, {
+        ...input, entityType: "EXTERNAL_CARD_REFERENCE", entityId: input.referenceId,
+        action: "TCGDEX_MANUAL_REFERENCE_REVERTED", newValue: { reverted: true, hadPriorState: Boolean(input.priorState) },
+      })
     })
   }
 
@@ -520,9 +587,12 @@ class TradingCardsModuleService extends MedusaService({
    * `tcgdexCardId` alone does not prove the reviewer's chosen set/language —
    * a tampered request could submit a card ID from a different set/language
    * than what the UI actually showed. Requiring the resolved card's set to
-   * match both `tcgdexSetId` (via `provider_set_code`, or a TRUSTED_MANUAL
-   * `SET:` reference when one has been recorded) and `language` closes that
-   * gap without inventing new provider trust.
+   * carry an explicit TRUSTED_MANUAL `SET:` reference (never the merely
+   * automatic `provider_set_code` column, which can itself be the product of
+   * an earlier unreviewed automatic match) and to match `language` closes
+   * that gap without inventing new provider trust. A set with no recorded
+   * trusted reference yields no row here — callers must treat that as "no
+   * existing card/variant", never as an unsafe fallback match.
    */
   async findExistingVariantForTcgdexCard(input: {
     tcgdexCardId: string; tcgdexSetId: string; language: CardLanguage; condition: string; finish: string; specialTreatment: string
@@ -536,16 +606,13 @@ class TradingCardsModuleService extends MedusaService({
        where ref.provider = 'TCGDEX' and ref.provider_identifier = ? and ref.trading_card_id is not null and ref.deleted_at is null
          and tcv.condition = ? and tcv.finish = ? and tcv.special_treatment = ?
          and cs.language = ?
-         and (
-           cs.provider_set_code = ?
-           or exists (
-             select 1 from trading_card_external_reference set_ref
-             where set_ref.card_set_id = cs.id and set_ref.provider = 'TCGDEX' and set_ref.provenance = 'TRUSTED_MANUAL'
-               and set_ref.provider_identifier = ? and set_ref.deleted_at is null
-           )
+         and exists (
+           select 1 from trading_card_external_reference set_ref
+           where set_ref.card_set_id = cs.id and set_ref.provider = 'TCGDEX' and set_ref.provenance = 'TRUSTED_MANUAL'
+             and set_ref.provider_identifier = ? and set_ref.deleted_at is null
          )
        limit 1`,
-      [input.tcgdexCardId, input.condition, input.finish, input.specialTreatment, input.language, input.tcgdexSetId, `SET:${input.tcgdexSetId}`],
+      [input.tcgdexCardId, input.condition, input.finish, input.specialTreatment, input.language, `SET:${input.tcgdexSetId}`],
     )
     return row ? { tradingCardId: row.trading_card_id, tradingCardVariantId: row.trading_card_variant_id } : null
   }
@@ -819,8 +886,30 @@ class TradingCardsModuleService extends MedusaService({
    */
   async retryTcgdexLookupCandidate(input: AuditContext & {
     provider: ExternalProvider; language: CardLanguage; tcgdexSetId: string; cardNumber: string; client: TcgDexLookupDependency
-  }): Promise<{ code: TcgDexMatchResult["code"]; candidate: Record<string, unknown> | null; retried: boolean }> {
+  }): Promise<{ code: TcgDexMatchResult["code"]; providerCode: string | null; candidate: Record<string, unknown> | null; retried: boolean }> {
     auditContextSchema.parse({ actor: input.actor, source: input.source, reason: input.reason })
+
+    // Cheap pre-check, no lock held: skip the network call entirely if this
+    // identity is already a cached MATCHED row.
+    const [existingBefore] = await this.manager_.execute<Record<string, unknown>>(
+      `select * from trading_card_tcgdex_lookup_candidate
+       where provider = ? and language = ? and tcgdex_set_id = ? and card_number = ? and deleted_at is null`,
+      [input.provider, input.language, input.tcgdexSetId, input.cardNumber],
+    )
+    if (existingBefore && existingBefore.match_outcome === "MATCHED") {
+      return { code: "MATCHED" as const, providerCode: null, candidate: existingBefore, retried: false }
+    }
+
+    // The TCGdex network call must never run while holding a DB transaction
+    // or advisory lock — an HTTP round-trip can take seconds, and holding a
+    // Postgres lock for that long blocks every other concurrent retry/import
+    // for no reason. State is re-checked fresh, under the lock, immediately
+    // below before any write is made.
+    const result = await matchTcgdexCard(
+      { language: input.language, setCode: input.tcgdexSetId, cardNumber: input.cardNumber, setIdentity: { tcgdexSetId: input.tcgdexSetId } },
+      input.client,
+    )
+
     return this.manager_.transactional(async (manager) => {
       await manager.execute(
         `select pg_advisory_xact_lock(hashtextextended(?::text, 0))`,
@@ -828,17 +917,15 @@ class TradingCardsModuleService extends MedusaService({
       )
       const [existing] = await manager.execute<Record<string, unknown>>(
         `select * from trading_card_tcgdex_lookup_candidate
-         where provider = ? and language = ? and tcgdex_set_id = ? and card_number = ? and deleted_at is null`,
+         where provider = ? and language = ? and tcgdex_set_id = ? and card_number = ? and deleted_at is null for update`,
         [input.provider, input.language, input.tcgdexSetId, input.cardNumber],
       )
       if (existing && existing.match_outcome === "MATCHED") {
-        return { code: "MATCHED" as const, candidate: existing, retried: false }
+        // A concurrent retry already cached a match while our own network
+        // call was in flight — that result wins; the state re-check exists
+        // precisely so this case is never overwritten.
+        return { code: "MATCHED" as const, providerCode: null, candidate: existing, retried: false }
       }
-
-      const result = await matchTcgdexCard(
-        { language: input.language, setCode: input.tcgdexSetId, cardNumber: input.cardNumber, setIdentity: { tcgdexSetId: input.tcgdexSetId } },
-        input.client,
-      )
 
       // PROVIDER_ERROR/INVALID_LOCAL_IDENTITY are transient/never-cached
       // outcomes (see the cache-semantics rule above) — the previously
@@ -846,15 +933,19 @@ class TradingCardsModuleService extends MedusaService({
       // must survive a failed retry untouched, both so the failed-lookups
       // panel doesn't lose the row and so a reviewer isn't shown a bare
       // "still no match" when the real outcome was a provider outage.
+      // `providerCode` (e.g. TIMEOUT, RATE_LIMITED, NETWORK_ERROR,
+      // SERVER_ERROR) is preserved so callers can distinguish subtypes
+      // instead of collapsing them all into one generic message.
       if (result.code === "PROVIDER_ERROR" || result.code === "INVALID_LOCAL_IDENTITY") {
+        const providerCode = result.code === "PROVIDER_ERROR" ? result.providerCode : null
         await this.writeAudit(manager, {
           ...input, entityType: AUDIT_ENTITY_TYPE.TCGDEX_LOOKUP_CANDIDATE,
           entityId: (existing?.id as string | undefined) ?? `${input.provider}:${input.language}:${input.tcgdexSetId}:${input.cardNumber}`,
           action: AUDIT_ACTION.TCGDEX_LOOKUP_RETRIED,
           oldValue: { previousOutcome: (existing?.match_outcome as string | undefined) ?? null },
-          newValue: { outcome: result.code, transient: true, previousOutcomePreserved: Boolean(existing) },
+          newValue: { outcome: result.code, providerCode, transient: true, previousOutcomePreserved: Boolean(existing) },
         })
-        return { code: result.code, candidate: existing ?? null, retried: true }
+        return { code: result.code, providerCode, candidate: existing ?? null, retried: true }
       }
 
       if (existing) {
@@ -884,7 +975,7 @@ class TradingCardsModuleService extends MedusaService({
         newValue: { outcome: result.code },
       })
 
-      return { code: result.code, candidate, retried: true }
+      return { code: result.code, providerCode: null, candidate, retried: true }
     })
   }
 

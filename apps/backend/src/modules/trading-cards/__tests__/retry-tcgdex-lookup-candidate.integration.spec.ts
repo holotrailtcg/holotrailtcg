@@ -2,6 +2,7 @@ import { MedusaApp } from "@medusajs/framework/modules-sdk"
 import { ContainerRegistrationKeys, createPgConnection } from "@medusajs/framework/utils"
 import { TRADING_CARDS_MODULE } from "../index"
 import { Migration20260723100000 } from "../migrations/Migration20260723100000"
+import { TCGDEX_ERROR_CODE, TcgDexError } from "../tcgdex/errors"
 import type { TcgDexLookupDependency } from "../tcgdex/matching"
 
 /**
@@ -18,13 +19,29 @@ let cards: any
 
 const suffix = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 9)}`
 
-function fakeClient(outcomes: Array<{ code: string; card?: unknown }>): TcgDexLookupDependency {
+/**
+ * `matchTcgdexCard` only converts a thrown `TcgDexError` into a structured
+ * PROVIDER_ERROR result — any other thrown value propagates unchanged (see
+ * `matchTcgdexCard`'s catch block, which rethrows when
+ * `!(error instanceof TcgDexError)`). A plain `Error` here would therefore
+ * make `retryTcgdexLookupCandidate` reject instead of resolving with
+ * `{ code: "PROVIDER_ERROR", ... }`, which is exactly the behaviour these
+ * tests exist to prove — so every simulated provider failure must throw a
+ * real `TcgDexError` with an explicit `providerErrorCode`.
+ */
+function fakeClient(outcomes: Array<{ code: string; card?: unknown; providerErrorCode?: string }>): TcgDexLookupDependency {
   let call = 0
   return {
     getCardBySetAndLocalId: async () => {
       const outcome = outcomes[Math.min(call, outcomes.length - 1)]
       call += 1
-      if (outcome.code === "PROVIDER_ERROR") throw new Error("simulated transient TCGdex failure")
+      if (outcome.code === "PROVIDER_ERROR") {
+        throw new TcgDexError({
+          code: (outcome.providerErrorCode as never) ?? TCGDEX_ERROR_CODE.SERVER_ERROR,
+          message: "simulated transient TCGdex failure",
+          operation: "matching-response",
+        })
+      }
       return outcome.card ?? null
     },
     getCardById: async () => null,
@@ -103,6 +120,7 @@ describe("retryTcgdexLookupCandidate", () => {
     })
 
     expect(result.code).toBe("PROVIDER_ERROR")
+    expect(result.providerCode).toBe("SERVER_ERROR")
     expect(result.candidate).toBeNull()
     const live = await cards.findTcgdexLookupCandidate({ provider: "PULSE", language: "EN", tcgdexSetId: setId, cardNumber })
     expect(live).toBeNull()
@@ -125,6 +143,49 @@ describe("retryTcgdexLookupCandidate", () => {
     const after = await cards.findTcgdexLookupCandidate({ provider: "PULSE", language: "EN", tcgdexSetId: setId, cardNumber })
     expect(after?.id).toBe(before?.id)
     expect(after?.match_outcome).toBe("NO_MATCH")
+  })
+
+  it("preserves the specific TIMEOUT subtype separately from other provider failures", async () => {
+    // Stage 1 remediation: the Admin UI must be able to show "TCGdex timed
+    // out" distinctly from a generic "could not be reached" message —
+    // `providerCode` is how that subtype survives from `matchTcgdexCard`
+    // through to the API response.
+    const setId = `set-${suffix()}`
+    const cardNumber = "003c"
+
+    const result = await cards.retryTcgdexLookupCandidate({
+      actor: "reviewer-1", source: "TCGDEX", provider: "PULSE", language: "EN", tcgdexSetId: setId, cardNumber,
+      client: fakeClient([{ code: "PROVIDER_ERROR", providerErrorCode: "TIMEOUT" }]),
+    })
+
+    expect(result.code).toBe("PROVIDER_ERROR")
+    expect(result.providerCode).toBe("TIMEOUT")
+  })
+
+  it("never calls the TCGdex client at all when a MATCHED row is already cached", async () => {
+    // The TCGdex network call now runs outside any DB transaction/lock (see
+    // the "must never run while holding a transaction" note on
+    // `retryTcgdexLookupCandidate`) — the cheap pre-check that skips it
+    // entirely for an already-MATCHED identity must still run first.
+    const setId = `set-${suffix()}`
+    const cardNumber = "003d"
+    await cards.recordTcgdexLookupCandidate({
+      provider: "PULSE", language: "EN", tcgdexSetId: setId, cardNumber, matchOutcome: "MATCHED",
+      enrichment: { name: "Pikachu" },
+    })
+    let clientCalled = false
+    const client: TcgDexLookupDependency = {
+      getCardBySetAndLocalId: async () => { clientCalled = true; return null },
+      getCardById: async () => null,
+    }
+
+    const result = await cards.retryTcgdexLookupCandidate({
+      actor: "reviewer-1", source: "TCGDEX", provider: "PULSE", language: "EN", tcgdexSetId: setId, cardNumber, client,
+    })
+
+    expect(result.code).toBe("MATCHED")
+    expect(result.retried).toBe(false)
+    expect(clientCalled).toBe(false)
   })
 
   it("records a TCGDEX_LOOKUP_RETRIED audit entry", async () => {

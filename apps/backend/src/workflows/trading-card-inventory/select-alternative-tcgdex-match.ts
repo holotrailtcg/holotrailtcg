@@ -87,7 +87,13 @@ const selectAlternativeTcgdexMatchStep = createStep(
     // Recorded BEFORE the match mutation, and not swallowed on failure — a
     // reference-write failure must abort the whole rematch rather than
     // silently leaving a committed match with no trusted identity behind it.
-    await cards.recordTrustedTcgdexCardReference({
+    // trading-cards and trading-card-inventory are separate Medusa modules
+    // with separate transactions, so this can't be made truly atomic with
+    // the match write below; instead the prior state is captured so that if
+    // the match write then fails, the reference is compensated back to
+    // exactly what it was before — no trusted reference may survive a
+    // failed rematch.
+    const { referenceId, priorState } = await cards.recordTrustedTcgdexCardReferenceWithPriorState({
       actor: input.actor, source: "MANUAL", reason: input.reason ?? null,
       tradingCardId: found.tradingCardId, providerIdentifier: input.tcgdexCardId,
     })
@@ -96,12 +102,24 @@ const selectAlternativeTcgdexMatchStep = createStep(
     // applied-status check fresh (never trusting the pre-check above),
     // records the new match, and writes the ENTRY_MATCH_REMATCHED audit —
     // all inside a single transaction (see `selectAlternativeMatchForEntry`).
-    const { previousVariantId } = await inventory.selectAlternativeMatchForEntry({
-      actor: input.actor, source: "MANUAL", reason: input.reason ?? null,
-      snapshotEntryId: input.snapshotEntryId, tradingCardVariantId: found.tradingCardVariantId,
-      priceLockedVariantIds, previousTcgdexCardId,
-      newTcgdexSetId: input.tcgdexSetId, newTcgdexCardId: input.tcgdexCardId,
-    })
+    let previousVariantId: string | null
+    try {
+      ;({ previousVariantId } = await inventory.selectAlternativeMatchForEntry({
+        actor: input.actor, source: "MANUAL", reason: input.reason ?? null,
+        snapshotEntryId: input.snapshotEntryId, tradingCardVariantId: found.tradingCardVariantId,
+        priceLockedVariantIds, previousTcgdexCardId,
+        newTcgdexSetId: input.tcgdexSetId, newTcgdexCardId: input.tcgdexCardId,
+      }))
+    } catch (error) {
+      // Best-effort compensation: the original error is always what the
+      // caller sees, whether or not the revert itself succeeds. If the
+      // revert also fails, the reference is left for manual review rather
+      // than the real failure being masked.
+      await cards.compensateTrustedTcgdexCardReference({
+        actor: input.actor, source: "MANUAL", reason: input.reason ?? null, referenceId, priorState,
+      }).catch(() => undefined)
+      throw error
+    }
 
     // Stage 1 must not move images itself — warn whenever there was a
     // previous match (the only case where photographs could already exist

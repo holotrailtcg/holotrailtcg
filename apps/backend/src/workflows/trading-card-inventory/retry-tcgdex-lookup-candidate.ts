@@ -14,6 +14,8 @@ export interface RetryTcgdexLookupCandidateInput {
 
 export interface RetryTcgdexLookupCandidateResult {
   code: string
+  /** Present only for a PROVIDER_ERROR outcome — the specific transient subtype (TIMEOUT, RATE_LIMITED, NETWORK_ERROR, SERVER_ERROR, ...), so the Admin UI can show an accurate message instead of one generic "unreachable" toast. */
+  providerCode: string | null
   candidate: Record<string, unknown> | null
   retried: boolean
 }

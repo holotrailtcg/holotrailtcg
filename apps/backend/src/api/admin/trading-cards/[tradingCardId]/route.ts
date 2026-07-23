@@ -30,6 +30,7 @@ export async function PATCH(req: AuthenticatedMedusaRequest, res: MedusaResponse
     id: tradingCardId, actor: adminActor(req), source: "MANUAL", reason: body.reason ?? null,
     cardSetId: body.cardSetId, name: body.name, searchName: body.searchName, slug: body.slug,
     cardNumber: body.cardNumber, illustrator: body.illustrator, illustratorConfirmed: body.illustratorConfirmed,
+    expectedUpdatedAt: body.expectedUpdatedAt ?? null,
   }))
 
   res.status(200).json({ card: saved })
