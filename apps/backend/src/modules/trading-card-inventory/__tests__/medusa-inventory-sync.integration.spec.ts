@@ -307,6 +307,34 @@ describe("syncInventoryProposalToMedusa", () => {
       }
     })
 
+    it("returns PRODUCT_PUBLISH_FAILED after writing stock when the final publication step fails", async () => {
+      const { variant } = await cardVariantFixture()
+      const { productVariant } = await productVariantFixture()
+      await linkTradingCardVariantToProductVariant(variant.id, productVariant.id)
+      const item = await createInventoryItem(`ITEM-${suffix()}`)
+      await linkProductVariantToInventoryItem(productVariant.id, item.id)
+      const location = await createStockLocation(`Loc ${suffix()}`)
+      process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID = location.id
+      const products = container.resolve<IProductModuleService>(Modules.PRODUCT)
+      const publishSpy = jest.spyOn(products, "updateProducts").mockRejectedValueOnce(new Error("publication failed"))
+      try {
+        const result = await syncInventoryProposalToMedusa(container, {
+          proposalId: "tciprop_x", tradingCardVariantId: variant.id, proposedQuantity: 4,
+          attemptToken: "token-1", changeKind: "NEW_HOLDING",
+        })
+
+        expect(result).toMatchObject({ outcome: "FAILED", category: "PRODUCT_PUBLISH_FAILED" })
+        const inventoryService = container.resolve<IInventoryService>(Modules.INVENTORY)
+        const level = await inventoryService.retrieveInventoryLevelByItemAndLocation(item.id, location.id)
+        expect(level.stocked_quantity).toBe(4)
+      } finally {
+        publishSpy.mockRestore()
+        delete process.env.TRADING_CARD_INVENTORY_MEDUSA_STOCK_LOCATION_ID
+      }
+
+      expect((await products.retrieveProduct(productVariant.product_id as string)).status).toBe("draft")
+    })
+
     it("never publishes for a QUANTITY_CHANGE sync", async () => {
       const { variant } = await cardVariantFixture()
       const { productVariant } = await productVariantFixture()

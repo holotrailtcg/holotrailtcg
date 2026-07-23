@@ -115,7 +115,11 @@
             "IMAGE_FOCAL_CHANGED",
             "IMAGE_ARCHIVED",
             "IMAGE_RESTORED",
-            "TCGDEX_LOOKUP_RETRIED"
+            "TCGDEX_LOOKUP_RETRIED",
+            "TCGDEX_MANUAL_REFERENCE_REVERTED",
+            "TCGDEX_MANUAL_REFERENCE_COMPENSATION_SKIPPED_STALE",
+            "TCGDEX_MANUAL_REFERENCE_COMPENSATION_FAILED",
+            "TCGDEX_AMBIGUOUS_CANDIDATE_RESOLVED"
           ],
           "mappedType": "enum"
         },

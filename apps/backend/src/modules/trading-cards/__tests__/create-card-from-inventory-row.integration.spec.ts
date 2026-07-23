@@ -111,7 +111,7 @@ async function createStockLocation(name: string) {
 
 async function createSource() {
   const id = suffix()
-  return inventory.createInventorySource({ displayName: `Create Card Workflow Source ${id}`, provider: "PULSE", actor: "test-actor", source: "MANUAL" })
+  return inventory.createInventorySource({ displayName: `Create Card Workflow Source ${id}`, provider: "PULSE", language: "EN", actor: "test-actor", source: "MANUAL" })
 }
 
 /**

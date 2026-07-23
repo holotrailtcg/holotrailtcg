@@ -393,7 +393,7 @@ class TradingCardsModuleService extends MedusaService({
       if (!current || current.version !== input.writtenVersion) {
         await this.writeAudit(manager, {
           ...input, entityType: "EXTERNAL_CARD_REFERENCE", entityId: input.referenceId,
-          action: "TCGDEX_MANUAL_REFERENCE_COMPENSATION_SKIPPED_STALE",
+          action: AUDIT_ACTION.TCGDEX_MANUAL_REFERENCE_COMPENSATION_SKIPPED_STALE,
           newValue: { reverted: false, reason: current ? "row changed since this saga's write" : "row no longer exists" },
         })
         return
@@ -414,7 +414,7 @@ class TradingCardsModuleService extends MedusaService({
       }
       await this.writeAudit(manager, {
         ...input, entityType: "EXTERNAL_CARD_REFERENCE", entityId: input.referenceId,
-        action: "TCGDEX_MANUAL_REFERENCE_REVERTED", newValue: { reverted: true, hadPriorState: Boolean(input.priorState) },
+        action: AUDIT_ACTION.TCGDEX_MANUAL_REFERENCE_REVERTED, newValue: { reverted: true, hadPriorState: Boolean(input.priorState) },
       })
     })
   }
@@ -431,7 +431,7 @@ class TradingCardsModuleService extends MedusaService({
     return this.manager_.transactional(async (manager) => {
       await this.writeAudit(manager, {
         ...input, entityType: "EXTERNAL_CARD_REFERENCE", entityId: input.referenceId,
-        action: "TCGDEX_MANUAL_REFERENCE_COMPENSATION_FAILED",
+        action: AUDIT_ACTION.TCGDEX_MANUAL_REFERENCE_COMPENSATION_FAILED,
         newValue: { reverted: false, errorMessage: input.errorMessage },
       })
     })
@@ -1026,7 +1026,7 @@ class TradingCardsModuleService extends MedusaService({
       )
       await this.writeAudit(manager, {
         ...input, entityType: "TCGDEX_LOOKUP_CANDIDATE", entityId: input.candidateId,
-        action: "TCGDEX_AMBIGUOUS_CANDIDATE_RESOLVED",
+        action: AUDIT_ACTION.TCGDEX_AMBIGUOUS_CANDIDATE_RESOLVED,
         oldValue: { matchOutcome: "AMBIGUOUS", candidateOptions: options },
         newValue: { matchOutcome: "MATCHED", chosenTcgdexCardId: input.chosenTcgdexCardId },
       })

@@ -214,7 +214,7 @@ const InventoryProposalsPage = () => {
           `/admin/trading-card-inventory/imports/snapshots/${encodeURIComponent(snapshotId)}/sync-ebay-categories`,
           { limit: EBAY_CATEGORY_SYNC_BATCH_SIZE, afterId },
         )
-        totalEligibleCount = batch.totalEligibleCount
+        if (totalEligibleCount === 0) totalEligibleCount = batch.totalEligibleCount
         totals = {
           ruleMatchCount: totals.ruleMatchCount + batch.ruleMatchCount,
           fallbackCount: totals.fallbackCount + batch.fallbackCount,
@@ -269,7 +269,7 @@ const InventoryProposalsPage = () => {
           `/admin/trading-card-inventory/proposals/publish`,
           { snapshotId, ids, limit: PUBLISH_BATCH_SIZE, afterId },
         )
-        totalEligibleCount = batch.totalEligibleCount
+        if (totalEligibleCount === 0) totalEligibleCount = batch.totalEligibleCount
         totals = {
           approvedCount: totals.approvedCount + batch.approvedCount,
           appliedCount: totals.appliedCount + batch.appliedCount,

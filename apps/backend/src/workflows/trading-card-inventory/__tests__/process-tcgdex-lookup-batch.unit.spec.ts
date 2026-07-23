@@ -77,6 +77,22 @@ describe("processTcgdexLookupBatch — fallback-search transient-failure caching
     expect(result.processedThisBatch).toBe(1)
   })
 
+  it("does not cache NO_MATCH when the fallback throws an unknown error", async () => {
+    const { container, cards } = fakeContainer({})
+    matchTcgdexCardMock.mockResolvedValue({ code: "NO_MATCH" })
+    resolveTcgDexAdminClientMock.mockReturnValue({
+      getSetById: jest.fn(async () => {
+        throw new Error("unexpected client failure")
+      }),
+    })
+
+    const result = await processTcgdexLookupBatch(container, { snapshotId: "tcisnap_1", batchSize: 10 })
+
+    expect(cards.recordTcgdexLookupCandidate).not.toHaveBeenCalled()
+    expect(result.processedThisBatch).toBe(0)
+    expect(result.remaining).toBe(1)
+  })
+
   it("caches AMBIGUOUS when the set-scoped fallback search succeeds and finds loosely-matching cards", async () => {
     const { container, cards } = fakeContainer({})
     matchTcgdexCardMock.mockResolvedValue({ code: "NO_MATCH" })

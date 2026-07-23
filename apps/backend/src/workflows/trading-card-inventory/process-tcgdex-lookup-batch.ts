@@ -128,7 +128,7 @@ export async function processTcgdexLookupBatch(
             .slice(0, AMBIGUOUS_CANDIDATE_LIMIT)
             .map((setCard) => ({ tcgdexCardId: setCard.id, localId: setCard.localId, name: setCard.name, image: setCard.image ?? null }))
         } catch (error) {
-          if (error instanceof TcgDexError && error.code !== TCGDEX_ERROR_CODE.NOT_FOUND) continue
+          if (!(error instanceof TcgDexError) || error.code !== TCGDEX_ERROR_CODE.NOT_FOUND) continue
           candidateOptions = []
         }
         if (candidateOptions.length > 0) {

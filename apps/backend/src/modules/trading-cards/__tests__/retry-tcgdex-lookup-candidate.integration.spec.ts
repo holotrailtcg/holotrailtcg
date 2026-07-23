@@ -1,17 +1,10 @@
 import { MedusaApp } from "@medusajs/framework/modules-sdk"
 import { ContainerRegistrationKeys, createPgConnection } from "@medusajs/framework/utils"
 import { TRADING_CARDS_MODULE } from "../index"
-import { Migration20260723100000 } from "../migrations/Migration20260723100000"
-import { Migration20260723150000 } from "../migrations/Migration20260723150000"
 import { TCGDEX_ERROR_CODE, TcgDexError } from "../tcgdex/errors"
 import type { TcgDexLookupDependency } from "../tcgdex/matching"
 
-/**
- * Stage 1: TCGdex failed-lookup retry. NOT RUN this session — no approved,
- * isolated test database connection was available (see the Stage 1
- * continuation report). Run with `npm run test:integration:modules`
- * against the project's approved test database before merging.
- */
+/** Stage 1: TCGdex failed-lookup retry against the isolated test database. */
 let pgConnection: ReturnType<typeof createPgConnection>
 let rootConnection: ReturnType<typeof createPgConnection>
 let medusaApp: Awaited<ReturnType<typeof MedusaApp>>
@@ -43,6 +36,13 @@ function fakeClient(outcomes: Array<{ code: string; card?: unknown; providerErro
           operation: "matching-response",
         })
       }
+      if (outcome.code === "NO_MATCH") {
+        throw new TcgDexError({
+          code: TCGDEX_ERROR_CODE.NOT_FOUND,
+          message: "simulated stable TCGdex miss",
+          operation: "matching-response",
+        })
+      }
       return outcome.card ?? null
     },
     getCardById: async () => null,
@@ -52,23 +52,6 @@ function fakeClient(outcomes: Array<{ code: string; card?: unknown; providerErro
 beforeAll(async () => {
   rootConnection = createPgConnection({ clientUrl: process.env.DATABASE_URL as string })
   pgConnection = (await rootConnection.transaction()) as never
-  // Only re-applies Migration20260723100000's entity_type widening (the
-  // first two of its four queries) — its own action-list widening is stale
-  // and narrower than Migration20260723150000's, which runs right after and
-  // would otherwise be validated (and rejected) against real
-  // TCGDEX_MANUAL_REFERENCE_REVERTED/etc. audit rows the rematch-compensation
-  // saga may already have committed to this shared test database.
-  const entityTypeMigration = new Migration20260723100000(undefined as never, undefined as never)
-  await entityTypeMigration.up()
-  const entityTypeQueries = entityTypeMigration.getQueries().slice(0, 2)
-  for (const query of entityTypeQueries) await pgConnection.raw(String(query))
-  entityTypeMigration.reset()
-
-  const actionMigration = new Migration20260723150000(undefined as never, undefined as never)
-  await actionMigration.up()
-  for (const query of actionMigration.getQueries()) await pgConnection.raw(String(query))
-  actionMigration.reset()
-
   medusaApp = await MedusaApp({
     modulesConfig: { [TRADING_CARDS_MODULE]: { resolve: "./src/modules/trading-cards" } },
     injectedDependencies: { [ContainerRegistrationKeys.PG_CONNECTION]: pgConnection },
@@ -206,7 +189,7 @@ describe("retryTcgdexLookupCandidate", () => {
     const cardNumber = "004"
     const result = await cards.retryTcgdexLookupCandidate({
       actor: "reviewer-1", source: "TCGDEX", provider: "PULSE", language: "EN", tcgdexSetId: setId, cardNumber,
-      client: fakeClient([{ code: "UNRESOLVED_SET" }]),
+      client: fakeClient([{ code: "NO_MATCH" }]),
     })
     const [audit] = (await pgConnection.raw(
       `select * from trading_card_audit_entry where action = 'TCGDEX_LOOKUP_RETRIED' and entity_id = ? order by created_at desc limit 1`,
