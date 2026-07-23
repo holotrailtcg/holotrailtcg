@@ -67,7 +67,7 @@ const AlternativeMatchDialog = ({ snapshotId, entryId, onClose, onMatched }: Alt
         toast.error("No existing card/variant matches this identity yet. Use \"Create card\" to add it first.")
       }
     },
-    onError: () => toast.error("This row could not be rematched. Please try again."),
+    onError: (error: Error) => toast.error(error.message || "This row could not be rematched. Please try again."),
   })
 
   return (

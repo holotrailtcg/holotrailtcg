@@ -63,7 +63,7 @@ const ManageGroupDialog = ({ proposalId, onClose, onChanged }: ManageGroupDialog
       setSelected(new Set())
       refresh()
     },
-    onError: () => toast.error("This split could not be completed. Please try again."),
+    onError: (error: Error) => toast.error(error.message || "This split could not be completed. Please try again."),
   })
 
   const setSeparateListing = useMutation({
@@ -76,10 +76,14 @@ const ManageGroupDialog = ({ proposalId, onClose, onChanged }: ManageGroupDialog
       setSelected(new Set())
       refresh()
     },
-    onError: () => toast.error("This change could not be saved. Please try again."),
+    onError: (error: Error) => toast.error(error.message || "This change could not be saved. Please try again."),
   })
 
-  const canSplit = selected.size > 0 && selected.size < entries.length
+  // Splitting and overriding both mutate the same group's proposal row —
+  // letting both stay clickable while one is in flight is how a reviewer
+  // could fire a conflicting concurrent request against their own dialog.
+  const anyMutationPending = splitMutation.isPending || setSeparateListing.isPending
+  const canSplit = selected.size > 0 && selected.size < entries.length && !anyMutationPending
 
   return (
     <FocusModal open onOpenChange={(open) => { if (!open) onClose() }}>
@@ -123,6 +127,7 @@ const ManageGroupDialog = ({ proposalId, onClose, onChanged }: ManageGroupDialog
             </Button>
             <Button
               variant="secondary"
+              disabled={anyMutationPending}
               isLoading={setSeparateListing.isPending}
               onClick={() => setSeparateListing.mutate(true)}
             >
@@ -130,6 +135,7 @@ const ManageGroupDialog = ({ proposalId, onClose, onChanged }: ManageGroupDialog
             </Button>
             <Button
               variant="secondary"
+              disabled={anyMutationPending}
               isLoading={setSeparateListing.isPending}
               onClick={() => setSeparateListing.mutate(false)}
             >

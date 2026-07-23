@@ -44,11 +44,17 @@ const FailedLookupsPanel = ({ snapshotId, onRetried }: FailedLookupsPanelProps) 
       { tcgdexSetId: candidate.tcgdexSetId, cardNumber: candidate.cardNumber },
     ),
     onSuccess: ({ result }) => {
-      toast.info(result.code === "MATCHED" ? "TCGdex found a match this time." : "TCGdex was checked again — still no match.")
+      if (result.code === "MATCHED") {
+        toast.success("TCGdex found a match this time.")
+      } else if (result.code === "PROVIDER_ERROR" || result.code === "INVALID_LOCAL_IDENTITY") {
+        toast.error("TCGdex could not be reached to retry this lookup — its previous result was kept. Try again shortly.")
+      } else {
+        toast.info("TCGdex was checked again — still no match.")
+      }
       client.invalidateQueries({ queryKey: ["tcgdex-failed-lookups", snapshotId] })
       onRetried()
     },
-    onError: () => toast.error("TCGdex could not be reached. Please try again."),
+    onError: (error: Error) => toast.error(error.message || "TCGdex could not be reached. Please try again."),
   })
 
   const failed = query.data?.failed ?? []

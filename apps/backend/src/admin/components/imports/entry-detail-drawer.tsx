@@ -47,10 +47,12 @@ interface EntryDetailDrawerProps {
   onNext?: () => void
   /** Stage 1: opens the alternative-TCGdex-match dialog for this row. Omitted where rematching doesn't make sense (e.g. no snapshot entry id available). */
   onFindAlternativeMatch?: () => void
+  /** Stage 1: opens the illustrator-correction dialog for this row's already-matched card. Omitted when the row has no resolved trading card yet. */
+  onEditIllustrator?: () => void
 }
 
 /** Full detail for one import row, opened by clicking its table row. */
-const EntryDetailDrawer = ({ snapshotId, row, thumbnail, onClose, onPrevious, onNext, onFindAlternativeMatch }: EntryDetailDrawerProps) => {
+const EntryDetailDrawer = ({ snapshotId, row, thumbnail, onClose, onPrevious, onNext, onFindAlternativeMatch, onEditIllustrator }: EntryDetailDrawerProps) => {
   const [selectedImageIndex, setSelectedImageIndex] = useState(0)
   const { cardNumber, totalNumber } = parseCardNumber(row.providerReference)
   const displayCardNumber = cardNumber ?? row.card?.cardNumber ?? "—"
@@ -216,11 +218,18 @@ const EntryDetailDrawer = ({ snapshotId, row, thumbnail, onClose, onPrevious, on
             )}
           </div>
 
-          {onFindAlternativeMatch && (
-            <div className="border-t pt-4">
-              <Button type="button" variant="secondary" onClick={onFindAlternativeMatch}>
-                Find alternative TCGdex match
-              </Button>
+          {(onFindAlternativeMatch || onEditIllustrator) && (
+            <div className="flex flex-wrap gap-2 border-t pt-4">
+              {onFindAlternativeMatch && (
+                <Button type="button" variant="secondary" onClick={onFindAlternativeMatch}>
+                  Find alternative TCGdex match
+                </Button>
+              )}
+              {onEditIllustrator && (
+                <Button type="button" variant="secondary" onClick={onEditIllustrator}>
+                  Correct illustrator
+                </Button>
+              )}
             </div>
           )}
 

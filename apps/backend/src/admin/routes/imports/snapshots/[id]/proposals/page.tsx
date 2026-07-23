@@ -6,6 +6,7 @@ import CategoryAssignmentDialog from "../../../../../components/imports/category
 import CreateCardDialog from "../../../../../components/imports/create-card-dialog"
 import CardImageThumbnail from "../../../../../components/imports/card-image-thumbnail"
 import AlternativeMatchDialog from "../../../../../components/imports/alternative-match-dialog"
+import EditIllustratorDialog from "../../../../../components/imports/edit-illustrator-dialog"
 import EntryDetailDrawer from "../../../../../components/imports/entry-detail-drawer"
 import FailedLookupsPanel from "../../../../../components/imports/failed-lookups-panel"
 import ManageGroupDialog from "../../../../../components/imports/manage-group-dialog"
@@ -84,6 +85,7 @@ const InventoryProposalsPage = () => {
   const [categoryProposalId, setCategoryProposalId] = useState<string | null>(null)
   const [manageGroupProposalId, setManageGroupProposalId] = useState<string | null>(null)
   const [alternativeMatchEntryId, setAlternativeMatchEntryId] = useState<string | null>(null)
+  const [editIllustratorCardId, setEditIllustratorCardId] = useState<string | null>(null)
 
   const summaryQuery = useQuery({
     queryKey: summaryQueryKey(snapshotId),
@@ -563,6 +565,15 @@ const InventoryProposalsPage = () => {
         />
       )}
 
+      {editIllustratorCardId && (
+        <EditIllustratorDialog
+          key={editIllustratorCardId}
+          tradingCardId={editIllustratorCardId}
+          onClose={() => setEditIllustratorCardId(null)}
+          onSaved={refreshAfterAction}
+        />
+      )}
+
       {manageGroupProposalId && (
         <ManageGroupDialog
           key={manageGroupProposalId}
@@ -600,6 +611,7 @@ const InventoryProposalsPage = () => {
               ? () => setSelectedProposal(visibleRows[selectedIndex + 1])
               : undefined}
             onFindAlternativeMatch={() => setAlternativeMatchEntryId(entry.id)}
+            onEditIllustrator={entry.card?.tradingCardId ? () => setEditIllustratorCardId(entry.card!.tradingCardId) : undefined}
           />
         )
       })()}
