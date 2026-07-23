@@ -2,9 +2,9 @@ import { createStep, createWorkflow, StepResponse, WorkflowResponse } from "@med
 import { MedusaError } from "@medusajs/framework/utils"
 import { TRADING_CARDS_MODULE } from "../../modules/trading-cards"
 import type TradingCardsModuleService from "../../modules/trading-cards/service"
+import type { CardLanguage } from "../../modules/trading-cards/types"
 import { TRADING_CARD_INVENTORY_MODULE } from "../../modules/trading-card-inventory"
 import type TradingCardInventoryModuleService from "../../modules/trading-card-inventory/service"
-import { INVENTORY_AUDIT_ACTION } from "../../modules/trading-card-inventory/types"
 
 export interface SelectAlternativeTcgdexMatchInput {
   actor: string
@@ -60,9 +60,18 @@ const selectAlternativeTcgdexMatchStep = createStep(
     if (!condition || !finish || !specialTreatment) {
       throw new MedusaError(MedusaError.Types.INVALID_DATA, "This row has no resolved condition/finish/special-treatment to rematch against")
     }
+    const entryLanguage = entry.inventory_source_language as string | null
+    if (!entryLanguage) {
+      throw new MedusaError(MedusaError.Types.INVALID_DATA, "This row's inventory source has no configured language")
+    }
 
+    // Server-side proof the submitted card actually belongs to the
+    // submitted set and to this row's own language — a tampered request
+    // could otherwise submit a tcgdexCardId from a different set/language
+    // than what the reviewer's UI actually displayed.
     const found = await cards.findExistingVariantForTcgdexCard({
-      tcgdexCardId: input.tcgdexCardId, condition, finish, specialTreatment,
+      tcgdexCardId: input.tcgdexCardId, tcgdexSetId: input.tcgdexSetId, language: entryLanguage as CardLanguage,
+      condition, finish, specialTreatment,
     })
     if (!found) return new StepResponse({ outcome: "NO_EXISTING_CARD_OR_VARIANT" })
 
@@ -75,14 +84,23 @@ const selectAlternativeTcgdexMatchStep = createStep(
       .filter((variant: Record<string, unknown>) => variant.price_locked)
       .map((variant: Record<string, unknown>) => variant.id as string)
 
+    // Recorded BEFORE the match mutation, and not swallowed on failure — a
+    // reference-write failure must abort the whole rematch rather than
+    // silently leaving a committed match with no trusted identity behind it.
+    await cards.recordTrustedTcgdexCardReference({
+      actor: input.actor, source: "MANUAL", reason: input.reason ?? null,
+      tradingCardId: found.tradingCardId, providerIdentifier: input.tcgdexCardId,
+    })
+
     // The one atomic write: locks the entry row, re-validates the
-    // applied-status check fresh (never trusting the pre-check above), and
-    // records the new match — see `selectAlternativeMatchForEntry` for why
-    // this must be a single transaction rather than a separate read+write.
+    // applied-status check fresh (never trusting the pre-check above),
+    // records the new match, and writes the ENTRY_MATCH_REMATCHED audit —
+    // all inside a single transaction (see `selectAlternativeMatchForEntry`).
     const { previousVariantId } = await inventory.selectAlternativeMatchForEntry({
       actor: input.actor, source: "MANUAL", reason: input.reason ?? null,
       snapshotEntryId: input.snapshotEntryId, tradingCardVariantId: found.tradingCardVariantId,
-      priceLockedVariantIds,
+      priceLockedVariantIds, previousTcgdexCardId,
+      newTcgdexSetId: input.tcgdexSetId, newTcgdexCardId: input.tcgdexCardId,
     })
 
     // Stage 1 must not move images itself — warn whenever there was a
@@ -90,23 +108,6 @@ const selectAlternativeTcgdexMatchStep = createStep(
     // against the old variant) rather than reaching into the image module
     // just to render an exact count.
     const imageReassignmentWarning = Boolean(previousVariantId)
-
-    // Confirmed, reviewer-selected identity — safe to persist as trusted, mirroring the existing manual-reference convention.
-    await cards.recordTrustedTcgdexCardReference({
-      actor: input.actor, source: "MANUAL", reason: input.reason ?? null,
-      tradingCardId: found.tradingCardId, providerIdentifier: input.tcgdexCardId,
-    }).catch(() => undefined)
-
-    await inventory.recordImportLifecycleAudit({
-      actor: input.actor, source: "MANUAL", reason: input.reason ?? null,
-      snapshotId: entry.inventory_snapshot_id as string,
-      action: INVENTORY_AUDIT_ACTION.ENTRY_MATCH_REMATCHED,
-      newValue: {
-        snapshotEntryId: input.snapshotEntryId,
-        previousVariantId, previousTcgdexCardId,
-        newTcgdexSetId: input.tcgdexSetId, newTcgdexCardId: input.tcgdexCardId, newTradingCardVariantId: found.tradingCardVariantId,
-      },
-    })
 
     return new StepResponse({
       outcome: "REMATCHED", tradingCardId: found.tradingCardId, tradingCardVariantId: found.tradingCardVariantId,

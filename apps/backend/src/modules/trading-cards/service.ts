@@ -516,18 +516,36 @@ class TradingCardsModuleService extends MedusaService({
     return row?.provider_identifier ?? null
   }
 
+  /**
+   * `tcgdexCardId` alone does not prove the reviewer's chosen set/language —
+   * a tampered request could submit a card ID from a different set/language
+   * than what the UI actually showed. Requiring the resolved card's set to
+   * match both `tcgdexSetId` (via `provider_set_code`, or a TRUSTED_MANUAL
+   * `SET:` reference when one has been recorded) and `language` closes that
+   * gap without inventing new provider trust.
+   */
   async findExistingVariantForTcgdexCard(input: {
-    tcgdexCardId: string; condition: string; finish: string; specialTreatment: string
+    tcgdexCardId: string; tcgdexSetId: string; language: CardLanguage; condition: string; finish: string; specialTreatment: string
   }): Promise<{ tradingCardId: string; tradingCardVariantId: string } | null> {
     const [row] = await this.manager_.execute<{ trading_card_id: string; trading_card_variant_id: string }>(
       `select tc.id as trading_card_id, tcv.id as trading_card_variant_id
        from trading_card_external_reference ref
        inner join trading_card tc on tc.id = ref.trading_card_id and tc.deleted_at is null
        inner join trading_card_variant tcv on tcv.trading_card_id = tc.id and tcv.deleted_at is null
+       inner join trading_card_set cs on cs.id = tc.card_set_id and cs.deleted_at is null
        where ref.provider = 'TCGDEX' and ref.provider_identifier = ? and ref.trading_card_id is not null and ref.deleted_at is null
          and tcv.condition = ? and tcv.finish = ? and tcv.special_treatment = ?
+         and cs.language = ?
+         and (
+           cs.provider_set_code = ?
+           or exists (
+             select 1 from trading_card_external_reference set_ref
+             where set_ref.card_set_id = cs.id and set_ref.provider = 'TCGDEX' and set_ref.provenance = 'TRUSTED_MANUAL'
+               and set_ref.provider_identifier = ? and set_ref.deleted_at is null
+           )
+         )
        limit 1`,
-      [input.tcgdexCardId, input.condition, input.finish, input.specialTreatment],
+      [input.tcgdexCardId, input.condition, input.finish, input.specialTreatment, input.language, input.tcgdexSetId, `SET:${input.tcgdexSetId}`],
     )
     return row ? { tradingCardId: row.trading_card_id, tradingCardVariantId: row.trading_card_variant_id } : null
   }
@@ -822,31 +840,45 @@ class TradingCardsModuleService extends MedusaService({
         input.client,
       )
 
+      // PROVIDER_ERROR/INVALID_LOCAL_IDENTITY are transient/never-cached
+      // outcomes (see the cache-semantics rule above) — the previously
+      // cached stable failure (NO_MATCH/UNRESOLVED_SET/IDENTITY_MISMATCH)
+      // must survive a failed retry untouched, both so the failed-lookups
+      // panel doesn't lose the row and so a reviewer isn't shown a bare
+      // "still no match" when the real outcome was a provider outage.
+      if (result.code === "PROVIDER_ERROR" || result.code === "INVALID_LOCAL_IDENTITY") {
+        await this.writeAudit(manager, {
+          ...input, entityType: AUDIT_ENTITY_TYPE.TCGDEX_LOOKUP_CANDIDATE,
+          entityId: (existing?.id as string | undefined) ?? `${input.provider}:${input.language}:${input.tcgdexSetId}:${input.cardNumber}`,
+          action: AUDIT_ACTION.TCGDEX_LOOKUP_RETRIED,
+          oldValue: { previousOutcome: (existing?.match_outcome as string | undefined) ?? null },
+          newValue: { outcome: result.code, transient: true, previousOutcomePreserved: Boolean(existing) },
+        })
+        return { code: result.code, candidate: existing ?? null, retried: true }
+      }
+
       if (existing) {
         await manager.execute(`update trading_card_tcgdex_lookup_candidate set deleted_at = now() where id = ?`, [existing.id])
       }
 
-      let candidate: Record<string, unknown> | null = null
-      if (result.code !== "PROVIDER_ERROR" && result.code !== "INVALID_LOCAL_IDENTITY") {
-        const id = generateEntityId(undefined, "tclookup")
-        const reviewStatus = result.code === "MATCHED" ? "PENDING" : null
-        const enrichment = result.code === "MATCHED" ? (result.enrichment as unknown as Record<string, unknown>) : null
-        await manager.execute(
-          `insert into trading_card_tcgdex_lookup_candidate
-             (id, provider, language, tcgdex_set_id, card_number, match_outcome, enrichment, review_status)
-           values (?, ?, ?, ?, ?, ?, ?::jsonb, ?)`,
-          [id, input.provider, input.language, input.tcgdexSetId, input.cardNumber, result.code,
-            enrichment ? JSON.stringify(enrichment) : null, reviewStatus],
-        )
-        const [saved] = await manager.execute<Record<string, unknown>>(
-          `select * from trading_card_tcgdex_lookup_candidate where id = ?`, [id],
-        )
-        candidate = saved
-      }
+      const id = generateEntityId(undefined, "tclookup")
+      const reviewStatus = result.code === "MATCHED" ? "PENDING" : null
+      const enrichment = result.code === "MATCHED" ? (result.enrichment as unknown as Record<string, unknown>) : null
+      await manager.execute(
+        `insert into trading_card_tcgdex_lookup_candidate
+           (id, provider, language, tcgdex_set_id, card_number, match_outcome, enrichment, review_status)
+         values (?, ?, ?, ?, ?, ?, ?::jsonb, ?)`,
+        [id, input.provider, input.language, input.tcgdexSetId, input.cardNumber, result.code,
+          enrichment ? JSON.stringify(enrichment) : null, reviewStatus],
+      )
+      const [saved] = await manager.execute<Record<string, unknown>>(
+        `select * from trading_card_tcgdex_lookup_candidate where id = ?`, [id],
+      )
+      const candidate = saved
 
       await this.writeAudit(manager, {
         ...input, entityType: AUDIT_ENTITY_TYPE.TCGDEX_LOOKUP_CANDIDATE,
-        entityId: (candidate?.id as string | undefined) ?? `${input.provider}:${input.language}:${input.tcgdexSetId}:${input.cardNumber}`,
+        entityId: candidate.id as string,
         action: AUDIT_ACTION.TCGDEX_LOOKUP_RETRIED,
         oldValue: { previousOutcome: (existing?.match_outcome as string | undefined) ?? null },
         newValue: { outcome: result.code },
